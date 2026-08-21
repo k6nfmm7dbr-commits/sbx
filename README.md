@@ -3,7 +3,7 @@
 一条命令装好 sing-box 节点，附带一个只做流量统计的可视化 Web 面板。
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/<你的仓库>/sbx/main/sbx.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh)
 ```
 
 装完后随时用 `sbx` 打开管理菜单。
