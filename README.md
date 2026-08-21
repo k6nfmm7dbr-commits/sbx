@@ -3,7 +3,7 @@
 一条命令装好 sing-box 节点，附带一个只做流量统计的可视化 Web 面板。
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/<你的仓库>/sbx/main/sbx.sh)
 ```
 
 装完后随时用 `sbx` 打开管理菜单。
@@ -61,10 +61,21 @@ bash <(curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/
 > 默认监听 `0.0.0.0` 并用令牌鉴权。如果这台机器暴露在公网，建议在「面板设置 → 4」
 > 切到仅本机访问，然后用 SSH 端口转发查看：`ssh -L 8080:127.0.0.1:<port> user@server`。
 
+## 升级
+
+以后有新功能或修 bug，不用重装，直接：
+
+```bash
+sbx --update
+```
+
+它会从 GitHub 拉最新版、校验后替换本体，**保留你所有节点和流量历史**，然后自动重启服务。已是最新版会直接跳过；想强制重装用 `sbx --update --force`。菜单里的第 8 项「检查更新 / 升级」是同一个功能。
+
 ## 命令行
 
 ```
 sbx                  # 管理菜单
+sbx --update         # 在线升级（保留节点与流量历史）
 sbx --show           # 各节点用量速览
 sbx --links          # 输出分享链接
 sbx --panel-url      # 输出面板地址
@@ -109,19 +120,19 @@ python3 /etc/sbx/panel.py reset node:2  # 只清 2 号节点的历史
 ## 开发
 
 ```
-installer-template.sh   安装器模板（开发时用 SBX_PAYLOAD_DIR 指向本目录）
-src/panel.py            采集 + HTTP 面板
-src/nodes_tool.py       节点管理与分享链接
-web/                    前端（原生 JS + 手绘 SVG，无 CDN 依赖）
-build.py                读模板 + 内嵌资源 → 生成根目录自包含 sbx.sh
-sbx.sh                  构建产物：用户 curl 执行的单文件（请勿手改）
+sbx.sh              安装器模板（开发时用 SBX_PAYLOAD_DIR 指向本目录）
+src/panel.py        采集 + HTTP
+src/nodes_tool.py   节点管理
+web/                前端
+build.py            生成 dist/sbx.sh（内嵌全部资源的单文件发布版）
+test_*.py/.sh       测试
 ```
 
-改完源码后运行 `python3 build.py` 重新生成根目录的 `sbx.sh`，再提交。
+发布：`python3 build.py` → 把 `dist/sbx.sh` 推到仓库，用户 curl 这个文件。
 
-沙箱测试（不碰真实系统，把整套装到 /tmp 前缀下）：
+沙箱测试（不碰真实系统）：
 
 ```
 SBX_ROOT=/tmp/x SBX_NO_SERVICE=1 SBX_PAYLOAD_DIR=$PWD \
-SBX_SB_BIN=/path/to/sing-box bash installer-template.sh
+SBX_SB_BIN=/path/to/sing-box bash sbx.sh
 ```

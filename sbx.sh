@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 APP_NAME="SBX"
-APP_VERSION="1.0.0"
+APP_VERSION="1.1.0"
 RAW_URL="${SBX_RAW_URL:-https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh}"
 
 # SBX_ROOT 仅用于测试/沙箱安装（把整套目录挪到前缀下），正常安装留空
@@ -158,12 +158,30 @@ pick_port() {
 
 public_ip() {
   local ip=""
-  for u in "https://api64.ipify.org" "https://ifconfig.me/ip" "https://icanhazip.com"; do
-    ip=$(curl -fsSL -m 8 "$u" 2>/dev/null | tr -d '[:space:]') || true
-    [[ -n "$ip" ]] && { echo "$ip"; return 0; }
+  # 强制 IPv4：用 -4 + 纯 IPv4 探测端点，避免返回 IPv6 地址
+  for u in "https://api.ipify.org" "https://ipv4.icanhazip.com" "https://ifconfig.me/ip" "https://4.ipw.cn"; do
+    ip=$(curl -4 -fsSL -m 8 "$u" 2>/dev/null | tr -d '[:space:]') || true
+    # 只接受合法 IPv4
+    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && { echo "$ip"; return 0; }
+    ip=""
   done
+  # 兜底：本机默认路由的 IPv4 源地址
   ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}') || true
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && { echo "$ip"; return 0; }
+  # 最后再试本机第一个非回环 IPv4
+  ip=$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1) || true
   echo "${ip:-127.0.0.1}"
+}
+
+# 探测公网 IPv6（仅在用户主动要 v6 时使用）
+public_ip6() {
+  local ip=""
+  for u in "https://api6.ipify.org" "https://ipv6.icanhazip.com"; do
+    ip=$(curl -6 -fsSL -m 8 "$u" 2>/dev/null | tr -d '[:space:]') || true
+    [[ "$ip" == *:* ]] && { echo "$ip"; return 0; }
+    ip=""
+  done
+  echo ""
 }
 
 host_for_uri() {  # IPv6 需要方括号
@@ -787,8 +805,11 @@ menu_host() {
   banner
   printf '%s分享地址%s\n\n' "$C_B" "$C_RESET"
   printf '  当前: %s\n' "$(py_json get-host || echo '(未设置，自动探测)')"
-  printf '  探测: %s\n\n' "$(public_ip)"
-  printf '输入用于分享链接的域名或 IP (回车用探测值): '
+  printf '  IPv4: %s\n' "$(public_ip)"
+  local v6; v6=$(public_ip6)
+  [[ -n "$v6" ]] && printf '  IPv6: %s\n' "$v6"
+  echo
+  printf '输入用于分享链接的域名或 IP (回车用 IPv4 探测值): '
   read -r h || true
   [[ -z "$h" ]] && h="$(public_ip)"
   py_json set-host "$h" >/dev/null
@@ -839,10 +860,11 @@ import json
 try: print(len(json.load(open('$NODES_JSON'))))
 except Exception: print(0)
 ")
-    printf '  节点: %s%s%s 个    sing-box: %s    面板: %s\n' \
+    printf '  节点: %s%s%s 个    sing-box: %s    面板: %s    %sv%s%s\n' \
       "$C_B" "$nnum" "$C_RESET" \
       "$(sb_running && echo "${C_GREEN}●${C_RESET}" || echo "${C_RED}●${C_RESET}")" \
-      "$(panel_running && echo "${C_GREEN}●${C_RESET}" || echo "${C_RED}●${C_RESET}")"
+      "$(panel_running && echo "${C_GREEN}●${C_RESET}" || echo "${C_RED}●${C_RESET}")" \
+      "$C_DIM" "$APP_VERSION" "$C_RESET"
     printf '  面板: %s%s%s\n\n' "$C_CYAN" "$(panel_url)" "$C_RESET"
     echo "  1) 添加节点"
     echo "  2) 删除节点"
@@ -851,7 +873,8 @@ except Exception: print(0)
     echo "  5) 面板设置"
     echo "  6) 服务管理"
     echo "  7) 设置分享地址（域名/IP）"
-    echo "  8) 卸载"
+    echo "  8) 检查更新 / 升级"
+    echo "  9) 卸载"
     echo "  0) 退出"
     echo
     printf '请选择: '
@@ -864,7 +887,8 @@ except Exception: print(0)
       5) menu_panel_settings ;;
       6) menu_service ;;
       7) menu_host ;;
-      8) uninstall_all ;;
+      8) do_update; pause ;;
+      9) uninstall_all ;;
       0|"") clear 2>/dev/null || true; exit 0 ;;
       *) warn "无效选择"; sleep 1 ;;
     esac
@@ -891,6 +915,104 @@ install_self() {
 exec bash "$SELF_PATH" "\$@"
 EOF
   chmod +x "$CMD_PATH"
+}
+
+# ---------------------------------------------------------------- 在线升级
+# 从 RAW_URL 拉取最新脚本 → 校验 → 替换本体 → 用新脚本重写内置资源并重启服务。
+# 全程保留 nodes.json / panel.json / traffic.db，不动节点与历史流量。
+remote_version() {  # 从下载的脚本里提取 APP_VERSION
+  grep -m1 '^APP_VERSION=' "$1" 2>/dev/null | sed -E 's/^APP_VERSION="?([^"]+)"?.*/\1/'
+}
+
+ver_ge() {  # ver_ge A B  → A >= B ?（点分版本比较）
+  [[ "$1" == "$2" ]] && return 0
+  local IFS=.
+  local a=($1) b=($2) i
+  for ((i=0; i<${#a[@]} || i<${#b[@]}; i++)); do
+    local x=${a[i]:-0} y=${b[i]:-0}
+    ((10#$x > 10#$y)) && return 0
+    ((10#$x < 10#$y)) && return 1
+  done
+  return 0
+}
+
+do_update() {
+  local force="${1:-}"
+  banner
+  printf '%s在线升级%s\n\n' "$C_B" "$C_RESET"
+  require_root
+  detect_platform
+
+  local tmp new_ver
+  tmp=$(mktemp)
+  info "从 GitHub 拉取最新版本..."
+  if ! curl -fsSL -m 60 -o "$tmp" "$(gh_url "$RAW_URL")"; then
+    rm -f "$tmp"; die "下载失败，可设置 SBX_GH_PROXY 使用镜像后重试"
+  fi
+  # 基本完整性校验：语法 + 必须含内置资源标记
+  if ! bash -n "$tmp" 2>/dev/null; then
+    rm -f "$tmp"; die "下载的脚本语法校验失败，已放弃升级（未改动现有安装）"
+  fi
+  if ! grep -q "_sbx_unpack\|write_payload" "$tmp"; then
+    rm -f "$tmp"; die "下载的脚本缺少内置资源，可能不是发布版，已放弃升级"
+  fi
+
+  new_ver=$(remote_version "$tmp")
+  [[ -z "$new_ver" ]] && new_ver="unknown"
+  info "当前版本: $APP_VERSION    最新版本: $new_ver"
+
+  if [[ "$new_ver" != "unknown" ]] && ver_ge "$APP_VERSION" "$new_ver" && [[ "$force" != "--force" ]]; then
+    rm -f "$tmp"
+    ok "已是最新版本，无需升级"
+    printf '%s如需强制重装当前版本，运行: sbx --update --force%s\n' "$C_DIM" "$C_RESET"
+    return 0
+  fi
+
+  # 备份当前本体，便于回滚
+  cp -f "$SELF_PATH" "$SELF_PATH.bak" 2>/dev/null || true
+  cat "$tmp" > "$SELF_PATH"
+  chmod +x "$SELF_PATH"
+  rm -f "$tmp"
+  ok "脚本已更新到 $new_ver，正在应用..."
+
+  # 交给新脚本重写内置资源并重启（用内部标记，避免重复整套安装流程）
+  if bash "$SELF_PATH" --apply-update; then
+    ok "升级完成 → v$new_ver"
+    [[ -t 0 ]] && { pause; exec bash "$SELF_PATH"; }
+  else
+    warn "应用失败，回滚到升级前版本"
+    [[ -f "$SELF_PATH.bak" ]] && { cat "$SELF_PATH.bak" > "$SELF_PATH"; chmod +x "$SELF_PATH"; }
+    bash "$SELF_PATH" --apply-update >/dev/null 2>&1 || true
+    die "升级未成功，已恢复原版本"
+  fi
+}
+
+# 仅重写内置资源 + 重启服务（升级时由新脚本调用；保留所有用户数据）
+apply_update() {
+  require_root
+  detect_platform
+  [[ -f "$PANEL_CONF" ]] || die "未检测到已安装的 SBX，无法应用升级"
+  install -d -m 0755 "$APP_DIR" "$WEB_DIR"
+  info "更新面板与工具文件..."
+  write_payload                       # 覆盖 panel.py / nodes_tool.py / web，不动 nodes.json / panel.json / db
+  install_self                        # 刷新 /usr/local/bin/sbx 封装
+  setup_services                      # 服务单元可能有更新
+  # 节点 schema 或计数规则若有变化，重建一次（幂等，配置校验失败会保留旧配置）
+  if [[ -s "$NODES_JSON" ]]; then
+    py_json sync >/dev/null 2>&1 || true
+    if [[ -f "$SB_CONF.candidate" ]]; then
+      if "$SB_BIN" check -c "$SB_CONF.candidate" >/dev/null 2>&1; then
+        mv -f "$SB_CONF.candidate" "$SB_CONF"; py_json commit >/dev/null 2>&1 || true
+      else
+        rm -f "$SB_CONF.candidate"; py_json rollback >/dev/null 2>&1 || true
+      fi
+    fi
+  fi
+  svc_do restart sing-box || true
+  fw_apply
+  svc_do restart sbx-panel || svc_do start sbx-panel || true
+  ok "已重启 sing-box 与面板"
+  return 0
 }
 
 do_install() {
@@ -971,6 +1093,8 @@ main() {
     --panel-url) panel_url; exit 0 ;;
     --show) python3 "$PANEL_PY" show; exit 0 ;;
     --links) py_json links --host "$(py_json get-host)"; exit 0 ;;
+    --update|update|upgrade) do_update "${2:-}"; exit $? ;;
+    --apply-update) apply_update; exit $? ;;   # 内部使用：升级时由新脚本调用
     --uninstall) require_root; detect_platform; uninstall_all ;;
     --version) echo "$APP_NAME v$APP_VERSION"; exit 0 ;;
     -h|--help)
@@ -982,6 +1106,8 @@ $APP_NAME v$APP_VERSION — sing-box 节点 + 精确流量面板
 用法:   sbx [选项]
 
 选项:
+  --update           在线升级到最新版本（保留节点与流量历史）
+  --update --force   强制重装当前/最新版本
   --show             命令行查看流量统计
   --links            输出节点分享链接
   --panel-url        输出面板访问地址
