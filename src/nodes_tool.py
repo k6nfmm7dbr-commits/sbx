@@ -8,12 +8,14 @@ nodes_tool.py — 节点增删改与分享链接生成
 
 用法:
   add <type> --port N [...]     新增节点 -> 输出候选配置路径 + 节点 id
+  edit <id> [--port|--sni|--ports] 修改已装节点
   remove <id>                   删除节点
   list                          列出节点
-  links [id]                    输出分享链接
+  links [id] [--host6 IP]       输出分享链接（有 IPv6 则附 IPv6 版）
   port-used <port>              端口是否已被现有节点占用（退出码 0=占用）
-  set-host <host>               设置分享链接使用的地址
-  get-host                      读取分享链接地址
+  set-host <host>               设置分享链接使用的地址（IPv4/域名）
+  set-host6 [host]              设置 IPv6 分享地址（留空=清除）
+  get-host / get-host6          读取分享地址
   sync                          按 nodes.json 重建 inbounds（修复错位）
 """
 
@@ -159,19 +161,23 @@ def write_candidate(cfg):
 # ------------------------------------------------------------------ 分享链接
 def share_host():
     st = load_state()
-    h = st.get("host") or ""
-    return h
+    return st.get("host") or ""
+
+
+def share_host6():
+    st = load_state()
+    return st.get("host6") or ""
 
 
 def uri_host(h):
     return "[%s]" % h if (":" in h and not h.startswith("[")) else h
 
 
-def node_link(node, host=None):
+def node_link(node, host=None, label_suffix=""):
     host = host or share_host() or "SERVER_IP"
     h = uri_host(host)
     t = node["type"]
-    name = urllib.parse.quote(node.get("name") or t)
+    name = urllib.parse.quote((node.get("name") or t) + label_suffix)
     port = node["port"]
 
     if t == "vless":
@@ -187,7 +193,8 @@ def node_link(node, host=None):
 
     if t == "vmess":
         obj = {
-            "v": "2", "ps": node.get("name") or "vmess", "add": host, "port": str(port),
+            "v": "2", "ps": (node.get("name") or "vmess") + label_suffix,
+            "add": host, "port": str(port),
             "id": node["uuid"], "aid": "0", "scy": "auto",
             "net": "ws" if node.get("path") else "tcp",
             "type": "none", "host": "", "path": node.get("path", ""), "tls": "",
@@ -226,8 +233,13 @@ def node_link(node, host=None):
     return ""
 
 
-def subscription(nodes, host=None):
-    links = [node_link(n, host) for n in nodes]
+def subscription(nodes, host=None, host6=None):
+    """生成订阅。若提供 host6（IPv6），每个节点额外附一条 IPv6 版本链接。"""
+    links = []
+    for n in nodes:
+        links.append(node_link(n, host))
+        if host6:
+            links.append(node_link(n, host6, label_suffix="-IPv6"))
     body = "\n".join(l for l in links if l)
     return base64.b64encode(body.encode()).decode()
 
@@ -371,12 +383,16 @@ def cmd_links(args):
         nodes = [n for n in nodes if str(n["id"]) == str(args.id)]
         if not nodes:
             raise SystemExit("未找到节点 id=%s" % args.id)
+    host6 = args.host6 if args.host6 is not None else share_host6()
     if args.sub:
-        print(subscription(nodes, args.host))
+        print(subscription(nodes, args.host, host6 or None))
         return 0
     for n in nodes:
         print("### %s (%s, 端口 %s)" % (n.get("name"), n["type"], n["port"]))
         print(node_link(n, args.host))
+        if host6:
+            print("# IPv6:")
+            print(node_link(n, host6, label_suffix="-IPv6"))
         print()
     return 0
 
@@ -408,8 +424,25 @@ def cmd_set_host(args):
     return 0
 
 
+def cmd_set_host6(args):
+    st = load_state()
+    v = (args.host or "").strip()
+    if v:
+        st["host6"] = v
+    else:
+        st.pop("host6", None)      # 空值 = 清除 IPv6
+    write_json(STATE_JSON, st)
+    print(v)
+    return 0
+
+
 def cmd_get_host(args):
     print(share_host())
+    return 0
+
+
+def cmd_get_host6(args):
+    print(share_host6())
     return 0
 
 
@@ -452,12 +485,16 @@ def main():
     k = sub.add_parser("links")
     k.add_argument("id", nargs="?")
     k.add_argument("--host")
+    k.add_argument("--host6", nargs="?", const="", default=None)
     k.add_argument("--sub", action="store_true")
     k.set_defaults(func=cmd_links)
 
     p = sub.add_parser("port-used"); p.add_argument("port"); p.set_defaults(func=cmd_port_used)
     sh = sub.add_parser("set-host"); sh.add_argument("host"); sh.set_defaults(func=cmd_set_host)
     gh = sub.add_parser("get-host"); gh.set_defaults(func=cmd_get_host)
+    sh6 = sub.add_parser("set-host6"); sh6.add_argument("host", nargs="?", default="")
+    sh6.set_defaults(func=cmd_set_host6)
+    gh6 = sub.add_parser("get-host6"); gh6.set_defaults(func=cmd_get_host6)
 
     args = ap.parse_args()
     sys.exit(args.func(args))

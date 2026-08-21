@@ -117,6 +117,7 @@ tbody tr:hover { background: color-mix(in srgb, var(--down) 7%, transparent); }
 .bar > i { display: block; height: 100%; background: linear-gradient(90deg, var(--down), var(--up)); }
 .pct { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .live { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.conns { color: var(--down); font-variant-numeric: tabular-nums; }
 .empty { color: var(--muted); text-align: center; padding: 26px 0; font-size: 13.5px; }
 
 /* 各节点用量：窄屏改用卡片，宽屏用表格 */

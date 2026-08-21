@@ -232,7 +232,8 @@ function renderSummary(s) {
   document.getElementById('kpi-rate-up').textContent = live ? fmtRate(rt.rx) : '—';
   document.getElementById('kpi-rate-down').textContent = live ? fmtRate(rt.tx) : '—';
   document.getElementById('kpi-nodes').textContent = s.nodes.length;
-  document.getElementById('kpi-day').textContent = '统计日期 ' + s.day;
+  document.getElementById('kpi-conns').textContent =
+    'TCP 连接 ' + (typeof s.conns_total === 'number' ? s.conns_total : '—');
 
   document.getElementById('foot-note').textContent =
     '数据来源：内核 ' + (s.backend === 'nft' ? 'nftables' : 'iptables')
@@ -258,13 +259,16 @@ function renderNodes(s) {
   var grandSum = nodes.reduce(function (t, n) { return t + n[key].rx + n[key].tx; }, 0) || 1;
 
   if (!nodes.length) {
-    tbody.innerHTML = '<tr><td colspan="11" class="empty">还没有节点，先用 sbx 菜单添加一个</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="12" class="empty">还没有节点，先用 sbx 菜单添加一个</td></tr>';
     cards.innerHTML = '<div class="empty">还没有节点，先用 sbx 菜单添加一个</div>';
     return;
   }
 
   function portText(n) {
     return n.ports ? (n.port ? n.port + ',' + n.ports : n.ports) : (n.port || '—');
+  }
+  function connText(n) {
+    return (typeof n.conns === 'number') ? String(n.conns) : '—';
   }
 
   tbody.innerHTML = nodes.map(function (n) {
@@ -274,6 +278,7 @@ function renderNodes(s) {
       + '<td><div class="node-name">' + esc(n.name) + '</div></td>'
       + '<td><span class="chip">' + esc(n.type || '—') + '</span></td>'
       + '<td class="num">' + esc(portText(n)) + '</td>'
+      + '<td class="num"><b class="conns">' + connText(n) + '</b></td>'
       + '<td class="num up">' + fmtBytes(td.rx) + '</td>'
       + '<td class="num down">' + fmtBytes(td.tx) + '</td>'
       + '<td class="num"><b>' + fmtBytes(td.rx + td.tx) + '</b></td>'
@@ -292,7 +297,8 @@ function renderNodes(s) {
     return '<div class="ncard">'
       + '<div class="ncard-top"><span class="ncard-name">' + esc(n.name) + '</span>'
       + '<span class="chip">' + esc(n.type || '—') + '</span></div>'
-      + '<div class="ncard-port">端口 ' + esc(portText(n)) + '</div>'
+      + '<div class="ncard-port">端口 ' + esc(portText(n))
+      + '　·　<span class="conns">TCP 连接 ' + connText(n) + '</span></div>'
       + '<div class="ncard-grid" style="margin-top:9px">'
       + '<div><div class="ncell-label">今日合计</div>'
       + '<div class="ncell-value">' + fmtBytes(td.rx + td.tx) + '</div>'

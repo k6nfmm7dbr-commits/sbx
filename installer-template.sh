@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 APP_NAME="SBX"
-APP_VERSION="1.2.0"
+APP_VERSION="1.4.0"
 RAW_URL="${SBX_RAW_URL:-https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh}"
 
 # SBX_ROOT 仅用于测试/沙箱安装（把整套目录挪到前缀下），正常安装留空
@@ -173,12 +173,15 @@ public_ip() {
   echo "${ip:-127.0.0.1}"
 }
 
-# 探测公网 IPv6（仅在用户主动要 v6 时使用）
+# 探测公网 IPv6：能通过 IPv6 访问外网才算"可用"，否则视为无
 public_ip6() {
   local ip=""
-  for u in "https://api6.ipify.org" "https://ipv6.icanhazip.com"; do
+  for u in "https://api6.ipify.org" "https://ipv6.icanhazip.com" "https://6.ipw.cn"; do
     ip=$(curl -6 -fsSL -m 8 "$u" 2>/dev/null | tr -d '[:space:]') || true
-    [[ "$ip" == *:* ]] && { echo "$ip"; return 0; }
+    # 合法 IPv6：含冒号且只有十六进制/冒号，排除链路本地 fe80::
+    if [[ "$ip" == *:* && "$ip" =~ ^[0-9A-Fa-f:]+$ && "${ip,,}" != fe80:* ]]; then
+      echo "$ip"; return 0
+    fi
     ip=""
   done
   echo ""
@@ -523,13 +526,20 @@ add_anytls() {
 }
 
 show_links_for_last() {
-  local last
+  local last host6
   last=$(python3 -c "
 import json
 d=json.load(open('$NODES_JSON'))
 print(d[-1]['id'] if d else '')
 ")
-  [[ -n "$last" ]] && { hr; py_json links "$last" --host "$(py_json get-host)"; }
+  [[ -z "$last" ]] && return 0
+  host6=$(py_json get-host6)
+  hr
+  if [[ -n "$host6" ]]; then
+    py_json links "$last" --host "$(py_json get-host)" --host6 "$host6"
+  else
+    py_json links "$last" --host "$(py_json get-host)"
+  fi
 }
 
 # ---------------------------------------------------------------- 服务单元
@@ -778,21 +788,38 @@ if n: print('%s\t%s\t%s\t%s' % (n['type'], n.get('sni',''), n.get('port',''), n.
     # reality 改了 SNI 后 handshake 目标也变了，节点已在 sync 时重建；提示重新分享
     printf '%s提示：修改后分享链接已变化，请重新导出发给客户端。%s\n' "$C_DIM" "$C_RESET"
     hr
-    py_json links "$id" --host "$(py_json get-host)"
+    local h6; h6=$(py_json get-host6)
+    if [[ -n "$h6" ]]; then
+      py_json links "$id" --host "$(py_json get-host)" --host6 "$h6"
+    else
+      py_json links "$id" --host "$(py_json get-host)"
+    fi
   fi
   pause
 }
 
 menu_show_links() {
   banner
-  local host
+  local host host6
   host=$(py_json get-host); [[ -z "$host" ]] && host="$(public_ip)"
-  printf '%s节点分享链接%s  (地址: %s)\n' "$C_B" "$C_RESET" "$host"
+  host6=$(py_json get-host6)
+  printf '%s节点分享链接%s  (IPv4: %s%s)\n' "$C_B" "$C_RESET" "$host" \
+    "$([[ -n "$host6" ]] && echo "  IPv6: $host6")"
   hr
-  py_json links --host "$host"
+  if [[ -n "$host6" ]]; then
+    py_json links --host "$host" --host6 "$host6"
+  else
+    py_json links --host "$host"
+    printf '%s本机未检测到公网 IPv6，仅提供 IPv4 链接。%s\n' "$C_DIM" "$C_RESET"
+    printf '%s（如已开通 IPv6，可在「设置分享地址」里重新探测）%s\n' "$C_DIM" "$C_RESET"
+  fi
   hr
   printf '%s订阅内容 (Base64，可保存为文件供客户端导入):%s\n' "$C_DIM" "$C_RESET"
-  py_json links --sub --host "$host"
+  if [[ -n "$host6" ]]; then
+    py_json links --sub --host "$host" --host6 "$host6"
+  else
+    py_json links --sub --host "$host"
+  fi
   echo
   pause
 }
@@ -879,16 +906,35 @@ menu_service() {
 menu_host() {
   banner
   printf '%s分享地址%s\n\n' "$C_B" "$C_RESET"
-  printf '  当前: %s\n' "$(py_json get-host || echo '(未设置，自动探测)')"
-  printf '  IPv4: %s\n' "$(public_ip)"
-  local v6; v6=$(public_ip6)
-  [[ -n "$v6" ]] && printf '  IPv6: %s\n' "$v6"
+  printf '  当前 IPv4: %s\n' "$(py_json get-host || echo '(未设置)')"
+  local cur6; cur6=$(py_json get-host6)
+  printf '  当前 IPv6: %s\n' "${cur6:-（无）}"
   echo
-  printf '输入用于分享链接的域名或 IP (回车用 IPv4 探测值): '
+  info "重新探测中..."
+  local v4 v6; v4=$(public_ip); v6=$(public_ip6)
+  printf '  探测 IPv4: %s\n' "$v4"
+  printf '  探测 IPv6: %s\n' "${v6:-（本机无可用公网 IPv6）}"
+  echo
+  printf '输入用于分享链接的域名或 IPv4 (回车用探测值 %s): ' "$v4"
   read -r h || true
-  [[ -z "$h" ]] && h="$(public_ip)"
+  [[ -z "$h" ]] && h="$v4"
   py_json set-host "$h" >/dev/null
-  ok "已设置为 $h"
+  ok "IPv4 分享地址已设为 $h"
+
+  if [[ -n "$v6" ]]; then
+    printf '是否用探测到的 IPv6 (%s) 作为分享地址? [Y/n] ' "$v6"
+    read -r yn || true
+    if [[ "${yn,,}" != "n" ]]; then
+      py_json set-host6 "$v6" >/dev/null
+      ok "IPv6 分享地址已设为 $v6（分享链接将附 IPv6 版本）"
+    else
+      py_json set-host6 "" >/dev/null
+      info "已关闭 IPv6 分享链接"
+    fi
+  else
+    py_json set-host6 "" >/dev/null
+    info "本机未检测到可用公网 IPv6，分享链接仅提供 IPv4"
+  fi
   pause
 }
 
@@ -1106,9 +1152,18 @@ do_install() {
   install_self
   setup_services
 
-  local host
+  local host host6
   host="$(public_ip)"
   py_json set-host "$host" >/dev/null 2>&1 || true
+  info "探测 IPv6 支持..."
+  host6="$(public_ip6)"
+  if [[ -n "$host6" ]]; then
+    py_json set-host6 "$host6" >/dev/null 2>&1 || true
+    ok "检测到公网 IPv6：$host6（分享链接将同时提供 IPv6 版本）"
+  else
+    py_json set-host6 "" >/dev/null 2>&1 || true
+    info "未检测到可用的公网 IPv6，分享链接仅提供 IPv4 版本"
+  fi
 
   start_all
   fw_apply
@@ -1133,6 +1188,9 @@ except Exception: print(0)
   printf '\n%s提示%s\n' "$C_B" "$C_RESET"
   printf '  · 随时运行 %ssbx%s 打开管理菜单\n' "$C_CYAN" "$C_RESET"
   printf '  · 首次使用请在菜单「1) 添加节点」创建你要的节点\n'
+  if [[ -n "$host6" ]]; then
+    printf '  · 本机支持 IPv6，添加节点后会同时给出 IPv4 与 IPv6 两条分享链接\n'
+  fi
   printf '  · 面板需要令牌访问；如需仅本机访问，可在「面板设置」中切换\n'
   printf '  · 若服务器有云防火墙/安全组，请放行节点端口与面板端口 %s\n' "$(panel_get port)"
   echo

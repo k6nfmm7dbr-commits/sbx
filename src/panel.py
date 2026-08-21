@@ -609,6 +609,7 @@ def build_summary(conf, con, collector=None):
     nodes = load_nodes(conf)
     totals = q_totals(con)
     rates = q_rate(con, conf)
+    conns = count_tcp_conns(nodes)
     today = today_str(conf)
     today_rows = {
         r["scope"]: dict(r)
@@ -636,6 +637,7 @@ def build_summary(conf, con, collector=None):
             "today": {k: t.get(k, 0) for k in zero},
             "total": {k: a.get(k, 0) for k in zero},
             "rate": r,
+            "conns": conns.get(n["id"]),
         })
         for k in zero:
             agg_today[k] += t.get(k, 0)
@@ -662,6 +664,7 @@ def build_summary(conf, con, collector=None):
             "tx": sum(v["tx"] for k, v in rates.items() if k.startswith("node:")),
         },
         "rate_known": bool(rates),
+        "conns_total": sum(v for v in conns.values() if v),
     }
 
 
@@ -927,6 +930,64 @@ def node_protocols(node):
     if net in ("tcp", "udp"):
         return [net]
     return ["tcp", "udp"]
+
+
+# --------------------------------------------------------------------------
+# TCP 连接数（读 /proc/net/tcp[6] 内核 socket 表，按监听端口归属到节点）
+# --------------------------------------------------------------------------
+
+TCP_PROC_FILES = ("/proc/net/tcp", "/proc/net/tcp6")
+TCP_ESTABLISHED = "01"     # /proc/net/tcp 里的连接状态码：ESTABLISHED
+
+
+def _parse_proc_tcp(text, established_only=True):
+    """解析 /proc/net/tcp(6) 文本，返回本地端口列表（十六进制转十进制）。"""
+    ports = []
+    lines = text.splitlines()
+    for line in lines[1:]:                      # 跳过表头
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        local, st = parts[1], parts[3]
+        if ":" not in local:
+            continue
+        if established_only and st != TCP_ESTABLISHED:
+            continue
+        try:
+            ports.append(int(local.rsplit(":", 1)[1], 16))
+        except ValueError:
+            continue
+    return ports
+
+
+def count_tcp_conns(nodes):
+    """
+    返回 {node_id: 已建立TCP连接数 或 None}。
+    纯 UDP 节点（hysteria2 / tuic）没有 TCP 连接概念，返回 None（前端显示 —）。
+    数据来自内核 /proc/net/tcp[6]，是服务器当前真实的 ESTABLISHED socket。
+    """
+    port_hits = {}
+    for path in TCP_PROC_FILES:
+        try:
+            with open(path, "r") as f:
+                text = f.read()
+        except OSError:
+            continue
+        for port in _parse_proc_tcp(text):
+            port_hits[port] = port_hits.get(port, 0) + 1
+
+    result = {}
+    for n in nodes:
+        if "tcp" not in node_protocols(n):
+            result[n["id"]] = None
+            continue
+        cnt = 0
+        for lo, hi in parse_ports(n):
+            for p, c in port_hits.items():
+                if lo <= p <= hi:
+                    cnt += c
+        result[n["id"]] = cnt
+    return result
 
 
 def gen_nft(conf, nodes, epoch=None):
