@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>sing-box 流量面板</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="dot" id="health-dot" aria-hidden="true"></span>
+    <h1>sing-box 流量统计</h1>
+  </div>
+  <div class="topbar-meta">
+    <span id="meta-backend" class="tag">—</span>
+    <span id="meta-clock" class="clock">—</span>
+  </div>
+</header>
+
+<main>
+  <section class="cards" aria-label="总览">
+    <article class="card">
+      <div class="card-label">今日总用量</div>
+      <div class="card-value" id="kpi-today-total">—</div>
+      <div class="card-sub">
+        <span class="up">↑ <b id="kpi-today-up">—</b></span>
+        <span class="down">↓ <b id="kpi-today-down">—</b></span>
+      </div>
+    </article>
+    <article class="card">
+      <div class="card-label">累计总用量</div>
+      <div class="card-value" id="kpi-all-total">—</div>
+      <div class="card-sub">
+        <span class="up">↑ <b id="kpi-all-up">—</b></span>
+        <span class="down">↓ <b id="kpi-all-down">—</b></span>
+      </div>
+    </article>
+    <article class="card">
+      <div class="card-label">实时速率</div>
+      <div class="card-value" id="kpi-rate">—</div>
+      <div class="card-sub">
+        <span class="up">↑ <b id="kpi-rate-up">—</b></span>
+        <span class="down">↓ <b id="kpi-rate-down">—</b></span>
+      </div>
+    </article>
+    <article class="card">
+      <div class="card-label">节点数量</div>
+      <div class="card-value" id="kpi-nodes">—</div>
+      <div class="card-sub"><span id="kpi-day">—</span></div>
+    </article>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>每日流量</h2>
+      <div class="seg" role="group" aria-label="天数范围">
+        <button data-days="7">7 天</button>
+        <button data-days="30" class="on">30 天</button>
+        <button data-days="90">90 天</button>
+      </div>
+    </div>
+    <div class="chart-wrap"><div id="chart-daily" class="chart"></div></div>
+    <div class="legend">
+      <span><i class="sw up"></i>上传（用户上传）</span>
+      <span><i class="sw down"></i>下载（用户下载）</span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>实时速率（近 30 分钟）</h2>
+      <span class="hint" id="live-hint">—</span>
+    </div>
+    <div class="chart-wrap"><div id="chart-live" class="chart"></div></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>各节点用量</h2>
+      <div class="seg" role="group" aria-label="排序与范围">
+        <button data-scope="today" class="on">按今日</button>
+        <button data-scope="total">按累计</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table id="node-table">
+        <thead>
+          <tr>
+            <th>节点</th><th>类型</th><th>端口</th>
+            <th class="num">今日↑</th><th class="num">今日↓</th><th class="num">今日合计</th>
+            <th class="num">累计↑</th><th class="num">累计↓</th><th class="num">累计合计</th>
+            <th class="num">实时</th><th class="bar-col">占比</th>
+          </tr>
+        </thead>
+        <tbody id="node-tbody"></tbody>
+      </table>
+    </div>
+    <div id="node-cards" class="node-cards"></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>单节点每日明细</h2>
+      <select id="node-select" aria-label="选择节点"></select>
+    </div>
+    <div class="chart-wrap"><div id="chart-node" class="chart"></div></div>
+  </section>
+
+  <footer class="foot">
+    <span id="foot-note">—</span>
+    <a id="csv-link" href="/api/export" download>导出 CSV</a>
+  </footer>
+</main>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<script src="app.js"></script>
+</body>
+</html>
