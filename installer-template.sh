@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 APP_NAME="SBX"
-APP_VERSION="1.1.0"
+APP_VERSION="1.2.0"
 RAW_URL="${SBX_RAW_URL:-https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh}"
 
 # SBX_ROOT 仅用于测试/沙箱安装（把整套目录挪到前缀下），正常安装留空
@@ -708,6 +708,81 @@ menu_remove_node() {
   pause
 }
 
+menu_edit_node() {
+  banner
+  printf '%s修改节点（端口 / SNI）%s\n\n' "$C_B" "$C_RESET"
+  py_json list
+  echo
+  printf '输入要修改的节点 ID (回车取消): '
+  read -r id || true
+  [[ -z "$id" ]] && return 0
+  # 取该节点信息
+  local info type sni port ports
+  info=$(python3 -c "
+import json
+d=json.load(open('$NODES_JSON'))
+n=next((x for x in d if str(x['id'])==str('$id')), None)
+if n: print('%s\t%s\t%s\t%s' % (n['type'], n.get('sni',''), n.get('port',''), n.get('ports','')))
+")
+  [[ -z "$info" ]] && { warn "未找到节点 $id"; pause; return 1; }
+  type=$(echo "$info" | cut -f1); sni=$(echo "$info" | cut -f2)
+  port=$(echo "$info" | cut -f3); ports=$(echo "$info" | cut -f4)
+
+  printf '\n节点类型: %s   当前端口: %s\n' "$type" "$port"
+  [[ -n "$sni" ]] && printf '当前 SNI: %s\n' "$sni"
+  [[ -n "$ports" ]] && printf '当前端口范围(跳跃): %s\n' "$ports"
+  echo
+
+  local args=("$id")
+
+  printf '新端口 (回车不改): '
+  read -r np || true
+  if [[ -n "$np" ]]; then
+    valid_port "$np" || { warn "端口无效"; pause; return 1; }
+    if py_json port-used "$np" >/dev/null 2>&1; then
+      # 允许改成自己当前端口（等于没改）
+      [[ "$np" != "$port" ]] && { warn "端口 $np 已被其它节点占用"; pause; return 1; }
+    fi
+    port_busy "$np" && [[ "$np" != "$port" ]] && {
+      printf '%s端口 %s 已被系统其它进程监听，仍要使用? [y/N] %s' "$C_YEL" "$np" "$C_RESET"
+      read -r yn || true; [[ "${yn,,}" == "y" ]] || { pause; return 1; }
+    }
+    args+=(--port "$np")
+  fi
+
+  # 仅对支持 SNI 的类型询问
+  case "$type" in
+    vless|trojan|hysteria2|tuic|anytls)
+      printf '新 SNI 伪装域名 (回车不改): '
+      read -r ns || true
+      if [[ -n "$ns" ]]; then
+        [[ "$ns" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || { warn "域名格式无效"; pause; return 1; }
+        args+=(--sni "$ns")
+      fi ;;
+  esac
+
+  # hysteria2 额外支持端口跳跃范围
+  if [[ "$type" == "hysteria2" ]]; then
+    printf '端口跳跃范围 如 20000-30000 (回车不改，输入 - 清空): '
+    read -r nr || true
+    if [[ "$nr" == "-" ]]; then args+=(--ports "")
+    elif [[ -n "$nr" ]]; then args+=(--ports "$nr"); fi
+  fi
+
+  if [[ ${#args[@]} -le 1 ]]; then echo "未做任何修改"; pause; return 0; fi
+
+  local out
+  out=$(py_json edit "${args[@]}" 2>&1) || { warn "$out"; pause; return 1; }
+  if commit_node; then
+    ok "节点 $id 已更新：$(echo "$out" | python3 -c "import json,sys;print(', '.join(json.load(sys.stdin).get('changed',[])))" 2>/dev/null || echo '完成')"
+    # reality 改了 SNI 后 handshake 目标也变了，节点已在 sync 时重建；提示重新分享
+    printf '%s提示：修改后分享链接已变化，请重新导出发给客户端。%s\n' "$C_DIM" "$C_RESET"
+    hr
+    py_json links "$id" --host "$(py_json get-host)"
+  fi
+  pause
+}
+
 menu_show_links() {
   banner
   local host
@@ -867,28 +942,30 @@ except Exception: print(0)
       "$C_DIM" "$APP_VERSION" "$C_RESET"
     printf '  面板: %s%s%s\n\n' "$C_CYAN" "$(panel_url)" "$C_RESET"
     echo "  1) 添加节点"
-    echo "  2) 删除节点"
-    echo "  3) 查看节点与分享链接"
-    echo "  4) 流量统计"
-    echo "  5) 面板设置"
-    echo "  6) 服务管理"
-    echo "  7) 设置分享地址（域名/IP）"
-    echo "  8) 检查更新 / 升级"
-    echo "  9) 卸载"
+    echo "  2) 修改节点（端口 / SNI）"
+    echo "  3) 删除节点"
+    echo "  4) 查看节点与分享链接"
+    echo "  5) 流量统计"
+    echo "  6) 面板设置"
+    echo "  7) 服务管理"
+    echo "  8) 设置分享地址（域名/IP）"
+    echo "  9) 检查更新 / 升级"
+    echo " 10) 卸载"
     echo "  0) 退出"
     echo
     printf '请选择: '
     read -r c || true
     case "$c" in
       1) menu_add_node ;;
-      2) menu_remove_node ;;
-      3) menu_show_links ;;
-      4) menu_traffic ;;
-      5) menu_panel_settings ;;
-      6) menu_service ;;
-      7) menu_host ;;
-      8) do_update; pause ;;
-      9) uninstall_all ;;
+      2) menu_edit_node ;;
+      3) menu_remove_node ;;
+      4) menu_show_links ;;
+      5) menu_traffic ;;
+      6) menu_panel_settings ;;
+      7) menu_service ;;
+      8) menu_host ;;
+      9) do_update; pause ;;
+      10) uninstall_all ;;
       0|"") clear 2>/dev/null || true; exit 0 ;;
       *) warn "无效选择"; sleep 1 ;;
     esac
@@ -1033,51 +1110,34 @@ do_install() {
   host="$(public_ip)"
   py_json set-host "$host" >/dev/null 2>&1 || true
 
-  # 首次安装：自动建一个 VLESS Reality 节点，开箱即用
+  start_all
+  fw_apply
+
   local nnum
   nnum=$(python3 -c "
 import json
 try: print(len(json.load(open('$NODES_JSON'))))
 except Exception: print(0)
 ")
-  if [[ "$nnum" == "0" ]]; then
-    info "创建默认 VLESS Reality 节点"
-    local uuid kp priv pub sid port
-    port=443
-    port_busy 443 && port=$(pick_port)
-    uuid=$(rand_uuid)
-    kp=$("$SB_BIN" generate reality-keypair)
-    priv=$(echo "$kp" | awk '/PrivateKey/{print $2}')
-    pub=$(echo "$kp" | awk '/PublicKey/{print $2}')
-    sid=$(rand_hex 8)
-    py_json add vless --port "$port" --name "reality-$port" --uuid "$uuid" \
-      --sni www.microsoft.com --flow xtls-rprx-vision \
-      --private-key "$priv" --public-key "$pub" --short-id "$sid" >/dev/null
-    if "$SB_BIN" check -c "$SB_CONF.candidate" >/dev/null 2>&1; then
-      mv -f "$SB_CONF.candidate" "$SB_CONF"
-      py_json commit >/dev/null
-    else
-      warn "默认节点配置校验失败，已跳过"
-      py_json rollback >/dev/null 2>&1 || true
-    fi
-  fi
-
-  start_all
-  fw_apply
 
   banner
   ok "安装完成"
   hr
-  printf '%s节点分享链接%s\n' "$C_B" "$C_RESET"
-  py_json links --host "$host" || true
+  if [[ "$nnum" == "0" ]]; then
+    printf '%s还没有任何节点。%s在菜单里选「1) 添加节点」即可创建。\n' "$C_B" "$C_RESET"
+  else
+    printf '%s节点分享链接%s\n' "$C_B" "$C_RESET"
+    py_json links --host "$host" || true
+  fi
   show_panel_info
   printf '\n%s提示%s\n' "$C_B" "$C_RESET"
   printf '  · 随时运行 %ssbx%s 打开管理菜单\n' "$C_CYAN" "$C_RESET"
+  printf '  · 首次使用请在菜单「1) 添加节点」创建你要的节点\n'
   printf '  · 面板需要令牌访问；如需仅本机访问，可在「面板设置」中切换\n'
   printf '  · 若服务器有云防火墙/安全组，请放行节点端口与面板端口 %s\n' "$(panel_get port)"
   echo
   if [[ ! -t 0 ]]; then
-    printf '%s管道运行模式下不进入交互菜单，安装已完成。%s\n' "$C_DIM" "$C_RESET"
+    printf '%s管道运行模式下不进入交互菜单，安装已完成。运行 sbx 打开菜单添加节点。%s\n' "$C_DIM" "$C_RESET"
     return 0
   fi
   pause

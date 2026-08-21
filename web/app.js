@@ -2,7 +2,9 @@
 'use strict';
 
 var TOKEN = new URLSearchParams(location.search).get('token') || '';
-var state = { days: 30, sortScope: 'today', nodeId: null, summary: null };
+var state = { days: 30, sortScope: 'today', nodeId: null, summary: null, range: '30m' };
+
+var RANGE_LABEL = { '30m': '近 30 分钟', '2h': '近 2 小时', '1d': '近 1 天', '7d': '近 7 天', '30d': '近 30 天' };
 
 function api(path, params) {
   var u = new URL(path, location.origin);
@@ -26,6 +28,18 @@ function fmtBytes(n) {
 }
 function fmtRate(n) { return fmtBytes(n) + '/s'; }
 function fmtDay(s) { return s ? s.slice(5) : ''; }
+function fmtClock(ts) {
+  var d = new Date(ts * 1000);
+  return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
+}
+function fmtDate(ts) {
+  var d = new Date(ts * 1000);
+  return (d.getMonth() + 1) + '/' + d.getDate();
+}
+function fmtDateTime(ts) {
+  var d = new Date(ts * 1000);
+  return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + ('0' + d.getHours()).slice(-2) + ':00';
+}
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
     return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
@@ -169,7 +183,7 @@ function drawArea(host, points, opts) {
       class: 'axis', x: x, y: H - 6,
       'text-anchor': f === 0 ? 'start' : (f === 1 ? 'end' : 'middle')
     });
-    lb.textContent = new Date(ts * 1000).toTimeString().slice(0, 5);
+    lb.textContent = (opts.fmtX || fmtClock)(ts);
     svg.appendChild(lb);
   });
 
@@ -220,9 +234,6 @@ function renderSummary(s) {
   document.getElementById('kpi-nodes').textContent = s.nodes.length;
   document.getElementById('kpi-day').textContent = '统计日期 ' + s.day;
 
-  var lag = s.last_sample ? Math.max(0, s.now - s.last_sample) : -1;
-  document.getElementById('live-hint').textContent =
-    lag < 0 ? '尚未采集' : ('最后采样 ' + lag + ' 秒前');
   document.getElementById('foot-note').textContent =
     '数据来源：内核 ' + (s.backend === 'nft' ? 'nftables' : 'iptables')
     + ' 计数器（精确字节数）· 统计时区 ' + (s.tz || 'local')
@@ -330,10 +341,13 @@ function drawDaily() {
 }
 function drawSeries() {
   if (!cache.series) return;
-  var iv = (state.summary && state.summary.interval) || 5;
-  drawArea(document.getElementById('chart-live'), cache.series.map(function (p) {
-    return { ts: p.ts, rx: p.rx / iv, tx: p.tx / iv };
-  }), { label: '实时速率曲线' });
+  var d = cache.series;
+  var bucket = d.bucket || ((state.summary && state.summary.interval) || 5);
+  var fmtX = (state.range === '7d' || state.range === '30d') ? fmtDate
+    : (state.range === '1d' ? fmtDateTime : fmtClock);
+  drawArea(document.getElementById('chart-live'), d.points.map(function (p) {
+    return { ts: p.ts, rx: p.rx / bucket, tx: p.tx / bucket };
+  }), { label: '速率曲线', fmtX: fmtX });
 }
 function drawNodeDaily() {
   if (!cache.nodeDaily) return;
@@ -348,9 +362,18 @@ function loadDaily() {
   }).catch(function (e) { toast(e.message); });
 }
 function loadSeries() {
-  return api('/api/series', { minutes: 30 }).then(function (d) {
-    cache.series = d.series;
+  return api('/api/series', { range: state.range }).then(function (d) {
+    cache.series = d;
     drawSeries();
+    var n = (d.points || []).length;
+    var el = document.getElementById('live-hint');
+    if (el) {
+      el.textContent = RANGE_LABEL[state.range] + ' · '
+        + (state.range === '30m' || state.range === '2h'
+            ? '每点 ' + (d.bucket || 5) + ' 秒'
+            : (d.bucket >= 86400 ? '每点 1 天' : '每点 1 小时'))
+        + '（' + n + ' 点）';
+    }
   }).catch(function (e) { toast(e.message); });
 }
 function loadNodeDaily() {
@@ -379,6 +402,14 @@ document.querySelectorAll('.seg [data-scope]').forEach(function (b) {
     if (state.summary) renderNodes(state.summary);
   });
 });
+document.querySelectorAll('.seg [data-range]').forEach(function (b) {
+  b.addEventListener('click', function () {
+    document.querySelectorAll('.seg [data-range]').forEach(function (x) { x.classList.remove('on'); });
+    b.classList.add('on');
+    state.range = b.dataset.range;
+    loadSeries();
+  });
+});
 document.getElementById('node-select').addEventListener('change', function (e) {
   state.nodeId = e.target.value;
   loadNodeDaily();
@@ -395,9 +426,12 @@ window.addEventListener('resize', function () {
 loadSummary().then(function () { loadDaily(); loadSeries(); });
 setInterval(function () {
   if (document.hidden) return;
-  loadSummary(); loadSeries();
+  loadSummary();
+  // 短范围才需要秒级刷新；长范围（1天/7天/30天）随分钟级定时器刷新即可
+  if (state.range === '30m' || state.range === '2h') loadSeries();
 }, 5000);
 setInterval(function () {
   if (document.hidden) return;
   loadDaily(); loadNodeDaily();
+  if (state.range === '1d' || state.range === '7d' || state.range === '30d') loadSeries();
 }, 60000);

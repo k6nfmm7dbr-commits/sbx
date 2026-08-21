@@ -69,10 +69,21 @@
 
   <section class="panel">
     <div class="panel-head">
-      <h2>实时速率（近 30 分钟）</h2>
-      <span class="hint" id="live-hint">—</span>
+      <h2>速率曲线</h2>
+      <div class="seg" role="group" aria-label="速率时间范围">
+        <button data-range="30m" class="on">近30分钟</button>
+        <button data-range="2h">近2小时</button>
+        <button data-range="1d">近1天</button>
+        <button data-range="7d">近7天</button>
+        <button data-range="30d">近30天</button>
+      </div>
     </div>
     <div class="chart-wrap"><div id="chart-live" class="chart"></div></div>
+    <div class="legend">
+      <span><i class="sw up"></i>上传（用户上传）</span>
+      <span><i class="sw down"></i>下载（用户下载）</span>
+      <span class="hint" id="live-hint" style="margin-left:auto">—</span>
+    </div>
   </section>
 
   <section class="panel">

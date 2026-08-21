@@ -290,6 +290,56 @@ def cmd_remove(args):
     return 0
 
 
+# 各类型允许修改 sni 的（自签证书类 + reality）
+SNI_TYPES = ("vless", "trojan", "hysteria2", "tuic", "anytls")
+
+
+def cmd_edit(args):
+    """修改现有节点的端口 / SNI。只改指定字段，其余保持不变。"""
+    nodes = load_nodes()
+    target = None
+    for n in nodes:
+        if str(n["id"]) == str(args.id):
+            target = n
+            break
+    if target is None:
+        raise SystemExit("未找到节点 id=%s" % args.id)
+
+    changed = []
+    if args.port:
+        newp = int(args.port)
+        if not (1 <= newp <= 65535):
+            raise SystemExit("端口需在 1-65535")
+        # 不能和其它节点端口冲突
+        for n in nodes:
+            if str(n["id"]) == str(target["id"]):
+                continue
+            if int(n.get("port", 0)) == newp:
+                raise SystemExit("端口 %d 已被节点 %s 使用" % (newp, n["id"]))
+        target["port"] = newp
+        changed.append("端口→%d" % newp)
+
+    if args.sni:
+        if target["type"] not in SNI_TYPES:
+            raise SystemExit("%s 类型节点没有 SNI 可改" % target["type"])
+        target["sni"] = args.sni
+        changed.append("SNI→%s" % args.sni)
+
+    if args.ports is not None:
+        target["ports"] = args.ports.strip()
+        changed.append("端口范围→%s" % (args.ports.strip() or "(清空)"))
+
+    if not changed:
+        raise SystemExit("未指定要修改的内容（--port / --sni / --ports）")
+
+    cfg = rebuild_config(nodes)
+    cand = write_candidate(cfg)
+    write_json(NODES_JSON + ".candidate", nodes)
+    print(json.dumps({"id": target["id"], "changed": changed, "candidate": cand,
+                      "nodes_candidate": NODES_JSON + ".candidate"}, ensure_ascii=False))
+    return 0
+
+
 def cmd_sync(args):
     nodes = load_nodes()
     cfg = rebuild_config(nodes)
@@ -388,6 +438,13 @@ def main():
     s = sub.add_parser("sync"); s.set_defaults(func=cmd_sync)
     c = sub.add_parser("commit"); c.set_defaults(func=cmd_commit)
     rb = sub.add_parser("rollback"); rb.set_defaults(func=cmd_rollback)
+
+    e = sub.add_parser("edit")
+    e.add_argument("id")
+    e.add_argument("--port")
+    e.add_argument("--sni")
+    e.add_argument("--ports")
+    e.set_defaults(func=cmd_edit)
 
     l = sub.add_parser("list"); l.add_argument("--json", action="store_true")
     l.set_defaults(func=cmd_list)
