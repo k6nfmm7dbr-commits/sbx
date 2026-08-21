@@ -364,12 +364,19 @@ class Collector(threading.Thread):
     def __init__(self, conf):
         super().__init__(name="collector")
         self.conf = conf
-        self.con = db_connect(conf)
+        # 不在这里建连接：SQLite 连接绑定创建它的线程，
+        # 而 run() 在子线程执行。连接改为在首次使用它的线程里惰性创建。
+        self.con = None
         self.backend = make_backend(conf)
         self.stop_flag = threading.Event()
         self.last_error = ""
         self.last_ok_ts = 0
         self.repair_at = 0
+
+    def _ensure_con(self):
+        if self.con is None:
+            self.con = db_connect(self.conf)
+        return self.con
 
     # ---- 状态读写 ----
     def _load_state(self):
@@ -426,6 +433,7 @@ class Collector(threading.Thread):
 
     # ---- 单轮采集 ----
     def tick(self):
+        con = self._ensure_con()
         ts = int(time.time())
         snapshot = self.backend.read()          # 抛异常由调用方处理
         epoch = snapshot_epoch(snapshot)

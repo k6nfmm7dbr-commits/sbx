@@ -231,6 +231,7 @@ install_sing_box() {
   local found
   found=$(find "$tmp" -type f -name sing-box | head -1)
   [[ -n "$found" ]] || { rm -rf "$tmp"; die "压缩包中未找到 sing-box"; }
+  install -d -m 0755 "$BIN_DIR"
   install -m 0755 "$found" "$SB_BIN"
   # 部分构建附带 libcronet.so（NaiveProxy 用），一并放到同目录
   local lib
