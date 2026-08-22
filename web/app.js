@@ -8,7 +8,7 @@
 'use strict';
 
 var TOKEN = new URLSearchParams(location.search).get('token') || '';
-var state = { days: 30, sortScope: 'today', nodeId: null, summary: null, live: null };
+var state = { days: 60, sortScope: 'today', nodeId: null, summary: null, live: null };
 
 var inflight = {};
 function api(path, params) {
@@ -225,10 +225,10 @@ function renderExcelTable(hostId, rows) {
 }
 function drawDaily() { if(cache.daily) renderExcelTable('daily-table',cache.daily); }
 function drawNodeDaily() { if(cache.nodeDaily) renderExcelTable('node-daily-table',cache.nodeDaily); }
-function loadDaily() { return api('/api/daily', { days: state.days }).then(function (d) { cache.daily = d.days; drawDaily(); }).catch(function (e) { toast(e.message); }); }
+function loadDaily() { return api('/api/daily', { days: 60 }).then(function (d) { cache.daily = d.days; drawDaily(); }).catch(function (e) { toast(e.message); }); }
 function loadNodeDaily() {
   if (state.nodeId == null) return Promise.resolve();
-  return api('/api/daily', { days: state.days, scope: 'node:' + state.nodeId })
+  return api('/api/daily', { days: 60, scope: 'node:' + state.nodeId })
     .then(function (d) { cache.nodeDaily = d.days; drawNodeDaily(); }).catch(function (e) { toast(e.message); });
 }
 
@@ -255,7 +255,6 @@ function bindSeg(attr, cb) {
     });
   });
 }
-bindSeg('days', function (v) { state.days = Number(v); loadDaily(); loadNodeDaily(); });
 bindSeg('scope', function (v) { state.sortScope = v; if (state.summary) renderNodesStatic(state.summary); });
 document.getElementById('node-select').addEventListener('change', function (e) { state.nodeId = e.target.value; loadNodeDaily(); });
 if (TOKEN) document.getElementById('csv-link').href = '/api/export?token=' + encodeURIComponent(TOKEN);
