@@ -76,7 +76,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/
 
 实时速率走轻量 `/api/live`，默认约每 2 秒刷新；历史概览低频刷新；请求防重入，实时数字短时缓动，节点实时列增量更新，页面后台暂停轮询。
 
-当前发布版本为 v2.5.8。实时速率底层使用真实 `duration_ms`，严格按字节/真实耗时计算；首次启动、规则换代、计数器归零不产生假峰；samples只保留2分钟。
+当前发布版本为 v2.5.9。实时速率底层使用真实 `duration_ms`，严格按字节/真实耗时计算；首次启动、规则换代、计数器归零不产生假峰；samples只保留2分钟。
 
 ## 升级
 

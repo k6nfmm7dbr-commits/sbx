@@ -236,8 +236,6 @@ tbody tr:hover { background: color-mix(in srgb, var(--down) 8%, transparent); }
   .excel-table th,.excel-table td { padding:7px 8px; }
   .excel-scroll { overflow-x:auto; }
 }
-.precision-note { display:flex;align-items:center;gap:7px;margin-top:10px;font-size:10.5px;color:var(--muted); }
-.pulse-line { width:5px;height:5px;border-radius:50%;background:var(--up);box-shadow:0 0 8px var(--up); }
 .table-caption { display:block; margin-top:2px; font-size:11px; color:var(--muted); }
 
 .foot {

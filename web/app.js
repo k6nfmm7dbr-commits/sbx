@@ -100,8 +100,6 @@ function renderSummary(s) {
   state.summary = s;
   setText('meta-backend', '');
   setText('meta-clock', '');
-  setText('precision-label', '内核 ' + (s.backend === 'nft' ? 'nftables' : 'iptables') + ' 精确计数 · IP层字节');
-  setText('refresh-label', '每 ' + s.interval + ' 秒刷新');
   easeTo('kpi-today-total', s.today.rx + s.today.tx, fmtBytes);
   easeTo('kpi-today-up', s.today.rx, fmtBytes);
   easeTo('kpi-today-down', s.today.tx, fmtBytes);
