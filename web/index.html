@@ -47,8 +47,8 @@
         <span class="mini-value" id="kpi-conns">—</span>
       </div>
       <div class="mini">
-        <span class="mini-label">节点</span>
-        <span class="mini-value" id="kpi-nodes">—</span>
+        <span class="mini-label">UDP 会话</span>
+        <span class="mini-value" id="kpi-conns-udp">—</span>
       </div>
       <div class="mini">
         <span class="mini-label">今日流量</span>
@@ -56,7 +56,7 @@
         <span class="mini-sub"><i class="up" id="kpi-today-up">—</i> <i class="down" id="kpi-today-down">—</i></span>
       </div>
       <div class="mini">
-        <span class="mini-label">累计流量</span>
+        <span class="mini-label">累计流量 · <span id="kpi-nodes">—</span> 节点</span>
         <span class="mini-value" id="kpi-all-total">—</span>
         <span class="mini-sub"><i class="up" id="kpi-all-up">—</i> <i class="down" id="kpi-all-down">—</i></span>
       </div>
@@ -111,7 +111,8 @@
         <thead>
           <tr>
             <th>节点</th><th>类型</th><th>端口</th>
-            <th class="num">连接</th>
+            <th class="num" title="ESTABLISHED 状态的 TCP 连接数">TCP</th>
+            <th class="num" title="有对端的 UDP 会话 socket 数">UDP</th>
             <th class="num">实时</th>
             <th class="num">今日↑</th><th class="num">今日↓</th><th class="num">今日</th>
             <th class="num">累计↑</th><th class="num">累计↓</th><th class="num">累计</th>

@@ -609,7 +609,7 @@ def build_summary(conf, con, collector=None):
     nodes = load_nodes(conf)
     totals = q_totals(con)
     rates = q_rate(con, conf)
-    conns = count_tcp_conns(nodes)
+    conns = count_conns(nodes)
     today = today_str(conf)
     today_rows = {
         r["scope"]: dict(r)
@@ -627,6 +627,7 @@ def build_summary(conf, con, collector=None):
         t = today_rows.get(scope, zero)
         a = totals.get(scope, zero)
         r = rates.get(scope, {"rx": 0, "tx": 0})
+        c = conns.get(n["id"], {"tcp": None, "udp": None})
         node_list.append({
             "id": n["id"],
             "name": n.get("name") or n.get("type") or ("node%s" % n["id"]),
@@ -637,7 +638,9 @@ def build_summary(conf, con, collector=None):
             "today": {k: t.get(k, 0) for k in zero},
             "total": {k: a.get(k, 0) for k in zero},
             "rate": r,
-            "conns": conns.get(n["id"]),
+            "conns": c["tcp"],           # 兼容旧字段
+            "conns_tcp": c["tcp"],
+            "conns_udp": c["udp"],
         })
         for k in zero:
             agg_today[k] += t.get(k, 0)
@@ -664,7 +667,8 @@ def build_summary(conf, con, collector=None):
             "tx": sum(v["tx"] for k, v in rates.items() if k.startswith("node:")),
         },
         "rate_known": bool(rates),
-        "conns_total": sum(v for v in conns.values() if v),
+        "conns_total": sum(v["tcp"] for v in conns.values() if v["tcp"]),
+        "conns_udp_total": sum(v["udp"] for v in conns.values() if v["udp"]),
     }
 
 
@@ -675,12 +679,14 @@ def build_live(conf, con, collector=None):
     """
     nodes = load_nodes(conf)
     rates = q_rate(con, conf)
-    conns = count_tcp_conns(nodes)
+    conns = count_conns(nodes)
     node_live = []
     for n in nodes:
         scope = "node:%s" % n["id"]
         r = rates.get(scope, {"rx": 0, "tx": 0})
-        node_live.append({"id": n["id"], "rate": r, "conns": conns.get(n["id"])})
+        c = conns.get(n["id"], {"tcp": None, "udp": None})
+        node_live.append({"id": n["id"], "rate": r,
+                          "conns": c["tcp"], "conns_tcp": c["tcp"], "conns_udp": c["udp"]})
     rx = sum(v["rx"] for k, v in rates.items() if k.startswith("node:"))
     tx = sum(v["tx"] for k, v in rates.items() if k.startswith("node:"))
     return {
@@ -691,7 +697,8 @@ def build_live(conf, con, collector=None):
         "interval": conf.get("interval", 5),
         "rate_known": bool(rates),
         "rate_total": {"rx": rx, "tx": tx},
-        "conns_total": sum(v for v in conns.values() if v),
+        "conns_total": sum(v["tcp"] for v in conns.values() if v["tcp"]),
+        "conns_udp_total": sum(v["udp"] for v in conns.values() if v["udp"]),
         "nodes": node_live,
     }
 
@@ -962,26 +969,47 @@ def node_protocols(node):
     return ["tcp", "udp"]
 
 
+# 连接数显示用的协议归属（按 inbound 实际监听的传输层）：
+#   TCP 系：vless/vmess/trojan/anytls  ·  UDP 系(QUIC)：hysteria2/tuic  ·  双栈：shadowsocks
+# 与 node_protocols（计流量时为稳妥默认双栈）不同——这里只影响"该显示 TCP 还是 UDP 连接数"。
+CONN_PROTOS = {
+    "vless": ("tcp",), "vmess": ("tcp",), "trojan": ("tcp",), "anytls": ("tcp",),
+    "hysteria2": ("udp",), "tuic": ("udp",), "shadowsocks": ("tcp", "udp"),
+}
+
+
+def conn_protocols(node):
+    t = str(node.get("type") or "").lower()
+    if t in CONN_PROTOS:
+        return CONN_PROTOS[t]
+    # 未知类型：回落到 net 字段或双栈
+    return tuple(node_protocols(node))
+
+
 # --------------------------------------------------------------------------
-# TCP 连接数（读 /proc/net/tcp[6] 内核 socket 表，按监听端口归属到节点）
+# 连接数：读 /proc/net/{tcp,tcp6,udp,udp6} 内核 socket 表，按监听端口归属到节点
 # --------------------------------------------------------------------------
 
 TCP_PROC_FILES = ("/proc/net/tcp", "/proc/net/tcp6")
-TCP_ESTABLISHED = "01"     # /proc/net/tcp 里的连接状态码：ESTABLISHED
+UDP_PROC_FILES = ("/proc/net/udp", "/proc/net/udp6")
+TCP_ESTABLISHED = "01"     # /proc/net/tcp 里 ESTABLISHED 状态码
 
 
-def _parse_proc_tcp(text, established_only=True):
-    """解析 /proc/net/tcp(6) 文本，返回本地端口列表（十六进制转十进制）。"""
+def _proc_local_ports(text, keep):
+    """
+    解析 /proc/net/{tcp,udp}(6) 文本，返回满足 keep(state, rem) 的本地端口列表。
+    行格式: sl local_address rem_address st ...
+      local/rem = 十六进制IP:十六进制端口
+    """
     ports = []
-    lines = text.splitlines()
-    for line in lines[1:]:                      # 跳过表头
+    for line in text.splitlines()[1:]:          # 跳过表头
         parts = line.split()
         if len(parts) < 4:
             continue
-        local, st = parts[1], parts[3]
+        local, rem, st = parts[1], parts[2], parts[3]
         if ":" not in local:
             continue
-        if established_only and st != TCP_ESTABLISHED:
+        if not keep(st, rem):
             continue
         try:
             ports.append(int(local.rsplit(":", 1)[1], 16))
@@ -990,34 +1018,61 @@ def _parse_proc_tcp(text, established_only=True):
     return ports
 
 
-def count_tcp_conns(nodes):
-    """
-    返回 {node_id: 已建立TCP连接数 或 None}。
-    纯 UDP 节点（hysteria2 / tuic）没有 TCP 连接概念，返回 None（前端显示 —）。
-    数据来自内核 /proc/net/tcp[6]，是服务器当前真实的 ESTABLISHED socket。
-    """
-    port_hits = {}
-    for path in TCP_PROC_FILES:
+def _rem_connected(rem):
+    """远端地址非全零 = 该 socket 已与对端建立会话（TCP已连/UDP已connect）。"""
+    ippart = rem.rsplit(":", 1)[0].replace("0", "")
+    portpart = rem.rsplit(":", 1)[1] if ":" in rem else "0"
+    return ippart != "" or portpart not in ("0", "0000")
+
+
+def _count_by_port(proc_files, keep):
+    """读多个 /proc 文件，聚合每个本地端口的命中数：{port: count}"""
+    hits = {}
+    for path in proc_files:
         try:
             with open(path, "r") as f:
                 text = f.read()
         except OSError:
             continue
-        for port in _parse_proc_tcp(text):
-            port_hits[port] = port_hits.get(port, 0) + 1
+        for port in _proc_local_ports(text, keep):
+            hits[port] = hits.get(port, 0) + 1
+    return hits
+
+
+def count_conns(nodes):
+    """
+    返回 {node_id: {"tcp": int|None, "udp": int|None}}。
+    tcp：ESTABLISHED 的 TCP socket 数（仅 TCP 类协议，否则 None）。
+    udp：已建立会话（远端非零）的 UDP socket 数（仅 UDP 类协议，否则 None）。
+      说明：hysteria2/tuic 基于 QUIC，服务端通常单 socket 多路复用，
+      因此该值反映"有对端的 UDP 会话 socket 数"，是内核可见的真实计数，
+      不一定等于 QUIC 层的逻辑连接数。
+    数据来自内核 /proc/net/{tcp,udp}[6]。
+    """
+    tcp_hits = _count_by_port(TCP_PROC_FILES, lambda st, rem: st == TCP_ESTABLISHED)
+    udp_hits = _count_by_port(UDP_PROC_FILES, lambda st, rem: _rem_connected(rem))
+
+    def sum_hits(node, hits):
+        cnt = 0
+        for lo, hi in parse_ports(node):
+            for p, c in hits.items():
+                if lo <= p <= hi:
+                    cnt += c
+        return cnt
 
     result = {}
     for n in nodes:
-        if "tcp" not in node_protocols(n):
-            result[n["id"]] = None
-            continue
-        cnt = 0
-        for lo, hi in parse_ports(n):
-            for p, c in port_hits.items():
-                if lo <= p <= hi:
-                    cnt += c
-        result[n["id"]] = cnt
+        protos = conn_protocols(n)
+        result[n["id"]] = {
+            "tcp": (sum_hits(n, tcp_hits) if "tcp" in protos else None),
+            "udp": (sum_hits(n, udp_hits) if "udp" in protos else None),
+        }
     return result
+
+
+def count_tcp_conns(nodes):
+    """向后兼容：返回 {node_id: tcp连接数 或 None}"""
+    return {nid: v["tcp"] for nid, v in count_conns(nodes).items()}
 
 
 def gen_nft(conf, nodes, epoch=None):

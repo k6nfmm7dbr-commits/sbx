@@ -51,7 +51,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/
 - 大号实时速率 + 迷你滑动曲线，配上传/下载分项
 - 速率曲线，五档时间范围：近 30 分钟、近 2 小时、近 1 天、近 7 天、近 30 天（可悬浮看任意点数值）
 - 每日流量柱状图（7 / 30 / 90 天可切换，上传下载分列）
-- 各节点用量表格：**实时 TCP 连接数**、实时速率、今日↑↓、累计↑↓、占比条（可按今日或累计排序）
+- 各节点用量表格：**实时 TCP / UDP 连接数**、实时速率、今日↑↓、累计↑↓、占比条（可按今日或累计排序）
 - 单节点每日明细图
 - CSV 导出
 
@@ -65,8 +65,12 @@ bash <(curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/
 速率曲线的数据分两层保存：5 秒精细采样保留 3 小时（画 30 分钟 / 2 小时），
 按小时聚合保留 40 天（画 1 天 / 7 天 / 30 天），互不影响精度也不撑大数据库。
 
-TCP 连接数取自内核 `/proc/net/tcp[6]` 的 ESTABLISHED socket，按节点监听端口归属；
-纯 UDP 节点（Hysteria2 / TUIC）没有 TCP 连接概念，显示为「—」。
+连接数取自内核 socket 表，按节点监听端口归属：
+- **TCP**：`/proc/net/tcp[6]` 里 ESTABLISHED 的 socket 数（TCP 系协议：VLESS/VMess/Trojan/AnyTLS）
+- **UDP**：`/proc/net/udp[6]` 里有对端会话（远端地址非零）的 socket 数（UDP 系协议：Hysteria2/TUIC）
+- Shadowsocks 同时显示 TCP 和 UDP；不适用的协议对应列显示「—」
+
+> UDP 是无连接协议，Hysteria2/TUIC 基于 QUIC 常单 socket 多路复用，所以 UDP 数反映的是「内核可见的有对端 UDP 会话 socket 数」，不一定等于 QUIC 层的逻辑连接数——作为活跃度参考。
 
 分享地址方面：安装时会探测服务器是否有可用的公网 IPv6，有则每个节点额外给出一条 IPv6 版分享链接（订阅里也含双份），没有则只给 IPv4 并提示。
 

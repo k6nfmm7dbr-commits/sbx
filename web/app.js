@@ -257,6 +257,7 @@ function renderLive(v) {
   easeTo('hero-up', live ? rt.rx : 0, function (n) { return live ? fmtRate(n) : '—'; });
   easeTo('hero-down', live ? rt.tx : 0, function (n) { return live ? fmtRate(n) : '—'; });
   setText('kpi-conns', typeof v.conns_total === 'number' ? v.conns_total : '—');
+  setText('kpi-conns-udp', typeof v.conns_udp_total === 'number' ? v.conns_udp_total : '—');
   if (live) sparkPush(rt.rx, rt.tx);
 
   // 把 live 的速率/连接数合并进节点行（增量更新，不重建）
@@ -266,7 +267,8 @@ function renderLive(v) {
     var id = el.getAttribute('data-node-live'), n = byId[id];
     if (!n) return;
     var kind = el.getAttribute('data-kind');
-    if (kind === 'conns') el.textContent = (typeof n.conns === 'number') ? n.conns : '—';
+    if (kind === 'conns') el.textContent = (typeof n.conns_tcp === 'number') ? n.conns_tcp : '—';
+    else if (kind === 'conns_udp') el.textContent = (typeof n.conns_udp === 'number') ? n.conns_udp : '—';
     else if (kind === 'rate') el.innerHTML = live ? '↑' + fmtRate(n.rate.rx) + '<br>↓' + fmtRate(n.rate.tx) : '—';
     else if (kind === 'rate1') el.textContent = live ? ('↑' + fmtRate(n.rate.rx) + '  ↓' + fmtRate(n.rate.tx)) : '—';
   });
@@ -280,7 +282,7 @@ function renderNodesStatic(s) {
   var maxSum = nodes.reduce(function (m, n) { return Math.max(m, n[key].rx + n[key].tx); }, 0) || 1;
   var grandSum = nodes.reduce(function (t, n) { return t + n[key].rx + n[key].tx; }, 0) || 1;
   if (!nodes.length) {
-    tbody.innerHTML = '<tr><td colspan="12" class="empty">还没有节点，先用 sbx 菜单添加一个</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="13" class="empty">还没有节点，先用 sbx 菜单添加一个</td></tr>';
     cards.innerHTML = '<div class="empty">还没有节点，先用 sbx 菜单添加一个</div>';
     return;
   }
@@ -305,6 +307,7 @@ function renderNodesStatic(s) {
       + '<td><span class="chip">' + esc(n.type || '—') + '</span></td>'
       + '<td class="num">' + esc(portText(n)) + '</td>'
       + '<td class="num"><b class="conns" data-node-live="' + n.id + '" data-kind="conns">—</b></td>'
+      + '<td class="num"><b class="conns-udp" data-node-live="' + n.id + '" data-kind="conns_udp">—</b></td>'
       + '<td class="num live" data-node-live="' + n.id + '" data-kind="rate">—</td>'
       + '<td class="num up">' + fmtBytes(td.rx) + '</td>'
       + '<td class="num down">' + fmtBytes(td.tx) + '</td>'
@@ -322,7 +325,8 @@ function renderNodesStatic(s) {
       + '<div class="ncard-top"><span class="ncard-name">' + esc(n.name) + '</span>'
       + '<span class="chip">' + esc(n.type || '—') + '</span></div>'
       + '<div class="ncard-meta"><span>端口 ' + esc(portText(n)) + '</span>'
-      + '<span>TCP 连接 <b class="conns" data-node-live="' + n.id + '" data-kind="conns">—</b></span></div>'
+      + '<span>TCP <b class="conns" data-node-live="' + n.id + '" data-kind="conns">—</b></span>'
+      + '<span>UDP <b class="conns-udp" data-node-live="' + n.id + '" data-kind="conns_udp">—</b></span></div>'
       + '<div class="ncard-live"><span class="live" data-node-live="' + n.id + '" data-kind="rate1">—</span></div>'
       + '<div class="ncard-grid">'
       + '<div><div class="ncell-label">今日合计</div><div class="ncell-value">' + fmtBytes(td.rx + td.tx) + '</div>'
