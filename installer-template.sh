@@ -290,12 +290,12 @@ EOF
 
 ensure_panel_conf() {
   if [[ -f "$PANEL_CONF" ]]; then
-    # 删除废弃的管理密钥，保留/补齐面板查看令牌。
+    # 保留/补齐面板查看令牌。
     python3 - "$PANEL_CONF" <<'PY'
 import json, os, sys, secrets
 p=sys.argv[1]
 try:
- d=json.load(open(p)); d.pop('manage_token',None)
+ d=json.load(open(p))
  if not d.get('token'): d['token']=secrets.token_hex(16)
  tmp=p+'.clean';json.dump(d,open(tmp,'w'),indent=2,ensure_ascii=False);os.replace(tmp,p);os.chmod(p,0o600)
 except Exception: pass

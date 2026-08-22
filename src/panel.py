@@ -202,8 +202,6 @@ def db_connect(conf):
         con.execute("ALTER TABLE samples ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0")
     if "valid" not in cols:
         con.execute("ALTER TABLE samples ADD COLUMN valid INTEGER NOT NULL DEFAULT 1")
-    # 升级清理：删除旧版本遗留的历史速率专用表。
-    con.execute("DROP TABLE IF EXISTS rate_samples")
     # 升级前的旧样本没有真实耗时，不能用于实时速率计算；daily/totals 不受影响。
     con.execute("UPDATE samples SET valid=0 WHERE duration_ms<=0")
     return con
