@@ -1,10 +1,4 @@
-/* sbx-panel 前端 — 原生 JS + 手绘 SVG，无外部依赖
- * 反应速度优化要点：
- *  1) 拆分接口：高频轮询轻量 /api/live（速率+连接数），重的 /api/summary 只在切范围/低频时拉
- *  2) 实时数字用 requestAnimationFrame 做数值缓动，视觉上连续不跳变
- *  3) hero 迷你曲线本地维护滑动窗口，每帧平滑推进，不等下一次请求
- *  4) 只更新变化的 DOM 文本节点，避免整表 innerHTML 重建导致的闪烁
- */
+/* SBX 面板：三页导航、实时数字、Excel明细；无图表依赖 */
 'use strict';
 
 var TOKEN = new URLSearchParams(location.search).get('token') || '';
@@ -35,10 +29,6 @@ function fmtBytes(n) {
   return v.toFixed(d) + ' ' + UNITS[i];
 }
 function fmtRate(n) { return fmtBytes(n) + '/s'; }
-function fmtDay(s) { return s ? s.slice(5) : ''; }
-function fmtClock(ts) { var d = new Date(ts * 1000); return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2); }
-function fmtDate(ts) { var d = new Date(ts * 1000); return (d.getMonth() + 1) + '/' + d.getDate(); }
-function fmtDateTime(ts) { var d = new Date(ts * 1000); return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + ('0' + d.getHours()).slice(-2) + ':00'; }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
 
 function toast(msg) {
@@ -69,36 +59,9 @@ function tickEase() {
   }
 }
 
-/* ---------- SVG 工具 ---------- */
-var NS = 'http://www.w3.org/2000/svg';
-function svgEl(name, attrs) {
-  var e = document.createElementNS(NS, name);
-  if (attrs) for (var k in attrs) e.setAttribute(k, attrs[k]);
-  return e;
-}
-var tipEl = null;
-function showTip(evt, html) {
-  tipEl = tipEl || document.getElementById('tip');
-  tipEl.innerHTML = html; tipEl.classList.add('show');
-  var w = tipEl.offsetWidth, h = tipEl.offsetHeight, pad = 12;
-  var x = Math.min(Math.max(evt.clientX - w / 2, 8), window.innerWidth - w - 8);
-  var y = evt.clientY - h - pad; if (y < 8) y = evt.clientY + pad;
-  tipEl.style.left = x + 'px'; tipEl.style.top = y + 'px';
-}
-function hideTip() { if (tipEl) tipEl.classList.remove('show'); }
-
-function niceMax(v) {
-  if (v <= 0) return 1;
-  var exp = Math.floor(Math.log(v) / Math.LN10), base = Math.pow(10, exp), f = v / base;
-  var step = f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10;
-  return step * base;
-}
-
 /* ---------- 渲染：概览（低频 summary）---------- */
 function renderSummary(s) {
   state.summary = s;
-  setText('meta-backend', '');
-  setText('meta-clock', '');
   easeTo('kpi-today-total', s.today.rx + s.today.tx, fmtBytes);
   easeTo('kpi-today-up', s.today.rx, fmtBytes);
   easeTo('kpi-today-down', s.today.tx, fmtBytes);
@@ -106,7 +69,6 @@ function renderSummary(s) {
   easeTo('kpi-all-up', s.total.rx, fmtBytes);
   easeTo('kpi-all-down', s.total.tx, fmtBytes);
   setText('kpi-nodes', s.nodes.length);
-  setText('foot-note', '');
   if (s.error) toast(s.error);
   renderNodesStatic(s);
   renderNodeSelect(s);
@@ -116,8 +78,6 @@ function renderSummary(s) {
 function renderLive(v) {
   state.live = v;
   var healthy = v.healthy, live = v.rate_known !== false;
-  var dot = document.getElementById('health-dot');
-  if (dot) dot.className = 'dot ' + (healthy ? 'ok' : 'bad');
   setText('status-txt', healthy ? '实时监控中' : (v.error ? '采集异常' : '等待采集'));
   document.getElementById('pulse').className = 'hero-pulse' + (live ? '' : ' stale');
 
@@ -204,15 +164,6 @@ function loadNodeDaily() {
 }
 
 /* ---------- 事件 ---------- */
-function bindSeg(attr, cb) {
-  document.querySelectorAll('.seg [data-' + attr + ']').forEach(function (b) {
-    b.addEventListener('click', function () {
-      var group = b.parentNode;
-      group.querySelectorAll('[data-' + attr + ']').forEach(function (x) { x.classList.remove('on'); });
-      b.classList.add('on'); cb(b.dataset[attr]);
-    });
-  });
-}
 // 节点固定按 nodes.json 添加顺序显示
 document.getElementById('node-select').addEventListener('change', function (e) { state.nodeId = e.target.value; loadNodeDaily(); });
 document.getElementById('status-node-select').addEventListener('change', function (e) {

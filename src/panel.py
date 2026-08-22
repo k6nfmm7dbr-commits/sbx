@@ -37,7 +37,7 @@ CONF_PATH = os.environ.get("SBX_CONF", os.path.join(APP_DIR, "panel.json"))
 NFT_TABLE = "sbx_traffic"
 IPT_CHAIN_IN = "SBX_IN"
 IPT_CHAIN_OUT = "SBX_OUT"
-SAMPLE_KEEP_SECONDS = 120                # 仅保留2分钟，用于实时加权速率；不再保存/绘制速率曲线
+SAMPLE_KEEP_SECONDS = 120                # 仅保留2分钟，用于实时加权速率
 
 DEFAULT_CONF = {
     "db": os.path.join(APP_DIR, "traffic.db"),
@@ -202,7 +202,7 @@ def db_connect(conf):
         con.execute("ALTER TABLE samples ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0")
     if "valid" not in cols:
         con.execute("ALTER TABLE samples ADD COLUMN valid INTEGER NOT NULL DEFAULT 1")
-    # v2.1 已彻底移除历史速率曲线；升级时删除旧曲线专用表，实时速率仍使用 samples。
+    # 升级清理：删除旧版本遗留的历史速率专用表。
     con.execute("DROP TABLE IF EXISTS rate_samples")
     # 升级前的旧样本没有真实耗时，不能用于实时速率计算；daily/totals 不受影响。
     con.execute("UPDATE samples SET valid=0 WHERE duration_ms<=0")
@@ -432,7 +432,7 @@ class Collector(threading.Thread):
                         "rx_pkts=rx_pkts+excluded.rx_pkts, tx_pkts=tx_pkts+excluded.tx_pkts",
                         (scope, d["rx"], d["tx"], d["rx_pkts"], d["tx_pkts"]),
                     )
-                # valid=1 才进入速率曲线。即使字节为 0 也要写样本，让曲线真实回落到零。
+                # valid=1 才进入实时速率窗口；即使字节为0也写样本，让速率回落到零。
                 if d.get("valid") and d.get("duration_ms", 0) > 0:
                     cur.execute(
                         "INSERT INTO samples(ts,scope,rx,tx,duration_ms,valid) VALUES(?,?,?,?,?,1) "
