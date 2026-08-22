@@ -27,11 +27,12 @@ bash <(curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/
 | 计数位置 | 内核 IP 层，按节点端口分别计数 |
 | rx（上传） | 服务器从客户端收到的字节 = 用户上传 |
 | tx（下载） | 服务器发往客户端的字节 = 用户下载 |
-| 采集方式 | 每 5 秒读一次计数器，单调差分累加进 SQLite |
-| 计数器归零 | 检测到 `当前值 < 上次值` 时按全量补记，不丢不重 |
-| 规则重建 | 规则集带 epoch 世代标记，`sbx apply` 换代后从新基线继续 |
-| 崩溃安全 | 增量入账 + 基线保存在同一个 SQLite 事务，崩溃只回退到上一轮 |
-| 跨天切点 | 固定按中国时间 UTC+8（无 tzdata 的系统自动用固定偏移） |
+| 采集方式 | 默认每 2 秒读取一次计数器，按真实 duration_ms 计算实时速率 |
+| 计数器归零 | 检测到 `当前值 < 上次值` 时全量补入累计；未知时长不进入实时速率 |
+| 规则重建 | 规则集带 epoch 世代标记，换代后从新基线继续 |
+| 首次启动 | 已有历史计数完整进入累计，但不制造假实时速率峰值 |
+| 崩溃安全 | 增量入账 + 基线保存在同一个 SQLite 事务 |
+| 跨天切点 | 固定按中国时间 UTC+8（无 tzdata 时使用固定偏移） |
 
 需要明确的一点：计数的是 **IP 层字节数**，包含 TCP/IP 包头与协议开销，
 因此数字会比客户端显示的「应用层已下载」略高（典型差异 2%~5%，取决于包大小）。
@@ -48,11 +49,11 @@ bash <(curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/
 
 高级深色控制台 / 浅色玻璃双主题，实时速率数字、TCP/UDP会话、今日/累计流量、节点明细、CSV导出。
 
-每日流量和单节点每日明细使用 **Excel 风格表格**：显示最近60天的日期、上传、下载、合计；不再显示重复的底部总计行。手机端采用紧凑布局并支持横向滚动，确保四列完整显示，不需要长按、悬浮或放大柱状图。
+每日流量和单节点每日明细使用 **Excel 风格表格**：显示最近60天的日期、上传、下载、合计；不显示重复的底部总计行。手机端表格紧凑、四列完整可查看，不需要长按或悬浮查看数据。
 
-实时速率走轻量 `/api/live`（2秒），历史概览走低频 `/api/summary`；请求防重入，实时数字短时缓动，节点实时列增量更新，后台暂停轮询。曲线、波浪线和曲线专用历史存储已彻底删除。
+实时速率走轻量 `/api/live`（2秒），历史概览走低频 `/api/summary`；请求防重入，实时数字短时缓动，节点实时列增量更新，后台暂停轮询。历史速率曲线、实时卡波浪线和曲线专用存储已彻底删除。
 
-当前发布版本为 v2.5.5，移动端 Excel 表格使用 colgroup 固定日期/上传/下载/合计四列，兼容 iOS Safari。
+当前发布版本为 v2.5.6，移动端 Excel 表格使用 colgroup 固定日期/上传/下载/合计四列，兼容 iOS Safari。节点区域固定按今日流量排序，不提供重复的“按今日/按累计”切换。
 
 实时速率底层使用真实 `duration_ms`：严格按字节/真实耗时计算；首次启动、规则换代、计数器归零不产生假峰；samples只保留2分钟。
 
@@ -92,7 +93,7 @@ sbx --uninstall      # 卸载
 
 ```
 python3 /etc/sbx/panel.py show          # 各节点今日/累计
-python3 /etc/sbx/panel.py daily 30      # 最近 30 天
+python3 /etc/sbx/panel.py daily 60      # 最近 60 天
 python3 /etc/sbx/panel.py selftest      # 计数器自检
 python3 /etc/sbx/panel.py reset node:2  # 只清 2 号节点的历史
 ```
@@ -125,12 +126,13 @@ python3 /etc/sbx/panel.py reset node:2  # 只清 2 号节点的历史
 ## 开发
 
 ```
-sbx.sh              安装器模板（开发时用 SBX_PAYLOAD_DIR 指向本目录）
-src/panel.py        采集 + HTTP
-src/nodes_tool.py   节点管理
-web/                前端
-build.py            生成 dist/sbx.sh（内嵌全部资源的单文件发布版）
-test_*.py/.sh       测试
+installer-template.sh   安装器模板（开发时用 SBX_PAYLOAD_DIR 指向本目录）
+sbx.sh                  自包含发布脚本（用户直接 curl 执行）
+src/panel.py            采集器 + HTTP 面板
+src/nodes_tool.py       节点管理、端口/SNI修改与链接生成
+web/                    前端（高级深/浅主题、紧凑表格、实时刷新）
+build.py                内嵌全部资源，生成根目录 sbx.sh
+test_*.py/.sh            回归测试
 ```
 
 发布：`python3 build.py` → 把 `dist/sbx.sh` 推到仓库，用户 curl 这个文件。

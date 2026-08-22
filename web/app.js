@@ -98,8 +98,8 @@ function niceMax(v) {
 /* ---------- 渲染：概览（低频 summary）---------- */
 function renderSummary(s) {
   state.summary = s;
-  setText('meta-backend', (s.backend === 'nft' ? 'nftables' : s.backend) + ' · ' + s.interval + 's');
-  setText('meta-clock', s.day + ' ' + (s.tz || ''));
+  setText('meta-backend', '');
+  setText('meta-clock', '');
   setText('precision-label', '内核 ' + (s.backend === 'nft' ? 'nftables' : 'iptables') + ' 精确计数 · IP层字节');
   setText('refresh-label', '每 ' + s.interval + ' 秒刷新');
   easeTo('kpi-today-total', s.today.rx + s.today.tx, fmtBytes);
@@ -109,8 +109,7 @@ function renderSummary(s) {
   easeTo('kpi-all-up', s.total.rx, fmtBytes);
   easeTo('kpi-all-down', s.total.tx, fmtBytes);
   setText('kpi-nodes', s.nodes.length);
-  setText('foot-note', '数据来源：内核 ' + (s.backend === 'nft' ? 'nftables' : 'iptables')
-    + ' 计数器（精确字节数）· 统计时区 ' + (s.tz || 'local') + (s.error ? ' · 异常：' + s.error : ''));
+  setText('foot-note', '');
   if (s.error) toast(s.error);
   renderNodesStatic(s);
   renderNodeSelect(s);
@@ -149,8 +148,7 @@ function renderLive(v) {
 /* ---------- 节点表：静态部分（流量随 summary 重建）---------- */
 function renderNodesStatic(s) {
   var tbody = document.getElementById('node-tbody'), cards = document.getElementById('node-cards');
-  var key = 'today';
-  var nodes = s.nodes.slice().sort(function (a, b) { return (b[key].rx + b[key].tx) - (a[key].rx + a[key].tx); });
+  var nodes = s.nodes.slice();
   if (!nodes.length) {
     tbody.innerHTML = '<tr><td colspan="12" class="empty">还没有节点，先用 sbx 菜单添加一个</td></tr>';
     cards.innerHTML = '<div class="empty">还没有节点，先用 sbx 菜单添加一个</div>';
@@ -258,7 +256,7 @@ function bindSeg(attr, cb) {
 }
 // 节点固定按今日流量排序，无多余的今日/累计切换
 document.getElementById('node-select').addEventListener('change', function (e) { state.nodeId = e.target.value; loadNodeDaily(); });
-if (TOKEN) document.getElementById('csv-link').href = '/api/export?token=' + encodeURIComponent(TOKEN);
+// CSV 导出入口已按用户要求从页面移除
 
 var reflowTimer;
 window.addEventListener('resize', function () {
