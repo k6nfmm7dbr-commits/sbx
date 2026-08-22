@@ -290,16 +290,20 @@ EOF
 
 ensure_panel_conf() {
   if [[ -f "$PANEL_CONF" ]]; then
+    # 删除废弃的管理密钥，保留/补齐面板查看令牌。
     python3 - "$PANEL_CONF" <<'PY'
-import json, os, sys
+import json, os, sys, secrets
 p=sys.argv[1]
 try:
- d=json.load(open(p)); d.pop('token',None)
+ d=json.load(open(p)); d.pop('manage_token',None)
+ if not d.get('token'): d['token']=secrets.token_hex(16)
  tmp=p+'.clean';json.dump(d,open(tmp,'w'),indent=2,ensure_ascii=False);os.replace(tmp,p);os.chmod(p,0o600)
 except Exception: pass
 PY
     return 0
   fi
+  local token port
+  token=$(rand_hex 16)
   port=$(pick_port)
   cat > "$PANEL_CONF" <<EOF
 {
@@ -311,6 +315,7 @@ PY
   "backend": "auto",
   "listen": "0.0.0.0",
   "port": $port,
+  "token": "$token",
   "interval": 2,
   "tz": "Asia/Shanghai"
 }
@@ -666,10 +671,10 @@ start_all() {
 
 # ---------------------------------------------------------------- 面板信息
 panel_url() {
-  local host port
+  local host port token
   host=$(py_json get-host); [[ -z "$host" ]] && host="$(public_ip)"
-  port=$(panel_get port)
-  echo "http://$(host_for_uri "$host"):$port/"
+  port=$(panel_get port); token=$(panel_get token)
+  echo "http://$(host_for_uri "$host"):$port/?token=$token"
 }
 
 show_panel_info() {

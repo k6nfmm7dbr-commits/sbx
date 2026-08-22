@@ -7,6 +7,7 @@
  */
 'use strict';
 
+var TOKEN = new URLSearchParams(location.search).get('token') || '';
 var state = { days: 60, nodeId: null, statusNodeId: null, summary: null, live: null };
 
 var inflight = {};
