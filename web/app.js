@@ -285,6 +285,18 @@ function renderNodesStatic(s) {
     return;
   }
   function portText(n) { return n.ports ? (n.port ? n.port + ',' + n.ports : n.ports) : (n.port || '—'); }
+  // 占比条：该节点用量 ÷ 所有节点合计（纯分布对比，与流量限额无关）
+  // 无流量时不画条；只有一个节点时百分比恒为 100% 没有信息量，改标"唯一节点"
+  function shareHTML(n, inCard) {
+    var sum = n[key].rx + n[key].tx;
+    if (sum <= 0) return '<span class="pct">—</span>';
+    var w = (sum / maxSum * 100).toFixed(1);
+    var pct = nodes.length === 1 ? '唯一节点' : (sum / grandSum * 100).toFixed(1) + '%';
+    var title = nodes.length === 1 ? '当前只有一个节点，全部流量都来自它'
+      : ('占所有节点' + (key === 'today' ? '今日' : '累计') + '合计的 ' + (sum / grandSum * 100).toFixed(1) + '%');
+    return '<div class="bar"' + (inCard ? ' style="flex:1"' : '') + ' title="' + title + '"><i style="width:' + w + '%"></i></div>'
+      + '<span class="pct" title="' + title + '">' + pct + '</span>';
+  }
 
   tbody.innerHTML = nodes.map(function (n) {
     var td = n.today, tt = n.total, sum = n[key].rx + n[key].tx;
@@ -300,8 +312,7 @@ function renderNodesStatic(s) {
       + '<td class="num up">' + fmtBytes(tt.rx) + '</td>'
       + '<td class="num down">' + fmtBytes(tt.tx) + '</td>'
       + '<td class="num"><b>' + fmtBytes(tt.rx + tt.tx) + '</b></td>'
-      + '<td><div class="bar"><i style="width:' + (sum / maxSum * 100).toFixed(1) + '%"></i></div>'
-      + '<span class="pct">' + (sum / grandSum * 100).toFixed(1) + '%</span></td>'
+      + '<td>' + shareHTML(n, false) + '</td>'
       + '</tr>';
   }).join('');
 
@@ -319,8 +330,8 @@ function renderNodesStatic(s) {
       + '<div><div class="ncell-label">累计合计</div><div class="ncell-value">' + fmtBytes(tt.rx + tt.tx) + '</div>'
       + '<div class="ncell-sub"><span class="up">↑' + fmtBytes(tt.rx) + '</span> <span class="down">↓' + fmtBytes(tt.tx) + '</span></div></div>'
       + '</div>'
-      + '<div class="ncard-bar"><div class="bar" style="flex:1"><i style="width:' + (sum / maxSum * 100).toFixed(1) + '%"></i></div>'
-      + '<span class="pct">' + (sum / grandSum * 100).toFixed(1) + '%</span></div>'
+      + (nodes.length > 1 || sum > 0
+          ? '<div class="ncard-bar">' + shareHTML(n, true) + '</div>' : '')
       + '</div>';
   }).join('');
 
