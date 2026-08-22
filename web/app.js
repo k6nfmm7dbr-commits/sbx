@@ -8,7 +8,7 @@
 'use strict';
 
 var TOKEN = new URLSearchParams(location.search).get('token') || '';
-var state = { days: 60, sortScope: 'today', nodeId: null, summary: null, live: null };
+var state = { days: 60, nodeId: null, summary: null, live: null };
 
 var inflight = {};
 function api(path, params) {
@@ -149,7 +149,7 @@ function renderLive(v) {
 /* ---------- 节点表：静态部分（流量随 summary 重建）---------- */
 function renderNodesStatic(s) {
   var tbody = document.getElementById('node-tbody'), cards = document.getElementById('node-cards');
-  var key = state.sortScope;
+  var key = 'today';
   var nodes = s.nodes.slice().sort(function (a, b) { return (b[key].rx + b[key].tx) - (a[key].rx + a[key].tx); });
   if (!nodes.length) {
     tbody.innerHTML = '<tr><td colspan="12" class="empty">还没有节点，先用 sbx 菜单添加一个</td></tr>';
@@ -256,7 +256,7 @@ function bindSeg(attr, cb) {
     });
   });
 }
-bindSeg('scope', function (v) { state.sortScope = v; if (state.summary) renderNodesStatic(state.summary); });
+// 节点固定按今日流量排序，无多余的今日/累计切换
 document.getElementById('node-select').addEventListener('change', function (e) { state.nodeId = e.target.value; loadNodeDaily(); });
 if (TOKEN) document.getElementById('csv-link').href = '/api/export?token=' + encodeURIComponent(TOKEN);
 
