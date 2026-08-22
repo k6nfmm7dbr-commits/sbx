@@ -76,6 +76,7 @@ body {
 .theme-btn { width:30px;height:30px;border:1px solid var(--line-strong);border-radius:9px;
   background:var(--card);color:var(--fg);font:18px/1 inherit;display:grid;place-items:center;cursor:pointer; }
 .theme-btn:hover { background:var(--card-solid); }
+.title-theme { margin-left:auto; flex:none; }
 .status { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
 .dot.ok { background: var(--up); box-shadow: 0 0 0 0 color-mix(in srgb, var(--up) 60%, transparent);

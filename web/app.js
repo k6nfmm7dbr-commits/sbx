@@ -120,7 +120,7 @@ function renderLive(v) {
   state.live = v;
   var healthy = v.healthy, live = v.rate_known !== false;
   var dot = document.getElementById('health-dot');
-  dot.className = 'dot ' + (healthy ? 'ok' : 'bad');
+  if (dot) dot.className = 'dot ' + (healthy ? 'ok' : 'bad');
   setText('status-txt', healthy ? '实时监控中' : (v.error ? '采集异常' : '等待采集'));
   document.getElementById('pulse').className = 'hero-pulse' + (live ? '' : ' stale');
 
