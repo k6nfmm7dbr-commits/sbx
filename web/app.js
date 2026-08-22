@@ -252,7 +252,7 @@ function bindSeg(attr, cb) {
     });
   });
 }
-// 节点固定按今日流量排序，无多余的今日/累计切换
+// 节点固定按 nodes.json 添加顺序显示
 document.getElementById('node-select').addEventListener('change', function (e) { state.nodeId = e.target.value; loadNodeDaily(); });
 // CSV 导出入口已按用户要求从页面移除
 

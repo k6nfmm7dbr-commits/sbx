@@ -236,7 +236,6 @@ tbody tr:hover { background: color-mix(in srgb, var(--down) 8%, transparent); }
   .excel-table th,.excel-table td { padding:7px 8px; }
   .excel-scroll { overflow-x:auto; }
 }
-.table-caption { display:block; margin-top:2px; font-size:11px; color:var(--muted); }
 
 .foot {
   display: flex; align-items: center; justify-content: space-between;

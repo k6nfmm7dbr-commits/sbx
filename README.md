@@ -1,166 +1,211 @@
-# SBX — sing-box 节点 + 精确流量面板
+# SBX
 
-一条命令装好 sing-box 节点，附带一个只做流量统计的可视化 Web 面板。
+sing-box 节点搭建 + 内核精确流量面板。自用、轻量、无多用户、无分流、无订阅转换。
+
+## 安装
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh)
 ```
 
-装完后随时用 `sbx` 打开管理菜单。
+安装完成后运行：
 
-## 功能范围
+```bash
+sbx
+```
 
-刻意只做两件事：
+## 当前版本
 
-- **搭建节点** — VLESS Reality / Shadowsocks 2022 / Hysteria2 / Trojan / TUIC / VMess-WS / AnyTLS，自动生成分享链接与订阅
-- **流量统计** — 每日流量、总流量、**每个节点的独立用量**、实时速率
+```text
+v2.6.0
+```
 
-没有规则分流、订阅转换、多用户系统、Clash 面板代理切换等功能。
+## 功能
 
-## 统计精度
+### 节点
 
-数据来源是**内核 netfilter 计数器**（nftables 命名计数器，无 nft 时退回 iptables 自定义链），
-不是应用层估算、不抽样、不插值。
+支持：
 
-| 维度 | 做法 |
-|---|---|
-| 计数位置 | 内核 IP 层，按节点端口分别计数 |
-| rx（上传） | 服务器从客户端收到的字节 = 用户上传 |
-| tx（下载） | 服务器发往客户端的字节 = 用户下载 |
-| 采集方式 | 默认每 2 秒读取一次计数器，按真实 duration_ms 计算实时速率 |
-| 计数器归零 | 检测到 `当前值 < 上次值` 时全量补入累计；未知时长不进入实时速率 |
-| 规则重建 | 规则集带 epoch 世代标记，换代后从新基线继续 |
-| 首次启动 | 已有历史计数完整进入累计，但不制造假实时速率峰值 |
-| 崩溃安全 | 增量入账 + 基线保存在同一个 SQLite 事务 |
-| 跨天切点 | 固定按中国时间 UTC+8（无 tzdata 时使用固定偏移） |
+- VLESS Reality
+- Shadowsocks 2022
+- Hysteria2
+- Trojan
+- TUIC v5
+- VMess WebSocket
+- AnyTLS
 
-需要明确的一点：计数的是 **IP 层字节数**，包含 TCP/IP 包头与协议开销，
-因此数字会比客户端显示的「应用层已下载」略高（典型差异 2%~5%，取决于包大小）。
-这是网络计费的通用口径 —— 服务商按流量收费也是按这个口径算的。
-如果你要的是「和云厂商账单对得上」，这个口径正是对的；
-如果要的是「和客户端下载进度条对得上」，任何服务端统计都做不到逐字节相同。
+菜单支持：
 
-两个后端的细微差别：
+- 添加节点
+- 修改节点端口
+- 修改 VLESS / Trojan / Hysteria2 / TUIC / AnyTLS 的 SNI
+- 修改 Hysteria2 端口跳跃范围
+- 删除节点
+- 输出 IPv4 / IPv6 分享链接和 Base64 订阅
 
-- nftables 后端的计数链挂在 `priority 300`，在常规防火墙规则之后，**被防火墙丢弃的包不计入**
-- iptables 后端的计数链插在 `INPUT/OUTPUT` 首位（必须如此，否则前面的 `-j ACCEPT` 会让计数规则永远命中不到），因此**会计入随后被丢弃的包**
+全新安装不会自动创建默认节点。节点按添加顺序显示。
 
-## 面板
+### 流量面板
 
-高级深色控制台 / 浅色玻璃双主题，面板只保留自用场景真正需要的信息：
+面板显示：
 
-- 实时速率数字（上传/下载）
-- TCP 连接数、UDP 会话数
-- 今日流量、累计流量
-- 最近 60 天每日流量表格
-- 单节点最近 60 天每日明细表格
-- 节点端口、类型、今日/累计用量与实时速率
+- 实时总速率、上传速率、下载速率
+- 每节点实时速率
+- TCP 连接数
+- UDP 会话数
+- 今日流量
+- 累计流量
+- 每节点今日 / 累计流量
+- 最近 60 天每日流量
+- 单节点最近 60 天每日明细
 
-每日流量和单节点每日明细使用 **Excel 风格表格**，列为：
+每日数据使用 Excel 风格表格：
 
 ```text
 日期 | 上传 | 下载 | 合计
 ```
 
-不显示重复的底部总计行，不需要长按或悬浮查看数据。手机端使用紧凑布局并支持横向滚动，确保上传、下载、合计列完整显示。
+手机端支持横向滚动，四列完整显示。面板支持深色 / 浅色主题切换。
 
-面板已经彻底移除：
+## 统计口径
 
-- 历史速率曲线
-- 实时速率波浪线
-- 柱状图
-- 流量占比/百分比
-- 顶部 nftables/日期/主题状态信息区
-- 底部数据来源/时区/CSV区域
-- 节点“按今日/按累计”排序切换
+流量来自内核 netfilter 计数器：
 
-实时速率走轻量 `/api/live`，默认约每 2 秒刷新；历史概览低频刷新；请求防重入，实时数字短时缓动，节点实时列增量更新，页面后台暂停轮询。
+- 优先使用 nftables named counter
+- 不支持 nftables 时回退 iptables 自定义链
+- 按节点监听端口独立计数
+- 上传：服务器从客户端收到的 IP 层字节
+- 下载：服务器发往客户端的 IP 层字节
+- 包含 TCP/IP 包头与协议开销
+- 中国时间 UTC+8 跨天
 
-当前发布版本为 v2.5.9。实时速率底层使用真实 `duration_ms`，严格按字节/真实耗时计算；首次启动、规则换代、计数器归零不产生假峰；samples只保留2分钟。
+客户端通常只显示应用层有效载荷，因此面板数字一般会高约 2%～5%；云厂商流量计费通常更接近面板的 IP 层口径。
 
-## 升级
+### 实时速率
 
-以后有新功能或修 bug，不用重装，直接：
+- 默认每 2 秒采集
+- 使用真实 `duration_ms` 计算 `字节 / 实际耗时`
+- 首次启动、规则换代、计数器归零只计入累计，不制造假瞬时速率
+- 实时接口 `/api/live` 与历史概览分离
+- 前端请求防重入、数字短时缓动、后台暂停轮询
+- 实时样本只保留 2 分钟
+
+### TCP / UDP
+
+- TCP：读取 `/proc/net/tcp` 和 `/proc/net/tcp6` 的 ESTABLISHED socket
+- UDP：读取 `/proc/net/udp` 和 `/proc/net/udp6` 中存在远端地址的会话 socket
+- Hysteria2 / TUIC 使用 QUIC 多路复用，UDP socket 数不等同于客户端逻辑连接数，仅作活跃度参考
+
+## 在线升级
 
 ```bash
 sbx --update
 ```
 
-它会从 GitHub 拉最新版、校验后替换本体，**保留你所有节点和流量历史**，然后自动重启服务。已是最新版会直接跳过；想强制重装用 `sbx --update --force`。菜单里的「检查更新 / 升级」是同一个功能。
+强制重新应用线上版本：
 
-## 管理节点
-
-菜单里可以：
-
-- **添加节点** — 7 种协议，自动生成分享链接
-- **修改节点** — 改端口、改 VLESS/Trojan/Hysteria2/TUIC/AnyTLS 的 SNI 伪装域名、改 Hysteria2 端口跳跃范围；改完自动重载并给出新分享链接，流量历史不丢
-- **删除节点** — 可选是否一并清除该节点历史流量
-
-全新安装后节点列表是空的，自己按需添加（不再自动塞一个默认节点）。
-
-## 命令行
-
-```
-sbx                  # 管理菜单
-sbx --update         # 在线升级（保留节点与流量历史）
-sbx --show           # 各节点用量速览
-sbx --links          # 输出分享链接
-sbx --panel-url      # 输出面板地址
-sbx --apply-firewall # 重建计数规则
-sbx --uninstall      # 卸载
+```bash
+sbx --update --force
 ```
 
-面板本体也可直接调用：
+升级保留：
 
-```
-python3 /etc/sbx/panel.py show          # 各节点今日/累计
-python3 /etc/sbx/panel.py daily 60      # 最近 60 天
-python3 /etc/sbx/panel.py selftest      # 计数器自检
-python3 /etc/sbx/panel.py reset node:2  # 只清 2 号节点的历史
+- 节点配置
+- 面板令牌
+- 面板端口
+- 流量数据库
+
+升级器同时比较版本号与脚本 SHA-256。即使版本号误漏更新，只要远端脚本内容发生变化也会继续升级。
+
+## 常用命令
+
+```bash
+sbx                         # 管理菜单
+sbx --update                # 在线升级
+sbx --show                  # 命令行查看节点流量
+sbx --links                 # 输出分享链接
+sbx --panel-url             # 输出面板地址
+sbx --apply-firewall        # 重建计数规则
+sbx --uninstall             # 卸载
+
+python3 /etc/sbx/panel.py selftest
+python3 /etc/sbx/panel.py daily 60
+python3 /etc/sbx/panel.py reset node:2
 ```
 
 ## 支持环境
 
-- Debian / Ubuntu、RHEL 系（CentOS/Rocky/Alma）、Alpine
-- systemd 或 OpenRC
+- Debian / Ubuntu
+- CentOS / Rocky / AlmaLinux
+- Alpine Linux
+- systemd / OpenRC
 - amd64 / arm64 / armv7 / armv6 / 386 / s390x / riscv64
-- 依赖：python3（标准库即可，不装任何 pip 包）、curl、openssl、nftables 或 iptables
+
+依赖：
+
+- Python 3（仅标准库）
+- curl
+- openssl
+- nftables 或 iptables
 
 ## 文件位置
 
-```
-/etc/sbx/panel.py        采集器 + Web 服务
-/etc/sbx/nodes_tool.py   节点增删与链接生成
-/etc/sbx/panel.json      面板配置（含令牌，权限 600）
-/etc/sbx/nodes.json      节点清单（inbound 的唯一数据源）
-/etc/sbx/traffic.db      流量历史 SQLite
-/etc/sbx/nft.conf        生成的 nftables 计数规则
-/etc/sbx/iptables.sh     生成的 iptables 计数脚本
-/etc/sbx/web/            面板前端
+```text
+/etc/sbx/panel.py
+/etc/sbx/nodes_tool.py
+/etc/sbx/panel.json
+/etc/sbx/nodes.json
+/etc/sbx/traffic.db
+/etc/sbx/nft.conf
+/etc/sbx/iptables.sh
+/etc/sbx/web/
 /etc/sing-box/config.json
+/usr/local/bin/sbx
 ```
 
-`nodes.json` 是 inbound 的唯一数据源，`sbx` 每次改动都会由它重建 sing-box 的 inbounds，
-并且只动 tag 以 `sbx-n` 开头的部分 —— 你手工加的 inbound 不会被覆盖。
-所有配置改动都先 `sing-box check` 校验，通过才落盘，失败自动回滚。
+`nodes.json` 是 SBX 管理节点的唯一数据源。SBX 只重建 tag 以 `sbx-n` 开头的 inbound，不覆盖其它自定义 inbound。配置修改前会执行 `sing-box check`，失败自动回滚。
 
 ## 开发
 
-```
-installer-template.sh   安装器模板（开发时用 SBX_PAYLOAD_DIR 指向本目录）
-sbx.sh                  自包含发布脚本（用户直接 curl 执行）
-src/panel.py            采集器 + HTTP 面板
-src/nodes_tool.py       节点管理、端口/SNI修改与链接生成
-web/                    前端（高级深/浅主题、紧凑表格、实时刷新）
-build.py                内嵌全部资源，生成根目录 sbx.sh
-test_*.py/.sh            回归测试
+```text
+installer-template.sh   安装器模板
+sbx.sh                  自包含发布脚本
+src/panel.py            采集器和 HTTP 服务
+src/nodes_tool.py       节点管理与链接生成
+web/                    面板前端
+build.py                发布版构建脚本
+test_*.py / test_*.sh   回归测试
 ```
 
-发布：`python3 build.py` → 把 `dist/sbx.sh` 推到仓库，用户 curl 这个文件。
+重新构建：
 
-沙箱测试（不碰真实系统）：
+```bash
+python3 build.py
+```
 
+沙箱安装：
+
+```bash
+SBX_ROOT=/tmp/sbx-test \
+SBX_NO_SERVICE=1 \
+SBX_PAYLOAD_DIR=$PWD \
+SBX_SB_BIN=/path/to/sing-box \
+bash installer-template.sh
 ```
-SBX_ROOT=/tmp/x SBX_NO_SERVICE=1 SBX_PAYLOAD_DIR=$PWD \
-SBX_SB_BIN=/path/to/sing-box bash sbx.sh
-```
+
+## 测试
+
+当前测试覆盖：
+
+- 计数器差分
+- 计数器归零
+- 规则 epoch 换代
+- SQLite 事务一致性
+- nftables / iptables 真实格式解析
+- 节点添加 / 修改 / 删除
+- Reality 特殊参数安全
+- TCP / UDP socket 统计
+- 在线升级
+- 沙箱安装
+- 单文件解包
+- HTTP 鉴权与 API
