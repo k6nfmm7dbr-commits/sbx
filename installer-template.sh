@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 APP_NAME="SBX"
-APP_VERSION="2.7.1"
+APP_VERSION="2.8.0"
 RAW_URL="${SBX_RAW_URL:-https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh}"
 
 # SBX_ROOT 仅用于测试/沙箱安装（把整套目录挪到前缀下），正常安装留空
@@ -290,12 +290,11 @@ EOF
 
 ensure_panel_conf() {
   if [[ -f "$PANEL_CONF" ]]; then
-    # 旧版本的 token/manage_token 彻底移除：当前面板自用免密
     python3 - "$PANEL_CONF" <<'PY'
 import json, os, sys
 p=sys.argv[1]
 try:
- d=json.load(open(p)); d.pop('token',None); d.pop('manage_token',None)
+ d=json.load(open(p)); d.pop('token',None)
  tmp=p+'.clean';json.dump(d,open(tmp,'w'),indent=2,ensure_ascii=False);os.replace(tmp,p);os.chmod(p,0o600)
 except Exception: pass
 PY

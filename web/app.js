@@ -226,6 +226,24 @@ window.addEventListener('resize', function () {
   reflowTimer = setTimeout(function () { drawDaily(); drawNodeDaily(); }, 160);
 });
 
+/* ---------- 三页底部导航 ---------- */
+(function initNavigation(){
+  var valid={home:1,daily:1,node:1}, positions={home:0,daily:0,node:0};
+  var current=(location.hash||'#home').slice(1); if(!valid[current])current='home';
+  function show(name,push){
+    if(!valid[name])name='home'; positions[current]=window.scrollY||0; current=name;
+    document.querySelectorAll('.app-view').forEach(function(v){v.classList.toggle('on',v.id==='view-'+name);});
+    document.querySelectorAll('.nav-btn').forEach(function(b){b.classList.toggle('on',b.dataset.view===name);});
+    if(push&&location.hash!=='#'+name)history.pushState(null,'','#'+name);
+    requestAnimationFrame(function(){window.scrollTo(0,positions[name]||0);});
+    if(name==='daily'&&!cache.daily)loadDaily();
+    if(name==='node'&&!cache.nodeDaily)loadNodeDaily();
+  }
+  document.querySelectorAll('.nav-btn').forEach(function(b){b.addEventListener('click',function(){show(b.dataset.view,true);});});
+  window.addEventListener('popstate',function(){show((location.hash||'#home').slice(1),false);});
+  show(current,false);
+})();
+
 /* ---------- 启动与轮询 ---------- */
 setInterval(tickEase, 40);               // 数字缓动循环（setInterval 比 rAF 在后台更可靠）
 

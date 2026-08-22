@@ -393,7 +393,7 @@ select {
 /* ========================================================================
  * 三页式底部导航
  * ======================================================================== */
-.app-view { display:none; }
+.app-view { display:block; }
 .app-view.on { display:block; }
 main { padding-bottom:110px !important; }
 .bottom-nav {
@@ -417,19 +417,3 @@ main { padding-bottom:110px !important; }
   main { padding-bottom:100px !important; }
 }
 
-/* 管理页 */
-.manage-panel { max-width:680px; margin-left:auto; margin-right:auto; }
-.manage-lock,.manage-panel #manage-content { display:grid; gap:8px; }
-.manage-panel label { font-size:12px; font-weight:700; }
-.manage-panel input,.manage-panel select {
-  width:100%; padding:11px 12px; border:2px solid #000 !important; border-radius:10px;
-  background:#fff !important; color:#000 !important; font:600 14px/1.2 inherit;
-}
-.manage-panel button {
-  padding:11px 14px; border:2px solid #000; border-radius:10px; background:#ececec;
-  color:#000 !important; font-weight:800; cursor:pointer;
-}
-.manage-panel button:active { transform:translateY(1px); }
-.manage-actions { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:8px; }
-.manage-actions .danger { background:#000; color:#fff !important; }
-#manage-msg,#manage-result { min-height:18px; font-size:12px; margin:2px 0 0; }
