@@ -218,11 +218,12 @@ tbody tr:hover { background: color-mix(in srgb, var(--down) 8%, transparent); }
 }
 
 /* ---------- Excel 风格数据表 ---------- */
-.excel-wrap { overflow-x:auto; -webkit-overflow-scrolling:touch; -webkit-user-select:none; user-select:none; }
-.excel-scroll { width:max-content; min-width:100%; border:1px solid var(--line-strong); border-radius:10px; overflow:hidden; }
-.excel-table { width:760px; border-collapse:collapse; font-size:12px; font-variant-numeric:tabular-nums; }
-.excel-table th,.excel-table td { padding:8px 10px; border-right:1px solid var(--line-strong); border-bottom:1px solid var(--line); white-space:nowrap; }
-.excel-table th { color:var(--fg); background:color-mix(in srgb,var(--fg) 13%,var(--card-solid)); font-size:11px; font-weight:700; position:sticky;top:0; }
+.excel-wrap { overflow:hidden; -webkit-user-select:none; user-select:none; }
+.excel-scroll { width:100%; border:1px solid var(--line-strong); border-radius:10px; overflow:hidden; }
+.excel-table { width:100%; table-layout:fixed; border-collapse:collapse; font-size:11.5px; font-variant-numeric:tabular-nums; }
+.excel-table th,.excel-table td { padding:6px 5px; border-right:1px solid var(--line-strong); border-bottom:1px solid var(--line); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.excel-table th { color:var(--fg); background:color-mix(in srgb,var(--fg) 13%,var(--card-solid)); font-size:10.5px; font-weight:700; }
+.excel-table th:first-child,.excel-table td:first-child { width:28%; text-align:left; }
 .excel-table th:not(:first-child),.excel-table td:not(:first-child) { text-align:right; }
 .excel-table tbody tr:nth-child(even) { background:color-mix(in srgb,var(--accent) 6%,transparent); }
 .excel-table tbody tr:hover { background:color-mix(in srgb,var(--accent) 14%,transparent); }
@@ -230,6 +231,11 @@ tbody tr:hover { background: color-mix(in srgb, var(--down) 8%, transparent); }
 .excel-table th:last-child,.excel-table td:last-child { border-right:0; }
 .excel-table td.up,.excel-table th.up { color:var(--up); font-weight:600; }
 .excel-table td.down,.excel-table th.down { color:var(--down); font-weight:600; }
+@media (max-width:640px) {
+  .excel-table { font-size:11px; }
+  .excel-table th,.excel-table td { padding:6px 3px; }
+  .excel-table th:first-child,.excel-table td:first-child { width:27%; }
+}
 .precision-note { display:flex;align-items:center;gap:7px;margin-top:10px;font-size:10.5px;color:var(--muted); }
 .pulse-line { width:5px;height:5px;border-radius:50%;background:var(--up);box-shadow:0 0 8px var(--up); }
 .table-caption { display:block; margin-top:2px; font-size:11px; color:var(--muted); }
