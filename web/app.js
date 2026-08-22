@@ -219,7 +219,7 @@ function fmtTableBytes(n) { return fmtBytes(Number(n)||0); }
 function renderExcelTable(hostId, rows) {
   var host=document.getElementById(hostId); if(!host)return;
   if(!rows||!rows.length){host.innerHTML='<div class="empty">暂无数据</div>';return;}
-  var html='<div class="excel-scroll"><table class="excel-table"><thead><tr><th>日期</th><th class="up">上传</th><th class="down">下载</th><th>合计</th></tr></thead><tbody>';
+  var html='<div class="excel-scroll"><table class="excel-table"><colgroup><col class="col-date"><col class="col-up"><col class="col-down"><col class="col-total"></colgroup><thead><tr><th>日期</th><th class="up">上传</th><th class="down">下载</th><th>合计</th></tr></thead><tbody>';
   rows.slice().reverse().forEach(function(r){html+='<tr><td>'+esc(r.day)+'</td><td class="up">'+fmtTableBytes(r.rx)+'</td><td class="down">'+fmtTableBytes(r.tx)+'</td><td><b>'+fmtTableBytes(r.rx+r.tx)+'</b></td></tr>';});
   html+='</tbody></table></div>';
   host.innerHTML=html;
