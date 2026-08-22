@@ -20,6 +20,7 @@
     </div>
   </div>
   <div class="topbar-meta">
+    <button id="theme-btn" class="theme-btn" type="button" aria-label="切换明暗主题" title="切换明暗主题">◐</button>
     <span class="status" id="status"><span class="dot" id="health-dot"></span><span id="status-txt">连接中…</span></span>
     <span class="tag" id="meta-backend">—</span>
     <span class="clock" id="meta-clock">—</span>
@@ -65,17 +66,13 @@
 
   <section class="panel">
     <div class="panel-head">
-      <h2>速率曲线</h2>
+      <h2>速率曲线 <span class="hint">实线峰值 · 浅色平均</span></h2>
       <div class="head-ctl">
         <div class="seg" role="group" aria-label="速率时间范围">
           <button data-range="5m">5分</button>
           <button data-range="30m" class="on">30分</button>
           <button data-range="2h">2时</button>
           <button data-range="6h">6时</button>
-        </div>
-        <div class="seg" role="group" aria-label="统计方式">
-          <button data-mode="peak" class="on" title="每点取该时段内最高瞬时速率，各档峰值一致">峰值</button>
-          <button data-mode="avg" title="每点取该时段平均速率，曲线面积=总流量">平均</button>
         </div>
       </div>
     </div>

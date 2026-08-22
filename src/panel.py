@@ -173,13 +173,22 @@ CREATE TABLE IF NOT EXISTS totals (
     tx_pkts INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS samples (
-    ts    INTEGER NOT NULL,
-    scope TEXT NOT NULL,
-    rx    INTEGER NOT NULL DEFAULT 0,
-    tx    INTEGER NOT NULL DEFAULT 0,
+    ts          INTEGER NOT NULL,
+    scope       TEXT NOT NULL,
+    rx          INTEGER NOT NULL DEFAULT 0,
+    tx          INTEGER NOT NULL DEFAULT 0,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    valid       INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (ts, scope)
 );
 CREATE INDEX IF NOT EXISTS idx_samples_ts ON samples(ts);
+CREATE TABLE IF NOT EXISTS rate_samples (
+    ts          INTEGER PRIMARY KEY,
+    rx          INTEGER NOT NULL DEFAULT 0,
+    tx          INTEGER NOT NULL DEFAULT 0,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    valid       INTEGER NOT NULL DEFAULT 1
+);
 """
 
 
@@ -194,6 +203,14 @@ def db_connect(conf):
         con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA busy_timeout=30000")
     con.executescript(SCHEMA)
+    # 无损迁移旧数据库：旧 samples 没有 duration_ms / valid。
+    cols = {r["name"] for r in con.execute("PRAGMA table_info(samples)").fetchall()}
+    if "duration_ms" not in cols:
+        con.execute("ALTER TABLE samples ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0")
+    if "valid" not in cols:
+        con.execute("ALTER TABLE samples ADD COLUMN valid INTEGER NOT NULL DEFAULT 1")
+    # 升级前的旧样本没有真实耗时，不能用于速率计算；流量累计仍在 daily/totals 中完整保留。
+    con.execute("UPDATE samples SET valid=0 WHERE duration_ms<=0")
     return con
 
 
@@ -354,6 +371,69 @@ def snapshot_epoch(snapshot):
     return None
 
 
+class RateCache:
+    """全局速率内存环 + 预聚合桶。HTTP 查询只读最多120个桶。"""
+    BUCKETS = (5, 15, 60, 180)
+    def __init__(self, keep_sec=SAMPLE_KEEP_SECONDS):
+        self.keep_sec = keep_sec
+        self.lock = threading.Lock()
+        self.rows = []
+        self.rollups = {b: {} for b in self.BUCKETS}
+        self.loaded = False
+        self.db_path = None
+
+    @staticmethod
+    def _add_to(dst, ts, rx, tx, dur, bucket):
+        b = (int(ts) // bucket) * bucket
+        rr, tr = rx * 1000.0 / dur, tx * 1000.0 / dur
+        x = dst.setdefault(b, {"rx_num":0.0,"tx_num":0.0,"dur":0,
+                               "rx_peak":0.0,"tx_peak":0.0,"count":0})
+        x["rx_num"] += rx*1000.0; x["tx_num"] += tx*1000.0; x["dur"] += dur
+        x["rx_peak"] = max(x["rx_peak"],rr); x["tx_peak"] = max(x["tx_peak"],tr); x["count"] += 1
+
+    def _rebuild(self):
+        self.rollups = {b:{} for b in self.BUCKETS}
+        for ts,rx,tx,dur in self.rows:
+            for b in self.BUCKETS:
+                self._add_to(self.rollups[b],ts,rx,tx,dur,b)
+
+    def load(self, con, db_path=None):
+        since=int(time.time())-self.keep_sec
+        rows=[(int(r["ts"]),int(r["rx"]),int(r["tx"]),int(r["duration_ms"]))
+              for r in con.execute("SELECT ts,rx,tx,duration_ms FROM rate_samples WHERE valid=1 AND duration_ms>0 AND ts>=? ORDER BY ts",(since,))]
+        with self.lock:
+            self.rows=rows; self._rebuild(); self.loaded=True; self.db_path=db_path
+
+    def append(self, ts, rx, tx, duration_ms):
+        ts,rx,tx,duration_ms=int(ts),int(rx),int(tx),int(duration_ms)
+        cutoff=ts-self.keep_sec
+        with self.lock:
+            self.rows.append((ts,rx,tx,duration_ms))
+            for b in self.BUCKETS:
+                self._add_to(self.rollups[b],ts,rx,tx,duration_ms,b)
+            # 通常每次不删或只删1行；若删了，重建以保持峰值正确（无法从 max 中减）。
+            i=0
+            while i<len(self.rows) and self.rows[i][0]<cutoff:i+=1
+            if i:
+                del self.rows[:i]; self._rebuild()
+
+    def clear(self):
+        with self.lock:
+            self.rows = []
+            self.rollups = {b: {} for b in self.BUCKETS}
+            self.loaded = True
+
+    def query(self, since, bucket):
+        with self.lock:
+            data=self.rollups.get(bucket,{})
+            selected={k:dict(v) for k,v in data.items() if k>=since}
+            first=self.rows[0][0] if self.rows else 0
+            last=self.rows[-1][0] if self.rows else 0
+            return selected,first,last
+
+RATE_CACHE=RateCache()
+
+
 # --------------------------------------------------------------------------
 # 采集器：单调差分累加
 # --------------------------------------------------------------------------
@@ -371,60 +451,88 @@ class Collector(threading.Thread):
         self.stop_flag = threading.Event()
         self.last_error = ""
         self.last_ok_ts = 0
+        self.last_sample_ts = 0
         self.repair_at = 0
 
     def _ensure_con(self):
         if self.con is None:
             self.con = db_connect(self.conf)
+            RATE_CACHE.load(self.con, self.conf.get("db"))
         return self.con
 
     # ---- 状态读写 ----
     def _load_state(self):
-        rows = self.con.execute("SELECT name,last_bytes,last_pkts FROM counter_state").fetchall()
-        return {r["name"]: (r["last_bytes"], r["last_pkts"]) for r in rows}
+        rows = self.con.execute(
+            "SELECT name,last_bytes,last_pkts,updated_at FROM counter_state"
+        ).fetchall()
+        out = {}
+        for r in rows:
+            updated = int(r["updated_at"] or 0)
+            # 旧版存秒，新版存毫秒；升级时自动兼容。
+            if 0 < updated < 1_000_000_000_000:
+                updated *= 1000
+            out[r["name"]] = (r["last_bytes"], r["last_pkts"], updated)
+        return out
 
     def _meta_get(self, k, default=None):
         row = self.con.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone()
         return row["v"] if row else default
 
-    def _commit_tick(self, deltas, snapshot, ts, epoch):
+    def _commit_tick(self, deltas, snapshot, ts, ts_ms, epoch):
         """
-        增量入账 + 基线保存 + 清理，全部放在同一个事务里。
-        任何时刻崩溃都只会回到上一轮的一致状态，绝不会重复计或漏计。
+        增量入账 + 速率样本 + 基线保存 + 清理，全部放在同一个事务里。
+        daily/totals 记录所有确定的字节增量；samples 只记录时长可信的速率样本。
         """
         day = today_str(self.conf)
         cur = self.con
         cur.execute("BEGIN IMMEDIATE")
         try:
+            global_rx = global_tx = 0
+            global_duration = 0
+            global_valid = False
             for scope, d in deltas.items():
-                if not any(d.values()):
-                    continue
+                if d["rx"] or d["tx"] or d["rx_pkts"] or d["tx_pkts"]:
+                    cur.execute(
+                        "INSERT INTO daily(day,scope,rx,tx,rx_pkts,tx_pkts) VALUES(?,?,?,?,?,?) "
+                        "ON CONFLICT(day,scope) DO UPDATE SET rx=rx+excluded.rx, tx=tx+excluded.tx, "
+                        "rx_pkts=rx_pkts+excluded.rx_pkts, tx_pkts=tx_pkts+excluded.tx_pkts",
+                        (day, scope, d["rx"], d["tx"], d["rx_pkts"], d["tx_pkts"]),
+                    )
+                    cur.execute(
+                        "INSERT INTO totals(scope,rx,tx,rx_pkts,tx_pkts) VALUES(?,?,?,?,?) "
+                        "ON CONFLICT(scope) DO UPDATE SET rx=rx+excluded.rx, tx=tx+excluded.tx, "
+                        "rx_pkts=rx_pkts+excluded.rx_pkts, tx_pkts=tx_pkts+excluded.tx_pkts",
+                        (scope, d["rx"], d["tx"], d["rx_pkts"], d["tx_pkts"]),
+                    )
+                # valid=1 才进入速率曲线。即使字节为 0 也要写样本，让曲线真实回落到零。
+                if d.get("valid") and d.get("duration_ms", 0) > 0:
+                    cur.execute(
+                        "INSERT INTO samples(ts,scope,rx,tx,duration_ms,valid) VALUES(?,?,?,?,?,1) "
+                        "ON CONFLICT(ts,scope) DO UPDATE SET rx=rx+excluded.rx, tx=tx+excluded.tx, "
+                        "duration_ms=MAX(duration_ms,excluded.duration_ms), valid=1",
+                        (ts, scope, d["rx"], d["tx"], d["duration_ms"]),
+                    )
+                    if scope.startswith("node:"):
+                        global_rx += d["rx"]; global_tx += d["tx"]
+                        global_duration = max(global_duration, d["duration_ms"])
+                        global_valid = True
+            if global_valid and global_duration > 0:
                 cur.execute(
-                    "INSERT INTO daily(day,scope,rx,tx,rx_pkts,tx_pkts) VALUES(?,?,?,?,?,?) "
-                    "ON CONFLICT(day,scope) DO UPDATE SET rx=rx+excluded.rx, tx=tx+excluded.tx, "
-                    "rx_pkts=rx_pkts+excluded.rx_pkts, tx_pkts=tx_pkts+excluded.tx_pkts",
-                    (day, scope, d["rx"], d["tx"], d["rx_pkts"], d["tx_pkts"]),
-                )
-                cur.execute(
-                    "INSERT INTO totals(scope,rx,tx,rx_pkts,tx_pkts) VALUES(?,?,?,?,?) "
-                    "ON CONFLICT(scope) DO UPDATE SET rx=rx+excluded.rx, tx=tx+excluded.tx, "
-                    "rx_pkts=rx_pkts+excluded.rx_pkts, tx_pkts=tx_pkts+excluded.tx_pkts",
-                    (scope, d["rx"], d["tx"], d["rx_pkts"], d["tx_pkts"]),
-                )
-                cur.execute(
-                    "INSERT INTO samples(ts,scope,rx,tx) VALUES(?,?,?,?) "
-                    "ON CONFLICT(ts,scope) DO UPDATE SET rx=rx+excluded.rx, tx=tx+excluded.tx",
-                    (ts, scope, d["rx"], d["tx"]),
+                    "INSERT INTO rate_samples(ts,rx,tx,duration_ms,valid) VALUES(?,?,?,?,1) "
+                    "ON CONFLICT(ts) DO UPDATE SET rx=excluded.rx,tx=excluded.tx,"
+                    "duration_ms=excluded.duration_ms,valid=1",
+                    (ts, global_rx, global_tx, global_duration),
                 )
             cur.execute("DELETE FROM counter_state")
             cur.executemany(
                 "INSERT INTO counter_state(name,last_bytes,last_pkts,updated_at) VALUES(?,?,?,?)",
-                [(k, v[0], v[1], ts) for k, v in snapshot.items()],
+                [(k, v[0], v[1], ts_ms) for k, v in snapshot.items()],
             )
             if epoch is not None:
                 cur.execute("INSERT INTO meta(k,v) VALUES('epoch',?) "
                             "ON CONFLICT(k) DO UPDATE SET v=excluded.v", (str(epoch),))
             cur.execute("DELETE FROM samples WHERE ts < ?", (ts - SAMPLE_KEEP_SECONDS,))
+            cur.execute("DELETE FROM rate_samples WHERE ts < ?", (ts - SAMPLE_KEEP_SECONDS,))
             cur.execute("COMMIT")
         except Exception:
             with contextlib.suppress(Exception):
@@ -433,15 +541,20 @@ class Collector(threading.Thread):
 
     # ---- 单轮采集 ----
     def tick(self):
-        con = self._ensure_con()
-        ts = int(time.time())
+        self._ensure_con()
+        ts_ms = time.time_ns() // 1_000_000
+        wall_ts = ts_ms // 1000
+        # samples 主键是秒；保证极端调度/时钟回拨时仍单调，不覆盖上一条样本。
+        ts = max(wall_ts, self.last_sample_ts + 1) if self.last_sample_ts else wall_ts
         snapshot = self.backend.read()          # 抛异常由调用方处理
         epoch = snapshot_epoch(snapshot)
         prev_epoch = self._meta_get("epoch")
-        # 世代变化 = 规则集被重建过，所有计数器都是新的
         fresh_ruleset = (epoch is not None and prev_epoch is not None
                          and str(epoch) != str(prev_epoch))
         state = {} if fresh_ruleset else self._load_state()
+        expected_ms = max(1, int(self.conf.get("interval", 2))) * 1000
+        min_ms = max(200, expected_ms // 4)
+        max_ms = expected_ms * 3 + 500
         deltas = {}
         reset_hits = 0
 
@@ -450,30 +563,57 @@ class Collector(threading.Thread):
             if not parsed:
                 continue
             scope, direction = parsed
-            lb, lp = state.get(name, (0, 0))
-            if byts < lb:                       # 计数器被重置 -> 当前值即增量
+            prev = state.get(name)
+            valid = False
+            duration_ms = 0
+            if prev is None:
+                # 第一次看到这个计数器：字节可累计，但起点未知，不能拿来算速率。
+                lb, lp, _ = 0, 0, 0
                 db, dp = byts, pkts
-                reset_hits += 1
             else:
-                db, dp = byts - lb, max(0, pkts - lp)
-            slot = deltas.setdefault(scope, {"rx": 0, "tx": 0, "rx_pkts": 0, "tx_pkts": 0})
+                lb, lp, last_ms = prev
+                duration_ms = max(0, ts_ms - last_ms)
+                if byts < lb:
+                    # 计数器归零：当前字节可补进累计，但发生时刻未知，不能制造速率尖峰。
+                    db, dp = byts, pkts
+                    reset_hits += 1
+                else:
+                    db, dp = byts - lb, max(0, pkts - lp)
+                    valid = min_ms <= duration_ms <= max_ms
+            slot = deltas.setdefault(scope, {
+                "rx": 0, "tx": 0, "rx_pkts": 0, "tx_pkts": 0,
+                "duration_ms": 0, "valid": True, "seen_rx": False, "seen_tx": False,
+            })
             if direction == "rx":
-                slot["rx"] += db
-                slot["rx_pkts"] += dp
+                slot["rx"] += db; slot["rx_pkts"] += dp; slot["seen_rx"] = True
             else:
-                slot["tx"] += db
-                slot["tx_pkts"] += dp
+                slot["tx"] += db; slot["tx_pkts"] += dp; slot["seen_tx"] = True
+            slot["duration_ms"] = max(slot["duration_ms"], duration_ms)
+            slot["valid"] = slot["valid"] and valid
 
-        self._commit_tick(deltas, snapshot, ts, epoch)
-        self.last_ok_ts = ts
+        # 一个节点必须同时拿到入/出两个方向的可信基线，才写速率样本。
+        for d in deltas.values():
+            d["valid"] = bool(d["valid"] and d["seen_rx"] and d["seen_tx"]
+                              and d["duration_ms"] > 0)
+
+        self._commit_tick(deltas, snapshot, ts, ts_ms, epoch)
+        # 事务成功后再入内存环，保证内存与持久化一致。
+        valid_nodes = [d for scope, d in deltas.items()
+                       if scope.startswith("node:") and d.get("valid") and d.get("duration_ms", 0) > 0]
+        if valid_nodes:
+            RATE_CACHE.append(ts, sum(d["rx"] for d in valid_nodes), sum(d["tx"] for d in valid_nodes),
+                              max(d["duration_ms"] for d in valid_nodes))
+        self.last_sample_ts = ts
+        self.last_ok_ts = wall_ts
         self.last_error = ""
         if fresh_ruleset:
-            log("检测到规则集世代 %s -> %s, 已按新基线继续统计" % (prev_epoch, epoch))
+            log("检测到规则集世代 %s -> %s, 累计流量已衔接，速率从新基线开始" % (prev_epoch, epoch))
         if reset_hits:
-            log("检测到 %d 个计数器归零, 已按增量补记" % reset_hits)
+            log("检测到 %d 个计数器归零, 已补入累计；为避免假峰值，本轮不写速率" % reset_hits)
 
     def run(self):
-        interval = max(1, int(self.conf.get("interval", 5)))
+        interval = max(1, int(self.conf.get("interval", 2)))
+        deadline = time.monotonic()
         while not self.stop_flag.is_set():
             try:
                 self.tick()
@@ -486,7 +626,13 @@ class Collector(threading.Thread):
             except Exception as e:
                 self.last_error = str(e)
                 log("采集异常:", e)
-            self.stop_flag.wait(interval)
+            # 绝对周期调度：执行耗时不会叠加进下一轮，长期保持 2s 节拍。
+            deadline += interval
+            now_mono = time.monotonic()
+            if deadline <= now_mono:
+                # 若系统挂起/卡顿跨过多个周期，从当前重新对齐，不补跑假样本。
+                deadline = now_mono + interval
+            self.stop_flag.wait(max(0, deadline - now_mono))
 
 
 # --------------------------------------------------------------------------
@@ -514,22 +660,23 @@ def q_totals(con):
 
 
 def q_rate(con, conf, window=None):
-    """
-    最近一段时间的平均速率 (bytes/s)。
-    锚定在最新采样点而不是当前时刻，避免采样间隔造成的忽高忽低；
-    若最新采样已过期（采集器停摆），返回空表示速率未知。
-    """
-    iv = max(1, int(conf.get("interval", 5)))
-    window = window or max(20, iv * 4)
-    row = con.execute("SELECT MAX(ts) AS m FROM samples").fetchone()
+    """最近有效样本的加权平均速率（字节 / 真实采样耗时）。"""
+    iv = max(1, int(conf.get("interval", 2)))
+    window = window or max(8, iv * 4)
+    row = con.execute("SELECT MAX(ts) AS m FROM samples WHERE valid=1 AND duration_ms>0").fetchone()
     latest = row["m"] if row and row["m"] else 0
-    if not latest or int(time.time()) - latest > max(15, iv * 3):
+    if not latest or int(time.time()) - latest > max(15, iv * 4):
         return {}
     rows = con.execute(
-        "SELECT scope, SUM(rx) rx, SUM(tx) tx FROM samples WHERE ts > ? AND ts <= ? GROUP BY scope",
+        "SELECT scope, SUM(rx) rx, SUM(tx) tx, SUM(duration_ms) dur FROM samples "
+        "WHERE valid=1 AND duration_ms>0 AND ts>? AND ts<=? GROUP BY scope",
         (latest - window, latest),
     ).fetchall()
-    return {r["scope"]: {"rx": r["rx"] / window, "tx": r["tx"] / window} for r in rows}
+    out = {}
+    for r in rows:
+        sec = max(0.001, r["dur"] / 1000.0)
+        out[r["scope"]] = {"rx": r["rx"] / sec, "tx": r["tx"] / sec}
+    return out
 
 
 SERIES_RANGES = {
@@ -542,50 +689,36 @@ SERIES_RANGES = {
 }
 
 
-def q_series(con, conf, rng="30m", mode="peak"):
-    """
-    节点合计速率序列（固定时间栅格 + 零填充）。全部取自 samples 表。
-    mode:
-      "peak" —— 每点 = 桶内最高瞬时速率（单个采样的字节 / 采集间隔）。
-                各档峰值高度一致，看"最快跑到多少"用这个（默认）。
-      "avg"  —— 每点 = 桶内平均速率（桶内总字节 / 桶秒）。
-                曲线下面积 = 该时段总流量，看"跑了多少量"用这个。
-    结果: {"range","bucket","interval","mode",
-           "points":[{"ts","rx","tx","rx_peak","tx_peak"}...]}
-      rx/tx      = 桶内总字节   → 前端 avg  = rx / bucket
-      rx_peak/.. = 桶内单采样最大字节 → 前端 peak = rx_peak / interval
-    固定栅格保证横轴对齐当前时刻；空时段填 0，不把偶发突发连成假平台。
-    """
+def q_series(con, rng="30m"):
+    """按真实 duration_ms 计算 B/s；返回 avg/peak，未知历史为 None。"""
     if rng not in SERIES_RANGES:
         rng = "30m"
-    if mode not in ("peak", "avg"):
-        mode = "peak"
     span, bucket = SERIES_RANGES[rng]
-    iv = max(1, int(conf.get("interval", 2)))
     now = int(time.time())
     end = (now // bucket) * bucket
-    n_buckets = max(1, span // bucket)
-    start = end - (n_buckets - 1) * bucket
-
-    # 每个采样点是"一个采集周期内的字节数"，先按 ts 归并各节点，再按桶聚合：
-    #   SUM  → 桶内总字节（算平均用）
-    #   MAX  → 桶内单周期最大字节（算峰值用）
-    rows = con.execute(
-        "SELECT (ts/?)*? AS b, SUM(srx) rx, SUM(stx) tx, MAX(srx) rxp, MAX(stx) txp FROM ("
-        "  SELECT ts, SUM(rx) srx, SUM(tx) stx FROM samples "
-        "  WHERE ts >= ? AND scope LIKE 'node:%' GROUP BY ts"
-        ") GROUP BY b",
-        (bucket, bucket, start),
-    ).fetchall()
-    have = {int(r["b"]): (r["rx"], r["tx"], r["rxp"], r["txp"]) for r in rows}
-
-    pts = []
-    b = start
+    requested_start = end - span + bucket
+    db_path = None
+    with contextlib.suppress(Exception):
+        row = con.execute("PRAGMA database_list").fetchone()
+        db_path = row["file"] if row else None
+    if not RATE_CACHE.loaded or (db_path and RATE_CACHE.db_path != db_path):
+        RATE_CACHE.load(con, db_path)
+    buckets, first_ts, last_ts = RATE_CACHE.query(requested_start, bucket)
+    available_start = max(requested_start, (first_ts // bucket) * bucket) if first_ts else end
+    pts, b = [], requested_start
     while b <= end:
-        rx, tx, rxp, txp = have.get(b, (0, 0, 0, 0))
-        pts.append({"ts": b, "rx": rx, "tx": tx, "rx_peak": rxp, "tx_peak": txp})
+        x = buckets.get(b)
+        if b < available_start or not first_ts or not x:
+            pts.append({"ts": b, "rx_avg": None, "tx_avg": None,
+                        "rx_peak": None, "tx_peak": None, "samples": 0})
+        else:
+            pts.append({"ts": b, "rx_avg": x["rx_num"] / x["dur"],
+                        "tx_avg": x["tx_num"] / x["dur"], "rx_peak": x["rx_peak"],
+                        "tx_peak": x["tx_peak"], "samples": x["count"]})
         b += bucket
-    return {"range": rng, "bucket": bucket, "interval": iv, "mode": mode, "points": pts}
+    return {"range": rng, "bucket": bucket, "mode": "rate_v2",
+            "requested_start": requested_start, "available_start": first_ts,
+            "available_end": last_ts, "collected_sec": max(0, last_ts-first_ts), "points": pts}
 
 
 def build_summary(conf, con, collector=None):
@@ -804,8 +937,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"days": q_daily(con, days, scope)})
             elif route == "/api/series":
                 rng = (qs.get("range") or ["30m"])[0]
-                mode = (qs.get("mode") or ["peak"])[0]
-                self._json(q_series(con, self.conf, rng, mode))
+                self._json(q_series(con, rng))
             elif route == "/api/nodes":
                 self._json({"nodes": load_nodes(self.conf)})
             elif route == "/api/export":
@@ -902,10 +1034,14 @@ def cmd_reset(conf, scope=None):
         con.execute("DELETE FROM daily WHERE scope=?", (scope,))
         con.execute("DELETE FROM totals WHERE scope=?", (scope,))
         con.execute("DELETE FROM samples WHERE scope=?", (scope,))
+        # rate_samples 是全节点合计，单节点删除后无法无损扣除历史；
+        # 清空曲线重新采集，避免继续展示已删节点流量。
+        con.execute("DELETE FROM rate_samples")
     else:
-        for t in ("daily", "totals", "samples"):
+        for t in ("daily", "totals", "samples", "rate_samples"):
             con.execute("DELETE FROM %s" % t)
     con.close()
+    RATE_CACHE.clear()
     print("统计数据已清空" + (" (%s)" % scope if scope else ""))
 
 

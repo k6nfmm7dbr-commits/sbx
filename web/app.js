@@ -8,19 +8,24 @@
 'use strict';
 
 var TOKEN = new URLSearchParams(location.search).get('token') || '';
-var state = { days: 30, sortScope: 'today', nodeId: null, summary: null, live: null, range: '30m', mode: 'peak' };
+var state = { days: 30, sortScope: 'today', nodeId: null, summary: null, live: null, range: '30m' };
 var RANGE_LABEL = { '5m': '近 5 分钟', '30m': '近 30 分钟', '2h': '近 2 小时', '6h': '近 6 小时' };
 var RANGE_BUCKET_TXT = { '5m': '每点 5 秒', '30m': '每点 15 秒', '2h': '每点 1 分钟', '6h': '每点 3 分钟' };
 
+var inflight = {};
 function api(path, params) {
+  var key = path + JSON.stringify(params || {});
+  if (inflight[key]) return inflight[key];
   var u = new URL(path, location.origin);
   if (params) Object.keys(params).forEach(function (k) { u.searchParams.set(k, params[k]); });
   if (TOKEN) u.searchParams.set('token', TOKEN);
-  return fetch(u, { cache: 'no-store' }).then(function (r) {
+  var req = fetch(u, { cache: 'no-store' }).then(function (r) {
     if (r.status === 401) throw new Error('令牌无效，请重新登录');
     if (!r.ok) throw new Error('请求失败 ' + r.status);
     return r.json();
-  });
+  }).finally(function () { delete inflight[key]; });
+  inflight[key] = req;
+  return req;
 }
 
 /* ---------- 格式化 ---------- */
@@ -92,55 +97,48 @@ function niceMax(v) {
   return step * base;
 }
 
-/* ---------- Hero 迷你实时曲线（本地滑动窗口，逐帧平滑）---------- */
-var SPARK_N = 80;
-var sparkData = [];  // 每项 {up, down}
-var sparkTarget = { up: 0, down: 0 };
-var sparkInit = false;
-function sparkPush(up, down) {
-  sparkTarget = { up: up, down: down };
-  if (!sparkInit) {   // 首帧：用当前值填满窗口，避免从右下角一小段开始
-    sparkInit = true;
-    sparkData = [];
-    for (var i = 0; i < SPARK_N; i++) sparkData.push({ up: up, down: down });
-    drawSpark();
-  }
+/* ---------- Hero 迷你实时曲线：只更新 path，不重建 SVG ---------- */
+var SPARK_N=80, sparkData=[], sparkTarget={up:0,down:0}, sparkInit=false, sparkDom=null;
+function ensureSpark(){
+  var host=document.getElementById('spark'); if(!host)return null;
+  if(sparkDom && sparkDom.host===host)return sparkDom;
+  host.textContent='';
+  var svg=svgEl('svg',{viewBox:'0 0 400 64',width:'100%',height:64,preserveAspectRatio:'none'});
+  function p(color,opacity){var e=svgEl('path',{fill:'none',stroke:color,'stroke-width':1.8,opacity:opacity,'stroke-linejoin':'round','stroke-linecap':'round'});svg.appendChild(e);return e;}
+  var downFill=svgEl('path',{fill:'var(--down)',opacity:.12,stroke:'none'});svg.appendChild(downFill);
+  var upFill=svgEl('path',{fill:'var(--up)',opacity:.10,stroke:'none'});svg.appendChild(upFill);
+  var down=p('var(--down)',1),up=p('var(--up)',1);host.appendChild(svg);
+  sparkDom={host:host,svg:svg,down:down,up:up,downFill:downFill,upFill:upFill};return sparkDom;
 }
-function sparkStep() {
-  // 平滑逼近目标后压入窗口，让曲线像水流一样推进
-  var last = sparkData[sparkData.length - 1] || { up: 0, down: 0 };
-  var nu = last.up + (sparkTarget.up - last.up) * 0.25;
-  var nd = last.down + (sparkTarget.down - last.down) * 0.25;
-  sparkData.push({ up: nu, down: nd });
-  while (sparkData.length > SPARK_N) sparkData.shift();
-  drawSpark();
+function sparkPush(up,down){
+  sparkTarget={up:Number(up)||0,down:Number(down)||0};
+  if(!sparkInit){sparkInit=true;sparkData=[];for(var i=0;i<SPARK_N;i++)sparkData.push({up:sparkTarget.up,down:sparkTarget.down});drawSpark();}
 }
-function drawSpark() {
-  var host = document.getElementById('spark');
-  if (!host || sparkData.length < 2) return;
-  var W = Math.max(300, host.clientWidth || 400), H = 64;
-  var maxV = niceMax(sparkData.reduce(function (m, p) { return Math.max(m, p.up, p.down); }, 1));
-  var n = sparkData.length, dx = W / (n - 1);
-  function line(key, color, fill) {
-    var d = '';
-    for (var i = 0; i < n; i++) {
-      var x = i * dx;
-      var y = H - 3 - (H - 6) * (sparkData[i][key] / maxV);
-      d += (i ? 'L' : 'M') + x.toFixed(1) + ' ' + y.toFixed(1);
-    }
-    var parts = '';
-    if (fill) parts += '<path d="' + d + 'L' + W + ' ' + H + 'L0 ' + H + 'Z" fill="' + color + '" opacity="0.14"/>';
-    parts += '<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>';
-    return parts;
-  }
-  host.innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="' + W + '" height="' + H + '" preserveAspectRatio="none">'
-    + line('down', 'var(--down)', true) + line('up', 'var(--up)', true) + '</svg>';
+function sparkStep(){
+  var last=sparkData[sparkData.length-1]||{up:0,down:0};
+  sparkData.push({up:last.up+(sparkTarget.up-last.up)*.22,down:last.down+(sparkTarget.down-last.down)*.22});
+  while(sparkData.length>SPARK_N)sparkData.shift();drawSpark();
+}
+function drawSpark(){
+  if(sparkData.length<2)return;var dom=ensureSpark();if(!dom)return;
+  var W=400,H=64,maxV=niceMax(sparkData.reduce(function(m,p){return Math.max(m,p.up,p.down);},1));
+  function d(key){var out='';for(var i=0;i<sparkData.length;i++){var x=i*(W/(sparkData.length-1)),y=H-3-(H-6)*(sparkData[i][key]/maxV);out+=(i?'L':'M')+x.toFixed(1)+' '+y.toFixed(1);}return out;}
+  var dd=d('down'),du=d('up');dom.down.setAttribute('d',dd);dom.up.setAttribute('d',du);
+  dom.downFill.setAttribute('d',dd+'L400 64L0 64Z');dom.upFill.setAttribute('d',du+'L400 64L0 64Z');
+}
+
+function replaceChart(host, node) {
+  if (node) host.replaceChildren(node);
+  else host.replaceChildren();
+}
+function emptyChart(host, text) {
+  var d=document.createElement('div');d.className='empty';d.textContent=text;host.replaceChildren(d);
 }
 
 /* ---------- 分组柱状图 ---------- */
 function drawGrouped(host, rows, opts) {
-  opts = opts || {}; host.textContent = '';
-  if (!rows.length) { host.innerHTML = '<div class="empty">暂无数据</div>'; return; }
+  opts = opts || {};
+  if (!rows.length) { emptyChart(host,'暂无数据'); return; }
   var avail = Math.max(280, host.parentNode.clientWidth || 600);
   var slot = opts.slot || 24, padL = 54, padR = 12, padT = 12, padB = 26;
   var W = Math.max(avail, rows.length * slot + padL + padR), H = opts.height || 220;
@@ -175,56 +173,100 @@ function drawGrouped(host, rows, opts) {
       lb.textContent = r.label; svg.appendChild(lb);
     }
   });
-  host.appendChild(svg);
+  replaceChart(host, svg);
 }
 
-/* ---------- 速率面积图 ---------- */
-function drawArea(host, points, opts) {
-  opts = opts || {}; host.textContent = '';
-  if (!points || points.length < 2) { host.innerHTML = '<div class="empty">采集中，稍候即会出现曲线</div>'; return; }
-  var W = Math.max(300, host.parentNode.clientWidth || 700), H = opts.height || 200;
-  var padL = 54, padR = 12, padT = 12, padB = 24, iw = W - padL - padR, ih = H - padT - padB;
-  var maxV = niceMax(points.reduce(function (m, p) { return Math.max(m, p.rx, p.tx); }, 0));
-  var t0 = points[0].ts, t1 = points[points.length - 1].ts, span = Math.max(1, t1 - t0);
-  var svg = svgEl('svg', { viewBox: '0 0 ' + W + ' ' + H, width: W, height: H, role: 'img' });
-  for (var g = 0; g <= 4; g++) {
-    var y = padT + ih - (ih * g / 4);
-    svg.appendChild(svgEl('line', { class: 'grid' + (g === 0 ? ' grid-0' : ''), x1: padL, y1: y, x2: W - padR, y2: y }));
-    var t = svgEl('text', { class: 'axis', x: padL - 8, y: y + 3, 'text-anchor': 'end' });
-    t.textContent = fmtRate(maxV * g / 4); svg.appendChild(t);
-  }
-  // 横轴：均匀 4 段真实时刻
-  for (var f = 0; f <= 4; f++) {
-    var frac = f / 4, x = padL + iw * frac;
-    var lb = svgEl('text', { class: 'axis', x: x, y: H - 6,
-      'text-anchor': f === 0 ? 'start' : (f === 4 ? 'end' : 'middle') });
-    lb.textContent = (opts.fmtX || fmtClock)(t0 + span * frac); svg.appendChild(lb);
-  }
-  function xOf(p) { return padL + iw * ((p.ts - t0) / span); }
-  function yOf(v) { return padT + ih - (maxV > 0 ? ih * (v / maxV) : 0); }
-  function path(key, color) {
-    var d = '';
-    points.forEach(function (p, i) { d += (i ? 'L' : 'M') + xOf(p).toFixed(1) + ' ' + yOf(p[key]).toFixed(1); });
-    svg.appendChild(svgEl('path', { d: d + 'L' + (padL + iw) + ' ' + (padT + ih) + 'L' + padL + ' ' + (padT + ih) + 'Z', fill: color, opacity: '0.13', stroke: 'none' }));
-    svg.appendChild(svgEl('path', { d: d, fill: 'none', stroke: color, 'stroke-width': 1.8, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
-  }
-  path('tx', 'var(--down)'); path('rx', 'var(--up)');
-  // 悬浮游标
-  var cur = svgEl('line', { class: 'cursor-line', x1: 0, y1: padT, x2: 0, y2: padT + ih, opacity: 0 });
-  svg.appendChild(cur);
-  var overlay = svgEl('rect', { class: 'hit', x: padL, y: padT, width: iw, height: ih });
-  overlay.addEventListener('pointermove', function (e) {
-    var rect = svg.getBoundingClientRect();
-    var rel = (e.clientX - rect.left) / rect.width * W;
-    var frac2 = Math.min(1, Math.max(0, (rel - padL) / iw));
-    var idx = Math.round(frac2 * (points.length - 1));
-    var p = points[idx]; if (!p) return;
-    cur.setAttribute('x1', xOf(p)); cur.setAttribute('x2', xOf(p)); cur.setAttribute('opacity', 1);
-    showTip(e, (opts.fmtX || fmtClock)(p.ts) + '<br>↑ ' + fmtRate(p.rx) + '<br>↓ ' + fmtRate(p.tx));
+function fmtDuration(sec) {
+  sec = Math.max(0, Number(sec) || 0);
+  if (sec < 60) return Math.round(sec) + ' 秒';
+  if (sec < 3600) return Math.max(1, Math.round(sec / 60)) + ' 分钟';
+  var h = sec / 3600;
+  return (h < 10 ? h.toFixed(1) : Math.round(h)) + ' 小时';
+}
+
+/* 速率曲线 v2：浅色面积=时间加权平均，实线=桶内峰值；null=未采集/断线 */
+function drawRateChart(host, points, opts) {
+  opts = opts || {};
+  if (!points || !points.length) { emptyChart(host,'等待第一轮有效采样…'); return; }
+  var valid = points.filter(function (p) {
+    return p.rx_avg != null || p.tx_avg != null || p.rx_peak != null || p.tx_peak != null;
   });
-  overlay.addEventListener('pointerleave', function () { cur.setAttribute('opacity', 0); hideTip(); });
-  svg.appendChild(overlay);
-  host.appendChild(svg);
+  if (!valid.length) { emptyChart(host,'建立基线中，约 2 秒后开始记录速率…'); return; }
+
+  var W = Math.max(300, host.parentNode.clientWidth || 700), H = opts.height || 210;
+  var padL = 54, padR = 12, padT = 12, padB = 24, iw = W-padL-padR, ih = H-padT-padB;
+  var maxV = niceMax(valid.reduce(function (m,p) {
+    return Math.max(m, p.rx_avg||0, p.tx_avg||0, p.rx_peak||0, p.tx_peak||0);
+  }, 0));
+  var t0=points[0].ts, t1=points[points.length-1].ts, span=Math.max(1,t1-t0);
+  var svg=svgEl('svg',{viewBox:'0 0 '+W+' '+H,width:W,height:H,role:'img'});
+  function xOf(p){return padL+iw*((p.ts-t0)/span);}
+  function yOf(v){return padT+ih-(maxV>0?ih*(v/maxV):0);}
+
+  for(var g=0;g<=4;g++){
+    var y=padT+ih-ih*g/4;
+    svg.appendChild(svgEl('line',{class:'grid'+(g===0?' grid-0':''),x1:padL,y1:y,x2:W-padR,y2:y}));
+    var t=svgEl('text',{class:'axis',x:padL-8,y:y+3,'text-anchor':'end'});
+    t.textContent=fmtRate(maxV*g/4); svg.appendChild(t);
+  }
+  for(var f=0;f<=4;f++){
+    var frac=f/4,x=padL+iw*frac;
+    var lb=svgEl('text',{class:'axis',x:x,y:H-6,'text-anchor':f===0?'start':(f===4?'end':'middle')});
+    lb.textContent=fmtClock(t0+span*frac); svg.appendChild(lb);
+  }
+
+  function segments(key){
+    var out=[],cur=[];
+    points.forEach(function(p){
+      var v=p[key];
+      if(v==null){if(cur.length){out.push(cur);cur=[];}}
+      else cur.push({p:p,v:v});
+    });
+    if(cur.length)out.push(cur); return out;
+  }
+  function drawAvg(key,color){
+    segments(key).forEach(function(seg){
+      if(!seg.length)return;
+      var d=''; seg.forEach(function(z,i){d+=(i?'L':'M')+xOf(z.p).toFixed(1)+' '+yOf(z.v).toFixed(1);});
+      var x0=xOf(seg[0].p),x1=xOf(seg[seg.length-1].p),base=padT+ih;
+      svg.appendChild(svgEl('path',{d:d+'L'+x1+' '+base+'L'+x0+' '+base+'Z',fill:color,opacity:'0.14',stroke:'none'}));
+      svg.appendChild(svgEl('path',{d:d,fill:'none',stroke:color,'stroke-width':'1.1',opacity:'0.55','stroke-linejoin':'round'}));
+    });
+  }
+  function drawPeak(key,color){
+    segments(key).forEach(function(seg){
+      if(!seg.length)return;
+      var d=''; seg.forEach(function(z,i){d+=(i?'L':'M')+xOf(z.p).toFixed(1)+' '+yOf(z.v).toFixed(1);});
+      if(seg.length===1){svg.appendChild(svgEl('circle',{cx:xOf(seg[0].p),cy:yOf(seg[0].v),r:2.3,fill:color}));}
+      else svg.appendChild(svgEl('path',{d:d,fill:'none',stroke:color,'stroke-width':'2.1','stroke-linejoin':'round','stroke-linecap':'round'}));
+    });
+  }
+  drawAvg('tx_avg','var(--down)'); drawAvg('rx_avg','var(--up)');
+  drawPeak('tx_peak','var(--down)'); drawPeak('rx_peak','var(--up)');
+
+  // 标记真正开始采集的位置，左侧空白明确表示“尚未安装/未采集”。
+  var first=valid[0];
+  if(first && first.ts>t0){
+    var sx=xOf(first);
+    svg.appendChild(svgEl('line',{x1:sx,y1:padT,x2:sx,y2:padT+ih,stroke:'var(--line-strong)','stroke-dasharray':'3 3'}));
+    var st=svgEl('text',{class:'axis',x:sx+4,y:padT+11}); st.textContent='开始采集'; svg.appendChild(st);
+  }
+
+  var cur=svgEl('line',{class:'cursor-line',x1:0,y1:padT,x2:0,y2:padT+ih,opacity:0}); svg.appendChild(cur);
+  var overlay=svgEl('rect',{class:'hit',x:padL,y:padT,width:iw,height:ih});
+  overlay.addEventListener('pointermove',function(e){
+    var rect=svg.getBoundingClientRect(),rel=(e.clientX-rect.left)/rect.width*W;
+    var frac=Math.min(1,Math.max(0,(rel-padL)/iw));
+    var idx=Math.round(frac*(points.length-1)),p=points[idx]; if(!p)return;
+    cur.setAttribute('x1',xOf(p));cur.setAttribute('x2',xOf(p));cur.setAttribute('opacity',1);
+    var html='<b>'+fmtClock(p.ts)+'</b>';
+    if(p.tx_peak==null) html+='<br>未采集';
+    else html+='<br>↓ 峰值 '+fmtRate(p.tx_peak)+'　平均 '+fmtRate(p.tx_avg||0)
+             +'<br>↑ 峰值 '+fmtRate(p.rx_peak||0)+'　平均 '+fmtRate(p.rx_avg||0);
+    showTip(e,html);
+  });
+  overlay.addEventListener('pointerleave',function(){cur.setAttribute('opacity',0);hideTip();});
+  svg.appendChild(overlay); replaceChart(host, svg);
 }
 
 /* ---------- 渲染：概览（低频 summary）---------- */
@@ -354,16 +396,7 @@ function drawDaily() {
 }
 function drawSeries() {
   if (!cache.series) return;
-  var d = cache.series;
-  var peak = (d.mode || 'peak') === 'peak';
-  // peak: 每点 = 桶内单个采集周期的最大字节 / 采集间隔 → 真实瞬时峰值，各档一致
-  // avg : 每点 = 桶内总字节 / 桶秒 → 平均速率，曲线面积 = 总流量
-  var div = peak ? (d.interval || 2) : (d.bucket || 15);
-  drawArea(document.getElementById('chart-live'), d.points.map(function (p) {
-    return peak
-      ? { ts: p.ts, rx: (p.rx_peak || 0) / div, tx: (p.tx_peak || 0) / div }
-      : { ts: p.ts, rx: p.rx / div, tx: p.tx / div };
-  }), { label: '速率曲线', fmtX: fmtClock });
+  drawRateChart(document.getElementById('chart-live'), cache.series.points || [], { fmtX: fmtClock });
 }
 function drawNodeDaily() {
   if (!cache.nodeDaily) return;
@@ -373,11 +406,10 @@ function drawNodeDaily() {
 }
 function loadDaily() { return api('/api/daily', { days: state.days }).then(function (d) { cache.daily = d.days; drawDaily(); }).catch(function (e) { toast(e.message); }); }
 function loadSeries() {
-  return api('/api/series', { range: state.range, mode: state.mode }).then(function (d) {
+  return api('/api/series', { range: state.range }).then(function (d) {
     cache.series = d; drawSeries();
     var n = (d.points || []).length;
-    var modeTxt = (d.mode || 'peak') === 'peak' ? '峰值·瞬时最高' : '平均·' + (RANGE_BUCKET_TXT[state.range] || '');
-    setText('live-hint', modeTxt + '（' + n + ' 点）');
+    setText('live-hint', '已采集 ' + fmtDuration(d.collected_sec) + ' · ' + (RANGE_BUCKET_TXT[state.range] || '') + '（' + n + ' 点）');
   }).catch(function (e) { toast(e.message); });
 }
 function loadNodeDaily() {
@@ -385,6 +417,19 @@ function loadNodeDaily() {
   return api('/api/daily', { days: state.days, scope: 'node:' + state.nodeId })
     .then(function (d) { cache.nodeDaily = d.days; drawNodeDaily(); }).catch(function (e) { toast(e.message); });
 }
+
+/* ---------- 主题 ---------- */
+(function initTheme(){
+  var saved=''; try{saved=localStorage.getItem('sbx-theme')||'';}catch(e){}
+  if(saved==='dark'||saved==='light')document.documentElement.setAttribute('data-theme',saved);
+  var btn=document.getElementById('theme-btn'); if(!btn)return;
+  function label(){var t=document.documentElement.getAttribute('data-theme')||'system';btn.textContent=t==='dark'?'☀':(t==='light'?'☾':'◐');btn.title='主题：'+(t==='dark'?'深色':(t==='light'?'浅色':'跟随系统'));}
+  btn.addEventListener('click',function(){
+    var t=document.documentElement.getAttribute('data-theme')||'system';t=t==='system'?'dark':(t==='dark'?'light':'system');
+    if(t==='system')document.documentElement.removeAttribute('data-theme');else document.documentElement.setAttribute('data-theme',t);
+    try{localStorage.setItem('sbx-theme',t);}catch(e){} label(); drawDaily();drawSeries();drawNodeDaily();drawSpark();
+  });label();
+})();
 
 /* ---------- 事件 ---------- */
 function bindSeg(attr, cb) {
@@ -399,7 +444,6 @@ function bindSeg(attr, cb) {
 bindSeg('days', function (v) { state.days = Number(v); loadDaily(); loadNodeDaily(); });
 bindSeg('scope', function (v) { state.sortScope = v; if (state.summary) renderNodesStatic(state.summary); });
 bindSeg('range', function (v) { state.range = v; loadSeries(); });
-bindSeg('mode', function (v) { state.mode = v; loadSeries(); });
 document.getElementById('node-select').addEventListener('change', function (e) { state.nodeId = e.target.value; loadNodeDaily(); });
 if (TOKEN) document.getElementById('csv-link').href = '/api/export?token=' + encodeURIComponent(TOKEN);
 
