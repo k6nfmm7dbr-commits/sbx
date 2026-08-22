@@ -156,7 +156,6 @@ function renderNodesStatic(s) {
   function portText(n) { return n.ports ? (n.port ? n.port + ',' + n.ports : n.ports) : (n.port || '—'); }
 
   tbody.innerHTML = nodes.map(function (n) {
-    var td = n.today, tt = n.total;
     return '<tr>'
       + '<td><div class="node-name">' + esc(n.name) + '</div></td>'
       + '<td><span class="chip">' + esc(n.type || '—') + '</span></td>'
@@ -164,17 +163,10 @@ function renderNodesStatic(s) {
       + '<td class="num"><b class="conns" data-node-live="' + n.id + '" data-kind="conns">—</b></td>'
       + '<td class="num"><b class="conns-udp" data-node-live="' + n.id + '" data-kind="conns_udp">—</b></td>'
       + '<td class="num live" data-node-live="' + n.id + '" data-kind="rate">—</td>'
-      + '<td class="num up">' + fmtBytes(td.rx) + '</td>'
-      + '<td class="num down">' + fmtBytes(td.tx) + '</td>'
-      + '<td class="num"><b>' + fmtBytes(td.rx + td.tx) + '</b></td>'
-      + '<td class="num up">' + fmtBytes(tt.rx) + '</td>'
-      + '<td class="num down">' + fmtBytes(tt.tx) + '</td>'
-      + '<td class="num"><b>' + fmtBytes(tt.rx + tt.tx) + '</b></td>'
       + '</tr>';
   }).join('');
 
   cards.innerHTML = nodes.map(function (n) {
-    var td = n.today, tt = n.total;
     return '<div class="ncard node-panel">'
       + '<div class="ncard-top"><span class="ncard-name">' + esc(n.name) + '</span>'
       + '<span class="chip">' + esc(n.type || '—') + '</span></div>'
@@ -186,11 +178,6 @@ function renderNodesStatic(s) {
       + '<div class="node-rate-grid">'
       + '<div><span class="up">↑ 上传速率</span><b class="up" data-node-live="' + n.id + '" data-kind="rate-up">—</b></div>'
       + '<div><span class="down">↓ 下载速率</span><b class="down" data-node-live="' + n.id + '" data-kind="rate-down">—</b></div>'
-      + '</div>'
-      + '<div class="node-usage-table">'
-      + '<div class="node-usage-head"><span></span><span>上传</span><span>下载</span><span>合计</span></div>'
-      + '<div class="node-usage-row"><b>今日</b><span class="up">' + fmtBytes(td.rx) + '</span><span class="down">' + fmtBytes(td.tx) + '</span><strong>' + fmtBytes(td.rx + td.tx) + '</strong></div>'
-      + '<div class="node-usage-row"><b>累计</b><span class="up">' + fmtBytes(tt.rx) + '</span><span class="down">' + fmtBytes(tt.tx) + '</span><strong>' + fmtBytes(tt.rx + tt.tx) + '</strong></div>'
       + '</div>'
       + '</div>';
   }).join('');
@@ -233,19 +220,6 @@ function loadNodeDaily() {
   return api('/api/daily', { days: 60, scope: 'node:' + state.nodeId })
     .then(function (d) { cache.nodeDaily = d.days; drawNodeDaily(); }).catch(function (e) { toast(e.message); });
 }
-
-/* ---------- 主题 ---------- */
-(function initTheme(){
-  var saved=''; try{saved=localStorage.getItem('sbx-theme')||'';}catch(e){}
-  if(saved==='dark'||saved==='light')document.documentElement.setAttribute('data-theme',saved);
-  var btn=document.getElementById('theme-btn'); if(!btn)return;
-  function label(){var t=document.documentElement.getAttribute('data-theme')||'system';btn.textContent=t==='dark'?'☀':(t==='light'?'☾':'◐');btn.title='主题：'+(t==='dark'?'深色':(t==='light'?'浅色':'跟随系统'));}
-  btn.addEventListener('click',function(){
-    var t=document.documentElement.getAttribute('data-theme')||'system';t=t==='system'?'dark':(t==='dark'?'light':'system');
-    if(t==='system')document.documentElement.removeAttribute('data-theme');else document.documentElement.setAttribute('data-theme',t);
-    try{localStorage.setItem('sbx-theme',t);}catch(e){} label(); drawDaily();drawNodeDaily();
-  });label();
-})();
 
 /* ---------- 事件 ---------- */
 function bindSeg(attr, cb) {

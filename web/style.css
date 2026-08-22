@@ -67,20 +67,10 @@ body {
   border-bottom: 1px solid var(--line);
 }
 .brand { display: flex; align-items: center; gap: 11px; }
-.logo {
-  width: 38px; height: 38px; border-radius: 11px; flex: none;
-  display: grid; place-items: center; color: #fff;
-  background: linear-gradient(135deg, var(--down), var(--up));
-  box-shadow: 0 4px 16px color-mix(in srgb, var(--down) 40%, transparent);
-}
 .brand-txt { display: flex; flex-direction: column; line-height: 1.15; }
 .brand h1 { font-size: 16px; margin: 0; font-weight: 680; letter-spacing: .2px; }
 .brand-sub { font-size: 11.5px; color: var(--muted); }
 .topbar-meta { display: flex; align-items: center; gap: 9px; }
-.theme-btn { width:30px;height:30px;border:1px solid var(--line-strong);border-radius:9px;
-  background:var(--card);color:var(--fg);font:18px/1 inherit;display:grid;place-items:center;cursor:pointer; }
-.theme-btn:hover { background:var(--card-solid); }
-.title-theme { margin-left:auto; flex:none; }
 .status { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
 .dot.ok { background: var(--up); box-shadow: 0 0 0 0 color-mix(in srgb, var(--up) 60%, transparent);
@@ -206,15 +196,6 @@ tbody tr:hover { background: color-mix(in srgb, var(--down) 8%, transparent); }
 .node-rate-grid>div { display:flex;flex-direction:column;gap:3px;background:color-mix(in srgb,var(--down) 7%,var(--card-solid));padding:9px 10px; }
 .node-rate-grid span { font-size:10.5px; }
 .node-rate-grid b { font-size:13px;font-variant-numeric:tabular-nums; }
-.node-usage-table { border:1px solid var(--line);border-radius:10px;overflow:hidden;font-variant-numeric:tabular-nums; }
-.node-usage-head,.node-usage-row { display:grid;grid-template-columns:.7fr 1fr 1fr 1fr;align-items:center; }
-.node-usage-head { background:color-mix(in srgb,var(--fg) 7%,var(--card-solid));color:var(--muted);font-size:10px; }
-.node-usage-head span,.node-usage-row>* { padding:7px 6px;text-align:right;border-right:1px solid var(--line); }
-.node-usage-head span:first-child,.node-usage-row>*:first-child { text-align:left; }
-.node-usage-head span:last-child,.node-usage-row>*:last-child { border-right:0; }
-.node-usage-row { border-top:1px solid var(--line);font-size:11.5px; }
-.node-usage-row b { color:var(--muted);font-weight:600; }
-.node-usage-row strong { color:var(--fg);font-size:12px; }
 @media (max-width:820px) { .table-wrap{display:none}.node-cards{display:flex} }
 
 @media (max-width: 640px) {
@@ -222,13 +203,22 @@ tbody tr:hover { background: color-mix(in srgb, var(--down) 8%, transparent); }
   .topbar { position: relative; padding-top: 14px; }
   .topbar-meta { width: 100%; justify-content: flex-start; gap: 7px; }
   .clock { margin-left: auto; }
-  .theme-btn { order: 4; margin-left: auto; }
-  .status { order: 1; } .tag { order: 2; } .clock { order: 3; }
+    .status { order: 1; } .tag { order: 2; } .clock { order: 3; }
   .panel { padding: 14px 14px 17px; }
   .panel-head { align-items: flex-start; }
 }
 
-/* ---------- Excel 风格数据表 ---------- */
+/* 用户偏好：节点卡与内部功能分区使用黑框，增强层次 */
+.node-panel { border:2px solid #000 !important; box-shadow:0 5px 14px rgba(0,0,0,.12); }
+.node-panel .ncard-top { padding-bottom:10px; border-bottom:1px solid #000; }
+.node-panel .chip { border:1.5px solid #000; background:#f2f2f2; }
+.node-panel .node-status-grid { border:1.5px solid #000; }
+.node-panel .node-status-grid>div { border-right:1px solid #000; }
+.node-panel .node-status-grid>div:last-child { border-right:0; }
+.node-panel .node-rate-grid { border:1.5px solid #000; background:#000; }
+.node-panel .node-rate-grid>div:first-child { border-right:1px solid #000; }
+
+/* Excel 风格数据表 ---------- */
 .excel-wrap { overflow-x:auto; overflow-y:hidden; -webkit-overflow-scrolling:touch; -webkit-user-select:none; user-select:none; }
 .excel-scroll { width:100%; min-width:0; border:1px solid var(--line-strong); border-radius:10px; overflow:hidden; }
 .excel-table { width:100%; min-width:620px; table-layout:fixed; border-collapse:collapse; font-size:12px; font-variant-numeric:tabular-nums; }
