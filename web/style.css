@@ -267,3 +267,125 @@ tbody tr:hover { background: color-mix(in srgb, var(--down) 8%, transparent); }
   width: 100%; border: 0; border-radius: 10px; padding: 12px; font: inherit;
   font-weight: 660; background: linear-gradient(135deg, var(--down), var(--up)); color: #06121f; cursor: pointer;
 }
+
+/* ========================================================================
+ * 用户定制：全局纯黑字体 + 粗黑框统一视觉
+ * ======================================================================== */
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC",
+               "Microsoft YaHei", Arial, sans-serif;
+  color: #000 !important;
+}
+
+/* 顶部标题栏 */
+.topbar {
+  width: calc(100% - 24px);
+  max-width: 1180px;
+  margin: 12px auto 0;
+  padding: 13px 18px;
+  border: 2px solid #000 !important;
+  border-radius: 16px;
+  background: #fff !important;
+  box-shadow: 0 5px 14px rgba(0,0,0,.12);
+}
+.brand { width: 100%; }
+.brand-txt { width: 100%; }
+.brand h1 { color:#000 !important; font-weight:800; font-size:18px; letter-spacing:.1px; }
+.brand-sub { color:#000 !important; font-weight:500; font-size:12px; }
+
+/* 所有主要卡片统一黑框 */
+.hero-live,
+.hero-stats,
+.panel {
+  border: 2px solid #000 !important;
+  background: #fff !important;
+  box-shadow: 0 5px 14px rgba(0,0,0,.12);
+}
+
+/* 实时速率卡 */
+.hero-live { border-radius:16px; }
+.hero-head { padding-bottom:9px; border-bottom:2px solid #000; }
+.hero-label { color:#000 !important; font-weight:700; }
+.hero-rate { color:#000 !important; font-weight:800; }
+.hero-split { padding-top:7px; }
+.hero-split span,.hero-split b { color:#000 !important; font-weight:600; }
+.hero-pulse { background:#000 !important; box-shadow:0 0 0 5px rgba(0,0,0,.08) !important; animation:none !important; }
+
+/* 四个概览指标 */
+.hero-stats { border-radius:16px; background:#000 !important; gap:2px; }
+.mini { background:#fff !important; }
+.mini-label { color:#000 !important; font-weight:500; }
+.mini-value { color:#000 !important; font-weight:800; }
+.mini-sub,.mini-sub * { color:#000 !important; font-weight:500; }
+
+/* 各区标题：粗体 + 黑色下划分隔 */
+.panel-head {
+  padding-bottom:11px;
+  border-bottom:2px solid #000;
+  margin-bottom:14px;
+}
+.panel-head h2 { color:#000 !important; font-size:17px; font-weight:800; }
+
+/* Excel 表格：外框和每个单元格都用黑线 */
+.excel-scroll {
+  border: 2px solid #000 !important;
+  border-radius: 13px;
+  background:#fff;
+}
+.excel-table th,
+.excel-table td {
+  color:#000 !important;
+  border-right:1.5px solid #000 !important;
+  border-bottom:1.5px solid #000 !important;
+}
+.excel-table th {
+  background:#ededed !important;
+  font-weight:800;
+}
+.excel-table tbody tr:nth-child(even) { background:#f5f5f5 !important; }
+.excel-table tbody tr:nth-child(odd) { background:#fff !important; }
+.excel-table tbody tr:last-child td { border-bottom:0 !important; }
+.excel-table th:last-child,.excel-table td:last-child { border-right:0 !important; }
+.excel-table .up,.excel-table .down { color:#000 !important; font-weight:600; }
+.excel-table td b { color:#000 !important; font-weight:800; }
+
+/* 节点桌面表格 */
+.table-wrap {
+  border:2px solid #000;
+  border-radius:13px;
+  overflow:auto;
+}
+.table-wrap table th,.table-wrap table td {
+  border-color:#000 !important;
+  color:#000 !important;
+}
+.table-wrap table th { background:#ededed !important; font-weight:800; }
+
+/* 节点状态卡 */
+.node-panel { border:2.5px solid #000 !important; background:#fff !important; }
+.node-panel .ncard-top { border-bottom:2px solid #000; }
+.node-panel .ncard-name { color:#000 !important; font-weight:800; }
+.node-panel .chip { color:#000 !important; background:#f1f1f1 !important; border:2px solid #000 !important; font-weight:500; }
+.node-panel .node-status-grid,
+.node-panel .node-rate-grid { border:2px solid #000 !important; }
+.node-panel .node-status-grid>div { border-right:1.5px solid #000 !important; background:#fff !important; }
+.node-panel .node-rate-grid { background:#000 !important; }
+.node-panel .node-rate-grid>div { background:#ededed !important; }
+.node-panel .node-rate-grid>div:first-child { border-right:1.5px solid #000 !important; }
+.node-panel span,.node-panel b { color:#000 !important; }
+
+/* 下拉框与空状态 */
+select {
+  color:#000 !important;
+  background:#fff !important;
+  border:2px solid #000 !important;
+  font-weight:600;
+}
+.empty { color:#000 !important; }
+
+@media (max-width:640px) {
+  .topbar { width:calc(100% - 24px); margin:10px 12px 0; padding:12px 15px; }
+  main { padding-top:14px; }
+  .panel { padding:14px; }
+  .panel-head { margin-bottom:12px; }
+}
