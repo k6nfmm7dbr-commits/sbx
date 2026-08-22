@@ -219,10 +219,9 @@ function fmtTableBytes(n) { return fmtBytes(Number(n)||0); }
 function renderExcelTable(hostId, rows) {
   var host=document.getElementById(hostId); if(!host)return;
   if(!rows||!rows.length){host.innerHTML='<div class="empty">暂无数据</div>';return;}
-  var total=rows.reduce(function(a,r){return {rx:a.rx+r.rx,tx:a.tx+r.tx};},{rx:0,tx:0});
   var html='<div class="excel-scroll"><table class="excel-table"><thead><tr><th>日期</th><th class="up">上传</th><th class="down">下载</th><th>合计</th></tr></thead><tbody>';
   rows.slice().reverse().forEach(function(r){html+='<tr><td>'+esc(r.day)+'</td><td class="up">'+fmtTableBytes(r.rx)+'</td><td class="down">'+fmtTableBytes(r.tx)+'</td><td><b>'+fmtTableBytes(r.rx+r.tx)+'</b></td></tr>';});
-  html+='</tbody><tfoot><tr><th>合计</th><th class="up">'+fmtTableBytes(total.rx)+'</th><th class="down">'+fmtTableBytes(total.tx)+'</th><th>'+fmtTableBytes(total.rx+total.tx)+'</th></tr></tfoot></table></div>';
+  html+='</tbody></table></div>';
   host.innerHTML=html;
 }
 function drawDaily() { if(cache.daily) renderExcelTable('daily-table',cache.daily); }
