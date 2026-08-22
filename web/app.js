@@ -8,7 +8,7 @@
 'use strict';
 
 var TOKEN = new URLSearchParams(location.search).get('token') || '';
-var state = { days: 30, sortScope: 'today', nodeId: null, summary: null, live: null, range: '30m' };
+var state = { days: 30, sortScope: 'today', nodeId: null, summary: null, live: null, range: '30m', mode: 'peak' };
 var RANGE_LABEL = { '5m': '近 5 分钟', '30m': '近 30 分钟', '2h': '近 2 小时', '6h': '近 6 小时' };
 var RANGE_BUCKET_TXT = { '5m': '每点 5 秒', '30m': '每点 15 秒', '2h': '每点 1 分钟', '6h': '每点 3 分钟' };
 
@@ -354,9 +354,15 @@ function drawDaily() {
 }
 function drawSeries() {
   if (!cache.series) return;
-  var d = cache.series, bucket = d.bucket || 15;
+  var d = cache.series;
+  var peak = (d.mode || 'peak') === 'peak';
+  // peak: 每点 = 桶内单个采集周期的最大字节 / 采集间隔 → 真实瞬时峰值，各档一致
+  // avg : 每点 = 桶内总字节 / 桶秒 → 平均速率，曲线面积 = 总流量
+  var div = peak ? (d.interval || 2) : (d.bucket || 15);
   drawArea(document.getElementById('chart-live'), d.points.map(function (p) {
-    return { ts: p.ts, rx: p.rx / bucket, tx: p.tx / bucket };
+    return peak
+      ? { ts: p.ts, rx: (p.rx_peak || 0) / div, tx: (p.tx_peak || 0) / div }
+      : { ts: p.ts, rx: p.rx / div, tx: p.tx / div };
   }), { label: '速率曲线', fmtX: fmtClock });
 }
 function drawNodeDaily() {
@@ -367,10 +373,11 @@ function drawNodeDaily() {
 }
 function loadDaily() { return api('/api/daily', { days: state.days }).then(function (d) { cache.daily = d.days; drawDaily(); }).catch(function (e) { toast(e.message); }); }
 function loadSeries() {
-  return api('/api/series', { range: state.range }).then(function (d) {
+  return api('/api/series', { range: state.range, mode: state.mode }).then(function (d) {
     cache.series = d; drawSeries();
     var n = (d.points || []).length;
-    setText('live-hint', RANGE_LABEL[state.range] + ' · ' + (RANGE_BUCKET_TXT[state.range] || '') + '（' + n + ' 点）');
+    var modeTxt = (d.mode || 'peak') === 'peak' ? '峰值·瞬时最高' : '平均·' + (RANGE_BUCKET_TXT[state.range] || '');
+    setText('live-hint', modeTxt + '（' + n + ' 点）');
   }).catch(function (e) { toast(e.message); });
 }
 function loadNodeDaily() {
@@ -392,6 +399,7 @@ function bindSeg(attr, cb) {
 bindSeg('days', function (v) { state.days = Number(v); loadDaily(); loadNodeDaily(); });
 bindSeg('scope', function (v) { state.sortScope = v; if (state.summary) renderNodesStatic(state.summary); });
 bindSeg('range', function (v) { state.range = v; loadSeries(); });
+bindSeg('mode', function (v) { state.mode = v; loadSeries(); });
 document.getElementById('node-select').addEventListener('change', function (e) { state.nodeId = e.target.value; loadNodeDaily(); });
 if (TOKEN) document.getElementById('csv-link').href = '/api/export?token=' + encodeURIComponent(TOKEN);
 

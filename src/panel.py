@@ -542,37 +542,50 @@ SERIES_RANGES = {
 }
 
 
-def q_series(con, conf, rng="30m"):
+def q_series(con, conf, rng="30m", mode="peak"):
     """
     节点合计速率序列（固定时间栅格 + 零填充）。全部取自 samples 表。
-    结果: {"range", "bucket", "points": [{"ts":桶起点, "rx":字节, "tx":字节}, ...]}
-      前端 rate = rx / bucket = 该桶内平均速率(字节/秒)。
-    固定栅格保证:
-      * 横轴时间点真实对齐到当前时刻，不会因采样稀疏而全挤在一起；
-      * 没有流量的时段填 0，不会把偶发突发连成"持续高速"的假平台。
+    mode:
+      "peak" —— 每点 = 桶内最高瞬时速率（单个采样的字节 / 采集间隔）。
+                各档峰值高度一致，看"最快跑到多少"用这个（默认）。
+      "avg"  —— 每点 = 桶内平均速率（桶内总字节 / 桶秒）。
+                曲线下面积 = 该时段总流量，看"跑了多少量"用这个。
+    结果: {"range","bucket","interval","mode",
+           "points":[{"ts","rx","tx","rx_peak","tx_peak"}...]}
+      rx/tx      = 桶内总字节   → 前端 avg  = rx / bucket
+      rx_peak/.. = 桶内单采样最大字节 → 前端 peak = rx_peak / interval
+    固定栅格保证横轴对齐当前时刻；空时段填 0，不把偶发突发连成假平台。
     """
     if rng not in SERIES_RANGES:
         rng = "30m"
+    if mode not in ("peak", "avg"):
+        mode = "peak"
     span, bucket = SERIES_RANGES[rng]
+    iv = max(1, int(conf.get("interval", 2)))
     now = int(time.time())
     end = (now // bucket) * bucket
     n_buckets = max(1, span // bucket)
     start = end - (n_buckets - 1) * bucket
 
+    # 每个采样点是"一个采集周期内的字节数"，先按 ts 归并各节点，再按桶聚合：
+    #   SUM  → 桶内总字节（算平均用）
+    #   MAX  → 桶内单周期最大字节（算峰值用）
     rows = con.execute(
-        "SELECT (ts/?)*? AS b, SUM(rx) rx, SUM(tx) tx FROM samples "
-        "WHERE ts >= ? AND scope LIKE 'node:%' GROUP BY b",
+        "SELECT (ts/?)*? AS b, SUM(srx) rx, SUM(stx) tx, MAX(srx) rxp, MAX(stx) txp FROM ("
+        "  SELECT ts, SUM(rx) srx, SUM(tx) stx FROM samples "
+        "  WHERE ts >= ? AND scope LIKE 'node:%' GROUP BY ts"
+        ") GROUP BY b",
         (bucket, bucket, start),
     ).fetchall()
-    have = {int(r["b"]): (r["rx"], r["tx"]) for r in rows}
+    have = {int(r["b"]): (r["rx"], r["tx"], r["rxp"], r["txp"]) for r in rows}
 
     pts = []
     b = start
     while b <= end:
-        rx, tx = have.get(b, (0, 0))
-        pts.append({"ts": b, "rx": rx, "tx": tx})
+        rx, tx, rxp, txp = have.get(b, (0, 0, 0, 0))
+        pts.append({"ts": b, "rx": rx, "tx": tx, "rx_peak": rxp, "tx_peak": txp})
         b += bucket
-    return {"range": rng, "bucket": bucket, "points": pts}
+    return {"range": rng, "bucket": bucket, "interval": iv, "mode": mode, "points": pts}
 
 
 def build_summary(conf, con, collector=None):
@@ -791,7 +804,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"days": q_daily(con, days, scope)})
             elif route == "/api/series":
                 rng = (qs.get("range") or ["30m"])[0]
-                self._json(q_series(con, self.conf, rng))
+                mode = (qs.get("mode") or ["peak"])[0]
+                self._json(q_series(con, self.conf, rng, mode))
             elif route == "/api/nodes":
                 self._json({"nodes": load_nodes(self.conf)})
             elif route == "/api/export":

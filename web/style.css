@@ -140,6 +140,7 @@ main { max-width: 1180px; margin: 0 auto; padding: 16px clamp(12px, 3vw, 28px) 0
   gap: 12px; flex-wrap: wrap; margin-bottom: 13px;
 }
 .panel-head h2 { font-size: 14.5px; margin: 0; font-weight: 660; }
+.head-ctl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .hint { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 
 .seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 10px; overflow: hidden; }
@@ -163,7 +164,8 @@ select {
 .chart svg { display: block; height: auto; }
 .chart-wrap::-webkit-scrollbar { height: 6px; }
 .chart-wrap::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 999px; }
-.legend { display: flex; gap: 16px; font-size: 12px; color: var(--muted); margin-top: 8px; align-items: center; }
+.legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); margin-top: 8px; align-items: center; flex-wrap: wrap; }
+.legend > span { white-space: nowrap; }
 .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: middle; }
 .sw.up { background: var(--up); } .sw.down { background: var(--down); }
 
