@@ -389,3 +389,47 @@ select {
   .panel { padding:14px; }
   .panel-head { margin-bottom:12px; }
 }
+
+/* ========================================================================
+ * 三页式底部导航
+ * ======================================================================== */
+.app-view { display:none; }
+.app-view.on { display:block; }
+main { padding-bottom:110px !important; }
+.bottom-nav {
+  position:fixed; left:50%; bottom:calc(12px + env(safe-area-inset-bottom)); z-index:60;
+  transform:translateX(-50%); width:min(520px,calc(100% - 28px));
+  display:grid; grid-template-columns:repeat(4,1fr); gap:6px;
+  padding:7px; border:2px solid #000; border-radius:22px;
+  background:rgba(255,255,255,.96); box-shadow:0 8px 25px rgba(0,0,0,.22);
+  backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px);
+}
+.nav-btn {
+  appearance:none; border:0; border-radius:16px; background:transparent; color:#000 !important;
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px;
+  min-height:52px; font:600 11px/1.2 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;
+  cursor:pointer; -webkit-tap-highlight-color:transparent;
+}
+.nav-btn.on { background:#e8e8e8; box-shadow:inset 0 0 0 1.5px #000; }
+.nav-icon { font-size:23px; line-height:1; font-weight:700; }
+@media (max-width:640px) {
+  .bottom-nav { bottom:calc(8px + env(safe-area-inset-bottom)); width:calc(100% - 24px); }
+  main { padding-bottom:100px !important; }
+}
+
+/* 管理页 */
+.manage-panel { max-width:680px; margin-left:auto; margin-right:auto; }
+.manage-lock,.manage-panel #manage-content { display:grid; gap:8px; }
+.manage-panel label { font-size:12px; font-weight:700; }
+.manage-panel input,.manage-panel select {
+  width:100%; padding:11px 12px; border:2px solid #000 !important; border-radius:10px;
+  background:#fff !important; color:#000 !important; font:600 14px/1.2 inherit;
+}
+.manage-panel button {
+  padding:11px 14px; border:2px solid #000; border-radius:10px; background:#ececec;
+  color:#000 !important; font-weight:800; cursor:pointer;
+}
+.manage-panel button:active { transform:translateY(1px); }
+.manage-actions { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:8px; }
+.manage-actions .danger { background:#000; color:#fff !important; }
+#manage-msg,#manage-result { min-height:18px; font-size:12px; margin:2px 0 0; }

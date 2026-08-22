@@ -17,6 +17,7 @@
 </header>
 
 <main>
+  <div id="view-home" class="app-view on">
   <!-- 实时速率主卡 -->
   <section class="hero">
     <div class="hero-live">
@@ -52,13 +53,6 @@
     </div>
   </section>
 
-  <section class="panel data-panel">
-    <div class="panel-head">
-      <h2>每日流量</h2>
-    </div>
-    <div id="daily-table" class="excel-wrap"></div>
-  </section>
-
   <section class="panel">
     <div class="panel-head">
       <h2>节点状态</h2>
@@ -79,6 +73,19 @@
     <div id="node-cards" class="node-cards"></div>
   </section>
 
+  </div>
+
+  <div id="view-daily" class="app-view">
+  <section class="panel data-panel">
+    <div class="panel-head">
+      <h2>每日流量</h2>
+    </div>
+    <div id="daily-table" class="excel-wrap"></div>
+  </section>
+
+  </div>
+
+  <div id="view-node" class="app-view">
   <section class="panel data-panel">
     <div class="panel-head">
       <h2>单节点每日明细</h2>
@@ -87,7 +94,41 @@
     <div id="node-daily-table" class="excel-wrap"></div>
   </section>
 
+  <div id="view-manage" class="app-view">
+    <section class="panel manage-panel">
+      <div class="panel-head"><h2>节点管理</h2></div>
+      <div id="manage-lock" class="manage-lock">
+        <label for="manage-key">管理密钥</label>
+        <input id="manage-key" type="password" autocomplete="off" placeholder="输入管理密钥">
+        <button id="manage-unlock" type="button">解锁管理</button>
+        <p id="manage-msg"></p>
+      </div>
+      <div id="manage-content" hidden>
+        <label for="manage-node">选择节点</label>
+        <select id="manage-node"></select>
+        <label for="manage-port">端口</label>
+        <input id="manage-port" inputmode="numeric" type="number" min="1" max="65535">
+        <div id="manage-sni-box">
+          <label for="manage-sni">SNI</label>
+          <input id="manage-sni" type="text" autocomplete="off">
+        </div>
+        <div class="manage-actions">
+          <button id="manage-save" type="button">保存修改</button>
+          <button id="manage-delete" class="danger" type="button">删除节点</button>
+        </div>
+        <label class="manage-check"><input id="manage-clear-history" type="checkbox"> 删除时同时清除该节点历史流量</label>
+        <p id="manage-result"></p>
+      </div>
+    </section>
+  </div>
 </main>
+
+<nav class="bottom-nav" aria-label="面板导航">
+  <button class="nav-btn on" data-view="home" type="button"><span class="nav-icon">⌂</span><span>首页</span></button>
+  <button class="nav-btn" data-view="daily" type="button"><span class="nav-icon">▦</span><span>每日</span></button>
+  <button class="nav-btn" data-view="node" type="button"><span class="nav-icon">◎</span><span>节点</span></button>
+  <button class="nav-btn" data-view="manage" type="button"><span class="nav-icon">⚙</span><span>管理</span></button>
+</nav>
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <div id="tip" class="tip"></div>

@@ -221,6 +221,55 @@ function loadNodeDaily() {
     .then(function (d) { cache.nodeDaily = d.days; drawNodeDaily(); }).catch(function (e) { toast(e.message); });
 }
 
+/* ---------- 节点管理页 ---------- */
+var manageState={key:'',nodes:[],unlocked:false};
+try{manageState.key=sessionStorage.getItem('sbx-manage-key')||'';}catch(e){}
+function manageFetch(path,body){
+  var opt={cache:'no-store',headers:{'X-SBX-Manage-Key':manageState.key}};
+  if(body){opt.method='POST';opt.headers['Content-Type']='application/json';body.manage_key=manageState.key;opt.body=JSON.stringify(body);}
+  return fetch(path,opt).then(function(r){return r.json().then(function(d){if(!r.ok)throw new Error(d.error||('HTTP '+r.status));return d;});});
+}
+function manageMessage(text,ok){var e=document.getElementById('manage-result');if(e){e.textContent=text||'';e.style.fontWeight='700';e.style.color='#000';}}
+function manageFillNode(){
+  var sel=document.getElementById('manage-node'),id=Number(sel.value),n=manageState.nodes.find(function(x){return Number(x.id)===id;});if(!n)return;
+  document.getElementById('manage-port').value=n.port||'';
+  document.getElementById('manage-sni').value=n.sni||'';
+  document.getElementById('manage-sni-box').hidden=!n.can_sni;
+}
+function manageRender(){
+  var sel=document.getElementById('manage-node');
+  sel.innerHTML=manageState.nodes.map(function(n){return '<option value="'+n.id+'">'+esc(n.name)+' · '+esc(n.type)+'</option>';}).join('');
+  document.getElementById('manage-content').hidden=false;document.getElementById('manage-lock').hidden=true;
+  if(manageState.nodes.length)manageFillNode();else manageMessage('暂无节点');
+}
+function manageUnlock(){
+  var key=document.getElementById('manage-key').value.trim()||manageState.key;if(!key){document.getElementById('manage-msg').textContent='请输入管理密钥';return;}
+  manageState.key=key;
+  manageFetch('/api/manage/nodes').then(function(d){manageState.nodes=d.nodes||[];manageState.unlocked=true;try{sessionStorage.setItem('sbx-manage-key',key);}catch(e){}manageRender();})
+  .catch(function(e){manageState.unlocked=false;document.getElementById('manage-msg').textContent=e.message;});
+}
+function manageSave(){
+  var id=Number(document.getElementById('manage-node').value),port=Number(document.getElementById('manage-port').value);
+  var n=manageState.nodes.find(function(x){return Number(x.id)===id;});if(!n)return;
+  var body={id:id,port:port};if(n.can_sni)body.sni=document.getElementById('manage-sni').value.trim();
+  manageMessage('正在校验并应用…');
+  manageFetch('/api/manage/edit',body).then(function(d){manageState.nodes=d.nodes||[];manageRender();manageMessage('修改成功，服务与计数规则已重载');loadSummary();loadLive();})
+  .catch(function(e){manageMessage('修改失败：'+e.message);});
+}
+function manageDelete(){
+  var id=Number(document.getElementById('manage-node').value),n=manageState.nodes.find(function(x){return Number(x.id)===id;});if(!n)return;
+  if(!confirm('确定删除节点「'+n.name+'」？此操作会重载 sing-box。'))return;
+  var clear=document.getElementById('manage-clear-history').checked;
+  manageMessage('正在删除并重载…');
+  manageFetch('/api/manage/remove',{id:id,clear_history:clear}).then(function(d){manageState.nodes=d.nodes||[];manageRender();manageMessage('节点已删除'+(clear?'，历史流量已清除':'，历史流量已保留'));loadSummary();loadLive();})
+  .catch(function(e){manageMessage('删除失败：'+e.message);});
+}
+document.getElementById('manage-unlock').addEventListener('click',manageUnlock);
+document.getElementById('manage-key').addEventListener('keydown',function(e){if(e.key==='Enter')manageUnlock();});
+document.getElementById('manage-node').addEventListener('change',manageFillNode);
+document.getElementById('manage-save').addEventListener('click',manageSave);
+document.getElementById('manage-delete').addEventListener('click',manageDelete);
+
 /* ---------- 事件 ---------- */
 function bindSeg(attr, cb) {
   document.querySelectorAll('.seg [data-' + attr + ']').forEach(function (b) {
@@ -240,6 +289,25 @@ window.addEventListener('resize', function () {
   clearTimeout(reflowTimer);
   reflowTimer = setTimeout(function () { drawDaily(); drawNodeDaily(); }, 160);
 });
+
+/* ---------- 三页底部导航 ---------- */
+(function initNavigation(){
+  var valid={home:1,daily:1,node:1,manage:1}, positions={home:0,daily:0,node:0};
+  var current=(location.hash||'#home').slice(1); if(!valid[current])current='home';
+  function show(name,push){
+    if(!valid[name])name='home'; positions[current]=window.scrollY||0; current=name;
+    document.querySelectorAll('.app-view').forEach(function(v){v.classList.toggle('on',v.id==='view-'+name);});
+    document.querySelectorAll('.nav-btn').forEach(function(b){b.classList.toggle('on',b.dataset.view===name);});
+    if(push && location.hash!=='#'+name)history.pushState(null,'','#'+name);
+    requestAnimationFrame(function(){window.scrollTo(0,positions[name]||0);});
+    if(name==='daily'&&!cache.daily)loadDaily();
+    if(name==='node'&&!cache.nodeDaily)loadNodeDaily();
+    if(name==='manage'&&!manageState.unlocked&&manageState.key){document.getElementById('manage-key').value=manageState.key;manageUnlock();}
+  }
+  document.querySelectorAll('.nav-btn').forEach(function(b){b.addEventListener('click',function(){show(b.dataset.view,true);});});
+  window.addEventListener('popstate',function(){show((location.hash||'#home').slice(1),false);});
+  show(current,false);
+})();
 
 /* ---------- 启动与轮询 ---------- */
 setInterval(tickEase, 40);               // 数字缓动循环（setInterval 比 rAF 在后台更可靠）

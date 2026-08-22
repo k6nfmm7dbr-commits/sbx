@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 APP_NAME="SBX"
-APP_VERSION="2.6.4"
+APP_VERSION="2.7.0"
 RAW_URL="${SBX_RAW_URL:-https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh}"
 
 # SBX_ROOT 仅用于测试/沙箱安装（把整套目录挪到前缀下），正常安装留空
@@ -290,8 +290,9 @@ EOF
 
 ensure_panel_conf() {
   [[ -f "$PANEL_CONF" ]] && return 0
-  local token port
+  local token manage_token port
   token=$(rand_hex 16)
+  manage_token=$(rand_hex 16)
   port=$(pick_port)
   cat > "$PANEL_CONF" <<EOF
 {
@@ -304,6 +305,7 @@ ensure_panel_conf() {
   "listen": "0.0.0.0",
   "port": $port,
   "token": "$token",
+  "manage_token": "$manage_token",
   "interval": 2,
   "tz": "Asia/Shanghai"
 }
@@ -670,7 +672,8 @@ show_panel_info() {
   hr
   printf '%s流量面板%s\n' "$C_B" "$C_RESET"
   printf '  地址: %s%s%s\n' "$C_CYAN" "$(panel_url)" "$C_RESET"
-  printf '  令牌: %s\n' "$(panel_get token)"
+  printf '  查看令牌: %s\n' "$(panel_get token)"
+  printf '  管理密钥: %s\n' "$(panel_get manage_token)"
   printf '  状态: %s\n' "$(panel_running && echo "${C_GREEN}运行中${C_RESET}" || echo "${C_RED}未运行${C_RESET}")"
   printf '  后端: %s\n' "$(command -v nft >/dev/null 2>&1 && echo nftables || echo iptables)"
   hr
@@ -842,11 +845,12 @@ menu_panel_settings() {
   printf '%s面板设置%s\n\n' "$C_B" "$C_RESET"
   show_panel_info
   echo "  1) 修改端口"
-  echo "  2) 重新生成访问令牌"
-  echo "  3) 修改采集间隔（当前 $(panel_get interval) 秒）"
-  echo "  4) 仅本机访问 / 允许公网访问（当前 $(panel_get listen)）"
-  echo "  5) 运行统计自检"
-  echo "  6) 清空所有统计数据"
+  echo "  2) 重新生成查看令牌"
+  echo "  3) 查看 / 重新生成管理密钥"
+  echo "  4) 修改采集间隔（当前 $(panel_get interval) 秒）"
+  echo "  5) 仅本机访问 / 允许公网访问（当前 $(panel_get listen)）"
+  echo "  6) 运行统计自检"
+  echo "  7) 清空所有统计数据"
   echo "  0) 返回"
   echo
   printf '请选择: '
@@ -854,17 +858,20 @@ menu_panel_settings() {
   case "$c" in
     1) printf '新端口: '; read -r p || true
        valid_port "$p" && { panel_set port "$p"; svc_do restart sbx-panel; ok "已改为 $p"; } || warn "无效端口" ;;
-    2) panel_set token "$(rand_hex 16)"; svc_do restart sbx-panel; ok "新令牌: $(panel_get token)" ;;
-    3) printf '采集间隔秒数 (1-60): '; read -r n || true
+    2) panel_set token "$(rand_hex 16)"; svc_do restart sbx-panel; ok "新查看令牌: $(panel_get token)" ;;
+    3) printf '当前管理密钥: %s\n' "$(panel_get manage_token)"
+       printf '是否重新生成管理密钥? [y/N] '; read -r yn || true
+       if [[ "${yn,,}" == "y" ]]; then panel_set manage_token "$(rand_hex 16)"; svc_do restart sbx-panel; ok "新管理密钥: $(panel_get manage_token)"; fi ;;
+    4) printf '采集间隔秒数 (1-60): '; read -r n || true
        [[ "$n" =~ ^[0-9]+$ ]] && ((n>=1 && n<=60)) && { panel_set interval "$n"; svc_do restart sbx-panel; ok "已改为 ${n}s"; } || warn "无效数值" ;;
-    4) if [[ "$(panel_get listen)" == "127.0.0.1" ]]; then
-         panel_set listen "0.0.0.0"; ok "已允许公网访问（务必保留令牌）"
+    5) if [[ "$(panel_get listen)" == "127.0.0.1" ]]; then
+         panel_set listen "0.0.0.0"; ok "已允许公网访问（务必保留查看令牌和管理密钥）"
        else
          panel_set listen "127.0.0.1"; ok "已限制为仅本机访问"
        fi
        svc_do restart sbx-panel ;;
-    5) hr; python3 "$PANEL_PY" selftest; hr ;;
-    6) printf '%s确认清空全部流量统计? 此操作不可恢复 [y/N] %s' "$C_YEL" "$C_RESET"
+    6) hr; python3 "$PANEL_PY" selftest; hr ;;
+    7) printf '%s确认清空全部流量统计? 此操作不可恢复 [y/N] %s' "$C_YEL" "$C_RESET"
        read -r yn || true
        [[ "${yn,,}" == "y" ]] && { python3 "$PANEL_PY" reset; svc_do restart sbx-panel; } || echo "已取消" ;;
     0|"") return 0 ;;
