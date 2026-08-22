@@ -104,7 +104,7 @@ main { max-width: 1180px; margin: 0 auto; padding: 16px clamp(12px, 3vw, 28px) 0
   background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
   box-shadow: var(--shadow); backdrop-filter: blur(8px);
 }
-.hero-live { padding: 18px 20px 8px; position: relative; overflow: hidden; }
+.hero-live { padding: 18px 20px; position: relative; overflow: hidden; }
 .hero-head { display: flex; align-items: center; justify-content: space-between; }
 .hero-label { font-size: 13px; color: var(--muted); font-weight: 560; }
 .hero-pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--up);
@@ -115,10 +115,8 @@ main { max-width: 1180px; margin: 0 auto; padding: 16px clamp(12px, 3vw, 28px) 0
   margin: 6px 0 2px; font-variant-numeric: tabular-nums;
   transition: color .3s;
 }
-.hero-split { display: flex; gap: 16px; font-size: 13px; }
+.hero-split { display: flex; gap: 16px; font-size: 13px; margin-top: 4px; }
 .hero-split b { font-variant-numeric: tabular-nums; font-weight: 640; }
-.spark { margin: 6px -20px -8px; height: 64px; }
-.spark svg { display: block; width: 100%; height: 64px; }
 
 .hero-stats {
   display: grid; grid-template-columns: 1fr 1fr; gap: 1px;
@@ -151,7 +149,6 @@ main { max-width: 1180px; margin: 0 auto; padding: 16px clamp(12px, 3vw, 28px) 0
   gap: 12px; flex-wrap: wrap; margin-bottom: 13px;
 }
 .panel-head h2 { font-size: 14.5px; margin: 0; font-weight: 660; }
-.head-ctl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .hint { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 
 .seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 10px; overflow: hidden; }
@@ -227,9 +224,6 @@ tbody tr:hover { background: color-mix(in srgb, var(--down) 8%, transparent); }
   .status { order: 1; } .tag { order: 2; } .clock { order: 3; }
   .panel { padding: 14px 14px 17px; }
   .panel-head { align-items: flex-start; }
-  .head-ctl { width: 100%; }
-  .head-ctl .seg { flex: 1; }
-  .head-ctl .seg button { flex: 1; padding-left: 7px; padding-right: 7px; }
 }
 
 .foot {

@@ -28,7 +28,7 @@
 </header>
 
 <main>
-  <!-- 实时速率主卡：大数字 + 迷你实时曲线 -->
+  <!-- 实时速率主卡 -->
   <section class="hero">
     <div class="hero-live">
       <div class="hero-head">
@@ -40,7 +40,6 @@
         <span class="up">↑ 上传 <b id="hero-up">—</b></span>
         <span class="down">↓ 下载 <b id="hero-down">—</b></span>
       </div>
-      <div class="spark" id="spark"></div>
     </div>
     <div class="hero-stats">
       <div class="mini">
@@ -61,26 +60,6 @@
         <span class="mini-value" id="kpi-all-total">—</span>
         <span class="mini-sub"><i class="up" id="kpi-all-up">—</i> <i class="down" id="kpi-all-down">—</i></span>
       </div>
-    </div>
-  </section>
-
-  <section class="panel">
-    <div class="panel-head">
-      <h2>速率曲线 <span class="hint">实线峰值 · 浅色平均</span></h2>
-      <div class="head-ctl">
-        <div class="seg" role="group" aria-label="速率时间范围">
-          <button data-range="5m">5分</button>
-          <button data-range="30m" class="on">30分</button>
-          <button data-range="2h">2时</button>
-          <button data-range="6h">6时</button>
-        </div>
-      </div>
-    </div>
-    <div class="chart-wrap"><div id="chart-live" class="chart"></div></div>
-    <div class="legend">
-      <span><i class="sw up"></i>上传</span>
-      <span><i class="sw down"></i>下载</span>
-      <span class="hint" id="live-hint" style="margin-left:auto">—</span>
     </div>
   </section>
 

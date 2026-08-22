@@ -37,7 +37,7 @@ CONF_PATH = os.environ.get("SBX_CONF", os.path.join(APP_DIR, "panel.json"))
 NFT_TABLE = "sbx_traffic"
 IPT_CHAIN_IN = "SBX_IN"
 IPT_CHAIN_OUT = "SBX_OUT"
-SAMPLE_KEEP_SECONDS = 6 * 3600 + 600     # 精细采样保留约 6 小时（够画 5分/30分/2时/6时 速率曲线）
+SAMPLE_KEEP_SECONDS = 120                # 仅保留2分钟，用于实时加权速率；不再保存/绘制速率曲线
 
 DEFAULT_CONF = {
     "db": os.path.join(APP_DIR, "traffic.db"),
@@ -182,13 +182,6 @@ CREATE TABLE IF NOT EXISTS samples (
     PRIMARY KEY (ts, scope)
 );
 CREATE INDEX IF NOT EXISTS idx_samples_ts ON samples(ts);
-CREATE TABLE IF NOT EXISTS rate_samples (
-    ts          INTEGER PRIMARY KEY,
-    rx          INTEGER NOT NULL DEFAULT 0,
-    tx          INTEGER NOT NULL DEFAULT 0,
-    duration_ms INTEGER NOT NULL DEFAULT 0,
-    valid       INTEGER NOT NULL DEFAULT 1
-);
 """
 
 
@@ -209,7 +202,9 @@ def db_connect(conf):
         con.execute("ALTER TABLE samples ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0")
     if "valid" not in cols:
         con.execute("ALTER TABLE samples ADD COLUMN valid INTEGER NOT NULL DEFAULT 1")
-    # 升级前的旧样本没有真实耗时，不能用于速率计算；流量累计仍在 daily/totals 中完整保留。
+    # v2.1 已彻底移除历史速率曲线；升级时删除旧曲线专用表，实时速率仍使用 samples。
+    con.execute("DROP TABLE IF EXISTS rate_samples")
+    # 升级前的旧样本没有真实耗时，不能用于实时速率计算；daily/totals 不受影响。
     con.execute("UPDATE samples SET valid=0 WHERE duration_ms<=0")
     return con
 
@@ -371,69 +366,6 @@ def snapshot_epoch(snapshot):
     return None
 
 
-class RateCache:
-    """全局速率内存环 + 预聚合桶。HTTP 查询只读最多120个桶。"""
-    BUCKETS = (5, 15, 60, 180)
-    def __init__(self, keep_sec=SAMPLE_KEEP_SECONDS):
-        self.keep_sec = keep_sec
-        self.lock = threading.Lock()
-        self.rows = []
-        self.rollups = {b: {} for b in self.BUCKETS}
-        self.loaded = False
-        self.db_path = None
-
-    @staticmethod
-    def _add_to(dst, ts, rx, tx, dur, bucket):
-        b = (int(ts) // bucket) * bucket
-        rr, tr = rx * 1000.0 / dur, tx * 1000.0 / dur
-        x = dst.setdefault(b, {"rx_num":0.0,"tx_num":0.0,"dur":0,
-                               "rx_peak":0.0,"tx_peak":0.0,"count":0})
-        x["rx_num"] += rx*1000.0; x["tx_num"] += tx*1000.0; x["dur"] += dur
-        x["rx_peak"] = max(x["rx_peak"],rr); x["tx_peak"] = max(x["tx_peak"],tr); x["count"] += 1
-
-    def _rebuild(self):
-        self.rollups = {b:{} for b in self.BUCKETS}
-        for ts,rx,tx,dur in self.rows:
-            for b in self.BUCKETS:
-                self._add_to(self.rollups[b],ts,rx,tx,dur,b)
-
-    def load(self, con, db_path=None):
-        since=int(time.time())-self.keep_sec
-        rows=[(int(r["ts"]),int(r["rx"]),int(r["tx"]),int(r["duration_ms"]))
-              for r in con.execute("SELECT ts,rx,tx,duration_ms FROM rate_samples WHERE valid=1 AND duration_ms>0 AND ts>=? ORDER BY ts",(since,))]
-        with self.lock:
-            self.rows=rows; self._rebuild(); self.loaded=True; self.db_path=db_path
-
-    def append(self, ts, rx, tx, duration_ms):
-        ts,rx,tx,duration_ms=int(ts),int(rx),int(tx),int(duration_ms)
-        cutoff=ts-self.keep_sec
-        with self.lock:
-            self.rows.append((ts,rx,tx,duration_ms))
-            for b in self.BUCKETS:
-                self._add_to(self.rollups[b],ts,rx,tx,duration_ms,b)
-            # 通常每次不删或只删1行；若删了，重建以保持峰值正确（无法从 max 中减）。
-            i=0
-            while i<len(self.rows) and self.rows[i][0]<cutoff:i+=1
-            if i:
-                del self.rows[:i]; self._rebuild()
-
-    def clear(self):
-        with self.lock:
-            self.rows = []
-            self.rollups = {b: {} for b in self.BUCKETS}
-            self.loaded = True
-
-    def query(self, since, bucket):
-        with self.lock:
-            data=self.rollups.get(bucket,{})
-            selected={k:dict(v) for k,v in data.items() if k>=since}
-            first=self.rows[0][0] if self.rows else 0
-            last=self.rows[-1][0] if self.rows else 0
-            return selected,first,last
-
-RATE_CACHE=RateCache()
-
-
 # --------------------------------------------------------------------------
 # 采集器：单调差分累加
 # --------------------------------------------------------------------------
@@ -457,7 +389,6 @@ class Collector(threading.Thread):
     def _ensure_con(self):
         if self.con is None:
             self.con = db_connect(self.conf)
-            RATE_CACHE.load(self.con, self.conf.get("db"))
         return self.con
 
     # ---- 状态读写 ----
@@ -487,9 +418,6 @@ class Collector(threading.Thread):
         cur = self.con
         cur.execute("BEGIN IMMEDIATE")
         try:
-            global_rx = global_tx = 0
-            global_duration = 0
-            global_valid = False
             for scope, d in deltas.items():
                 if d["rx"] or d["tx"] or d["rx_pkts"] or d["tx_pkts"]:
                     cur.execute(
@@ -512,17 +440,6 @@ class Collector(threading.Thread):
                         "duration_ms=MAX(duration_ms,excluded.duration_ms), valid=1",
                         (ts, scope, d["rx"], d["tx"], d["duration_ms"]),
                     )
-                    if scope.startswith("node:"):
-                        global_rx += d["rx"]; global_tx += d["tx"]
-                        global_duration = max(global_duration, d["duration_ms"])
-                        global_valid = True
-            if global_valid and global_duration > 0:
-                cur.execute(
-                    "INSERT INTO rate_samples(ts,rx,tx,duration_ms,valid) VALUES(?,?,?,?,1) "
-                    "ON CONFLICT(ts) DO UPDATE SET rx=excluded.rx,tx=excluded.tx,"
-                    "duration_ms=excluded.duration_ms,valid=1",
-                    (ts, global_rx, global_tx, global_duration),
-                )
             cur.execute("DELETE FROM counter_state")
             cur.executemany(
                 "INSERT INTO counter_state(name,last_bytes,last_pkts,updated_at) VALUES(?,?,?,?)",
@@ -532,7 +449,6 @@ class Collector(threading.Thread):
                 cur.execute("INSERT INTO meta(k,v) VALUES('epoch',?) "
                             "ON CONFLICT(k) DO UPDATE SET v=excluded.v", (str(epoch),))
             cur.execute("DELETE FROM samples WHERE ts < ?", (ts - SAMPLE_KEEP_SECONDS,))
-            cur.execute("DELETE FROM rate_samples WHERE ts < ?", (ts - SAMPLE_KEEP_SECONDS,))
             cur.execute("COMMIT")
         except Exception:
             with contextlib.suppress(Exception):
@@ -597,12 +513,6 @@ class Collector(threading.Thread):
                               and d["duration_ms"] > 0)
 
         self._commit_tick(deltas, snapshot, ts, ts_ms, epoch)
-        # 事务成功后再入内存环，保证内存与持久化一致。
-        valid_nodes = [d for scope, d in deltas.items()
-                       if scope.startswith("node:") and d.get("valid") and d.get("duration_ms", 0) > 0]
-        if valid_nodes:
-            RATE_CACHE.append(ts, sum(d["rx"] for d in valid_nodes), sum(d["tx"] for d in valid_nodes),
-                              max(d["duration_ms"] for d in valid_nodes))
         self.last_sample_ts = ts
         self.last_ok_ts = wall_ts
         self.last_error = ""
@@ -677,48 +587,6 @@ def q_rate(con, conf, window=None):
         sec = max(0.001, r["dur"] / 1000.0)
         out[r["scope"]] = {"rx": r["rx"] / sec, "tx": r["tx"] / sec}
     return out
-
-
-SERIES_RANGES = {
-    #  key : (跨度秒, 桶秒) —— 全部来自 samples 精细采样，保证 Y 轴口径一致（都是"该桶平均速率"）。
-    #  刻意不做"天/周"速率线：那属于 volume（每日流量柱状图），做成速率线既无意义又会因大桶平均把单位压成 KB/s。
-    "5m":  (5 * 60, 5),        # 实时：5 秒一个点 → 60 点
-    "30m": (30 * 60, 15),      # 15 秒一个点 → 120 点
-    "2h":  (2 * 3600, 60),     # 1 分钟一个点 → 120 点
-    "6h":  (6 * 3600, 180),    # 3 分钟一个点 → 120 点
-}
-
-
-def q_series(con, rng="30m"):
-    """按真实 duration_ms 计算 B/s；返回 avg/peak，未知历史为 None。"""
-    if rng not in SERIES_RANGES:
-        rng = "30m"
-    span, bucket = SERIES_RANGES[rng]
-    now = int(time.time())
-    end = (now // bucket) * bucket
-    requested_start = end - span + bucket
-    db_path = None
-    with contextlib.suppress(Exception):
-        row = con.execute("PRAGMA database_list").fetchone()
-        db_path = row["file"] if row else None
-    if not RATE_CACHE.loaded or (db_path and RATE_CACHE.db_path != db_path):
-        RATE_CACHE.load(con, db_path)
-    buckets, first_ts, last_ts = RATE_CACHE.query(requested_start, bucket)
-    available_start = max(requested_start, (first_ts // bucket) * bucket) if first_ts else end
-    pts, b = [], requested_start
-    while b <= end:
-        x = buckets.get(b)
-        if b < available_start or not first_ts or not x:
-            pts.append({"ts": b, "rx_avg": None, "tx_avg": None,
-                        "rx_peak": None, "tx_peak": None, "samples": 0})
-        else:
-            pts.append({"ts": b, "rx_avg": x["rx_num"] / x["dur"],
-                        "tx_avg": x["tx_num"] / x["dur"], "rx_peak": x["rx_peak"],
-                        "tx_peak": x["tx_peak"], "samples": x["count"]})
-        b += bucket
-    return {"range": rng, "bucket": bucket, "mode": "rate_v2",
-            "requested_start": requested_start, "available_start": first_ts,
-            "available_end": last_ts, "collected_sec": max(0, last_ts-first_ts), "points": pts}
 
 
 def build_summary(conf, con, collector=None):
@@ -935,9 +803,6 @@ class Handler(BaseHTTPRequestHandler):
                 days = min(365, max(1, int((qs.get("days") or ["30"])[0])))
                 scope = (qs.get("scope") or [""])[0] or None
                 self._json({"days": q_daily(con, days, scope)})
-            elif route == "/api/series":
-                rng = (qs.get("range") or ["30m"])[0]
-                self._json(q_series(con, rng))
             elif route == "/api/nodes":
                 self._json({"nodes": load_nodes(self.conf)})
             elif route == "/api/export":
@@ -1034,14 +899,10 @@ def cmd_reset(conf, scope=None):
         con.execute("DELETE FROM daily WHERE scope=?", (scope,))
         con.execute("DELETE FROM totals WHERE scope=?", (scope,))
         con.execute("DELETE FROM samples WHERE scope=?", (scope,))
-        # rate_samples 是全节点合计，单节点删除后无法无损扣除历史；
-        # 清空曲线重新采集，避免继续展示已删节点流量。
-        con.execute("DELETE FROM rate_samples")
     else:
-        for t in ("daily", "totals", "samples", "rate_samples"):
+        for t in ("daily", "totals", "samples"):
             con.execute("DELETE FROM %s" % t)
     con.close()
-    RATE_CACHE.clear()
     print("统计数据已清空" + (" (%s)" % scope if scope else ""))
 
 

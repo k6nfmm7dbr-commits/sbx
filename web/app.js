@@ -8,9 +8,7 @@
 'use strict';
 
 var TOKEN = new URLSearchParams(location.search).get('token') || '';
-var state = { days: 30, sortScope: 'today', nodeId: null, summary: null, live: null, range: '30m' };
-var RANGE_LABEL = { '5m': '近 5 分钟', '30m': '近 30 分钟', '2h': '近 2 小时', '6h': '近 6 小时' };
-var RANGE_BUCKET_TXT = { '5m': '每点 5 秒', '30m': '每点 15 秒', '2h': '每点 1 分钟', '6h': '每点 3 分钟' };
+var state = { days: 30, sortScope: 'today', nodeId: null, summary: null, live: null };
 
 var inflight = {};
 function api(path, params) {
@@ -97,36 +95,6 @@ function niceMax(v) {
   return step * base;
 }
 
-/* ---------- Hero 迷你实时曲线：只更新 path，不重建 SVG ---------- */
-var SPARK_N=80, sparkData=[], sparkTarget={up:0,down:0}, sparkInit=false, sparkDom=null;
-function ensureSpark(){
-  var host=document.getElementById('spark'); if(!host)return null;
-  if(sparkDom && sparkDom.host===host)return sparkDom;
-  host.textContent='';
-  var svg=svgEl('svg',{viewBox:'0 0 400 64',width:'100%',height:64,preserveAspectRatio:'none'});
-  function p(color,opacity){var e=svgEl('path',{fill:'none',stroke:color,'stroke-width':1.8,opacity:opacity,'stroke-linejoin':'round','stroke-linecap':'round'});svg.appendChild(e);return e;}
-  var downFill=svgEl('path',{fill:'var(--down)',opacity:.12,stroke:'none'});svg.appendChild(downFill);
-  var upFill=svgEl('path',{fill:'var(--up)',opacity:.10,stroke:'none'});svg.appendChild(upFill);
-  var down=p('var(--down)',1),up=p('var(--up)',1);host.appendChild(svg);
-  sparkDom={host:host,svg:svg,down:down,up:up,downFill:downFill,upFill:upFill};return sparkDom;
-}
-function sparkPush(up,down){
-  sparkTarget={up:Number(up)||0,down:Number(down)||0};
-  if(!sparkInit){sparkInit=true;sparkData=[];for(var i=0;i<SPARK_N;i++)sparkData.push({up:sparkTarget.up,down:sparkTarget.down});drawSpark();}
-}
-function sparkStep(){
-  var last=sparkData[sparkData.length-1]||{up:0,down:0};
-  sparkData.push({up:last.up+(sparkTarget.up-last.up)*.22,down:last.down+(sparkTarget.down-last.down)*.22});
-  while(sparkData.length>SPARK_N)sparkData.shift();drawSpark();
-}
-function drawSpark(){
-  if(sparkData.length<2)return;var dom=ensureSpark();if(!dom)return;
-  var W=400,H=64,maxV=niceMax(sparkData.reduce(function(m,p){return Math.max(m,p.up,p.down);},1));
-  function d(key){var out='';for(var i=0;i<sparkData.length;i++){var x=i*(W/(sparkData.length-1)),y=H-3-(H-6)*(sparkData[i][key]/maxV);out+=(i?'L':'M')+x.toFixed(1)+' '+y.toFixed(1);}return out;}
-  var dd=d('down'),du=d('up');dom.down.setAttribute('d',dd);dom.up.setAttribute('d',du);
-  dom.downFill.setAttribute('d',dd+'L400 64L0 64Z');dom.upFill.setAttribute('d',du+'L400 64L0 64Z');
-}
-
 function replaceChart(host, node) {
   if (node) host.replaceChildren(node);
   else host.replaceChildren();
@@ -176,99 +144,6 @@ function drawGrouped(host, rows, opts) {
   replaceChart(host, svg);
 }
 
-function fmtDuration(sec) {
-  sec = Math.max(0, Number(sec) || 0);
-  if (sec < 60) return Math.round(sec) + ' 秒';
-  if (sec < 3600) return Math.max(1, Math.round(sec / 60)) + ' 分钟';
-  var h = sec / 3600;
-  return (h < 10 ? h.toFixed(1) : Math.round(h)) + ' 小时';
-}
-
-/* 速率曲线 v2：浅色面积=时间加权平均，实线=桶内峰值；null=未采集/断线 */
-function drawRateChart(host, points, opts) {
-  opts = opts || {};
-  if (!points || !points.length) { emptyChart(host,'等待第一轮有效采样…'); return; }
-  var valid = points.filter(function (p) {
-    return p.rx_avg != null || p.tx_avg != null || p.rx_peak != null || p.tx_peak != null;
-  });
-  if (!valid.length) { emptyChart(host,'建立基线中，约 2 秒后开始记录速率…'); return; }
-
-  var W = Math.max(300, host.parentNode.clientWidth || 700), H = opts.height || 210;
-  var padL = 54, padR = 12, padT = 12, padB = 24, iw = W-padL-padR, ih = H-padT-padB;
-  var maxV = niceMax(valid.reduce(function (m,p) {
-    return Math.max(m, p.rx_avg||0, p.tx_avg||0, p.rx_peak||0, p.tx_peak||0);
-  }, 0));
-  var t0=points[0].ts, t1=points[points.length-1].ts, span=Math.max(1,t1-t0);
-  var svg=svgEl('svg',{viewBox:'0 0 '+W+' '+H,width:W,height:H,role:'img'});
-  function xOf(p){return padL+iw*((p.ts-t0)/span);}
-  function yOf(v){return padT+ih-(maxV>0?ih*(v/maxV):0);}
-
-  for(var g=0;g<=4;g++){
-    var y=padT+ih-ih*g/4;
-    svg.appendChild(svgEl('line',{class:'grid'+(g===0?' grid-0':''),x1:padL,y1:y,x2:W-padR,y2:y}));
-    var t=svgEl('text',{class:'axis',x:padL-8,y:y+3,'text-anchor':'end'});
-    t.textContent=fmtRate(maxV*g/4); svg.appendChild(t);
-  }
-  for(var f=0;f<=4;f++){
-    var frac=f/4,x=padL+iw*frac;
-    var lb=svgEl('text',{class:'axis',x:x,y:H-6,'text-anchor':f===0?'start':(f===4?'end':'middle')});
-    lb.textContent=fmtClock(t0+span*frac); svg.appendChild(lb);
-  }
-
-  function segments(key){
-    var out=[],cur=[];
-    points.forEach(function(p){
-      var v=p[key];
-      if(v==null){if(cur.length){out.push(cur);cur=[];}}
-      else cur.push({p:p,v:v});
-    });
-    if(cur.length)out.push(cur); return out;
-  }
-  function drawAvg(key,color){
-    segments(key).forEach(function(seg){
-      if(!seg.length)return;
-      var d=''; seg.forEach(function(z,i){d+=(i?'L':'M')+xOf(z.p).toFixed(1)+' '+yOf(z.v).toFixed(1);});
-      var x0=xOf(seg[0].p),x1=xOf(seg[seg.length-1].p),base=padT+ih;
-      svg.appendChild(svgEl('path',{d:d+'L'+x1+' '+base+'L'+x0+' '+base+'Z',fill:color,opacity:'0.14',stroke:'none'}));
-      svg.appendChild(svgEl('path',{d:d,fill:'none',stroke:color,'stroke-width':'1.1',opacity:'0.55','stroke-linejoin':'round'}));
-    });
-  }
-  function drawPeak(key,color){
-    segments(key).forEach(function(seg){
-      if(!seg.length)return;
-      var d=''; seg.forEach(function(z,i){d+=(i?'L':'M')+xOf(z.p).toFixed(1)+' '+yOf(z.v).toFixed(1);});
-      if(seg.length===1){svg.appendChild(svgEl('circle',{cx:xOf(seg[0].p),cy:yOf(seg[0].v),r:2.3,fill:color}));}
-      else svg.appendChild(svgEl('path',{d:d,fill:'none',stroke:color,'stroke-width':'2.1','stroke-linejoin':'round','stroke-linecap':'round'}));
-    });
-  }
-  drawAvg('tx_avg','var(--down)'); drawAvg('rx_avg','var(--up)');
-  drawPeak('tx_peak','var(--down)'); drawPeak('rx_peak','var(--up)');
-
-  // 标记真正开始采集的位置，左侧空白明确表示“尚未安装/未采集”。
-  var first=valid[0];
-  if(first && first.ts>t0){
-    var sx=xOf(first);
-    svg.appendChild(svgEl('line',{x1:sx,y1:padT,x2:sx,y2:padT+ih,stroke:'var(--line-strong)','stroke-dasharray':'3 3'}));
-    var st=svgEl('text',{class:'axis',x:sx+4,y:padT+11}); st.textContent='开始采集'; svg.appendChild(st);
-  }
-
-  var cur=svgEl('line',{class:'cursor-line',x1:0,y1:padT,x2:0,y2:padT+ih,opacity:0}); svg.appendChild(cur);
-  var overlay=svgEl('rect',{class:'hit',x:padL,y:padT,width:iw,height:ih});
-  overlay.addEventListener('pointermove',function(e){
-    var rect=svg.getBoundingClientRect(),rel=(e.clientX-rect.left)/rect.width*W;
-    var frac=Math.min(1,Math.max(0,(rel-padL)/iw));
-    var idx=Math.round(frac*(points.length-1)),p=points[idx]; if(!p)return;
-    cur.setAttribute('x1',xOf(p));cur.setAttribute('x2',xOf(p));cur.setAttribute('opacity',1);
-    var html='<b>'+fmtClock(p.ts)+'</b>';
-    if(p.tx_peak==null) html+='<br>未采集';
-    else html+='<br>↓ 峰值 '+fmtRate(p.tx_peak)+'　平均 '+fmtRate(p.tx_avg||0)
-             +'<br>↑ 峰值 '+fmtRate(p.rx_peak||0)+'　平均 '+fmtRate(p.rx_avg||0);
-    showTip(e,html);
-  });
-  overlay.addEventListener('pointerleave',function(){cur.setAttribute('opacity',0);hideTip();});
-  svg.appendChild(overlay); replaceChart(host, svg);
-}
-
 /* ---------- 渲染：概览（低频 summary）---------- */
 function renderSummary(s) {
   state.summary = s;
@@ -303,7 +178,6 @@ function renderLive(v) {
   easeTo('hero-down', live ? rt.tx : 0, function (n) { return live ? fmtRate(n) : '—'; });
   setText('kpi-conns', typeof v.conns_total === 'number' ? v.conns_total : '—');
   setText('kpi-conns-udp', typeof v.conns_udp_total === 'number' ? v.conns_udp_total : '—');
-  if (live) sparkPush(rt.rx, rt.tx);
 
   // 把 live 的速率/连接数合并进节点行（增量更新，不重建）
   var byId = {};
@@ -383,7 +257,7 @@ function renderNodeSelect(s) {
 }
 
 /* ---------- 数据加载 ---------- */
-var cache = { daily: null, series: null, nodeDaily: null };
+var cache = { daily: null, nodeDaily: null };
 
 function loadSummary() { return api('/api/summary').then(renderSummary).catch(function (e) { toast(e.message); }); }
 function loadLive() { return api('/api/live').then(renderLive).catch(function () {}); }
@@ -394,10 +268,6 @@ function drawDaily() {
     return { label: fmtDay(r.day), title: r.day, up: r.rx, down: r.tx };
   }), { label: '每日流量', height: 230 });
 }
-function drawSeries() {
-  if (!cache.series) return;
-  drawRateChart(document.getElementById('chart-live'), cache.series.points || [], { fmtX: fmtClock });
-}
 function drawNodeDaily() {
   if (!cache.nodeDaily) return;
   drawGrouped(document.getElementById('chart-node'), cache.nodeDaily.map(function (r) {
@@ -405,13 +275,6 @@ function drawNodeDaily() {
   }), { label: '单节点每日流量', height: 200 });
 }
 function loadDaily() { return api('/api/daily', { days: state.days }).then(function (d) { cache.daily = d.days; drawDaily(); }).catch(function (e) { toast(e.message); }); }
-function loadSeries() {
-  return api('/api/series', { range: state.range }).then(function (d) {
-    cache.series = d; drawSeries();
-    var n = (d.points || []).length;
-    setText('live-hint', '已采集 ' + fmtDuration(d.collected_sec) + ' · ' + (RANGE_BUCKET_TXT[state.range] || '') + '（' + n + ' 点）');
-  }).catch(function (e) { toast(e.message); });
-}
 function loadNodeDaily() {
   if (state.nodeId == null) return Promise.resolve();
   return api('/api/daily', { days: state.days, scope: 'node:' + state.nodeId })
@@ -427,7 +290,7 @@ function loadNodeDaily() {
   btn.addEventListener('click',function(){
     var t=document.documentElement.getAttribute('data-theme')||'system';t=t==='system'?'dark':(t==='dark'?'light':'system');
     if(t==='system')document.documentElement.removeAttribute('data-theme');else document.documentElement.setAttribute('data-theme',t);
-    try{localStorage.setItem('sbx-theme',t);}catch(e){} label(); drawDaily();drawSeries();drawNodeDaily();drawSpark();
+    try{localStorage.setItem('sbx-theme',t);}catch(e){} label(); drawDaily();drawNodeDaily();
   });label();
 })();
 
@@ -443,28 +306,24 @@ function bindSeg(attr, cb) {
 }
 bindSeg('days', function (v) { state.days = Number(v); loadDaily(); loadNodeDaily(); });
 bindSeg('scope', function (v) { state.sortScope = v; if (state.summary) renderNodesStatic(state.summary); });
-bindSeg('range', function (v) { state.range = v; loadSeries(); });
 document.getElementById('node-select').addEventListener('change', function (e) { state.nodeId = e.target.value; loadNodeDaily(); });
 if (TOKEN) document.getElementById('csv-link').href = '/api/export?token=' + encodeURIComponent(TOKEN);
 
 var reflowTimer;
 window.addEventListener('resize', function () {
   clearTimeout(reflowTimer);
-  reflowTimer = setTimeout(function () { drawDaily(); drawSeries(); drawNodeDaily(); drawSpark(); }, 160);
+  reflowTimer = setTimeout(function () { drawDaily(); drawNodeDaily(); }, 160);
 });
 
 /* ---------- 启动与轮询 ---------- */
 setInterval(tickEase, 40);               // 数字缓动循环（setInterval 比 rAF 在后台更可靠）
-setInterval(sparkStep, 250);             // hero 迷你曲线每 250ms 平滑推进一帧
 
-loadSummary().then(function () { loadLive(); loadSeries(); loadDaily(); });
+loadSummary().then(function () { loadLive(); loadDaily(); });
 
 // 实时数据：2 秒一次（轻量 /api/live）
 setInterval(function () { if (!document.hidden) loadLive(); }, 2000);
 // 概览+节点表：8 秒一次（较重的 /api/summary）
 setInterval(function () { if (!document.hidden) loadSummary(); }, 8000);
-// 速率曲线：全部是短范围（5分~6时），5 秒刷新即可跟上
-setInterval(function () { if (!document.hidden) loadSeries(); }, 5000);
 // 每日流量图 + 单节点明细：60 秒
 setInterval(function () {
   if (document.hidden) return;
@@ -472,5 +331,5 @@ setInterval(function () {
 }, 60000);
 // 页面重新可见时立即刷新一次
 document.addEventListener('visibilitychange', function () {
-  if (!document.hidden) { loadLive(); loadSeries(); loadSummary(); }
+  if (!document.hidden) { loadLive(); loadSummary(); }
 });
