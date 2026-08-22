@@ -13,7 +13,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/
 ## 当前版本
 
 ```text
-当前发布版本为 v2.8.1
+v2.7.0
 ```
 
 ## 节点
