@@ -139,7 +139,8 @@ function renderLive(v) {
     if (kind === 'conns') el.textContent = (typeof n.conns_tcp === 'number') ? n.conns_tcp : '—';
     else if (kind === 'conns_udp') el.textContent = (typeof n.conns_udp === 'number') ? n.conns_udp : '—';
     else if (kind === 'rate') el.innerHTML = live ? '↑' + fmtRate(n.rate.rx) + '<br>↓' + fmtRate(n.rate.tx) : '—';
-    else if (kind === 'rate1') el.textContent = live ? ('↑' + fmtRate(n.rate.rx) + '  ↓' + fmtRate(n.rate.tx)) : '—';
+    else if (kind === 'rate-up') el.textContent = live ? fmtRate(n.rate.rx) : '—';
+    else if (kind === 'rate-down') el.textContent = live ? fmtRate(n.rate.tx) : '—';
   });
 }
 
@@ -174,18 +175,22 @@ function renderNodesStatic(s) {
 
   cards.innerHTML = nodes.map(function (n) {
     var td = n.today, tt = n.total;
-    return '<div class="ncard">'
+    return '<div class="ncard node-panel">'
       + '<div class="ncard-top"><span class="ncard-name">' + esc(n.name) + '</span>'
       + '<span class="chip">' + esc(n.type || '—') + '</span></div>'
-      + '<div class="ncard-meta"><span>端口 ' + esc(portText(n)) + '</span>'
-      + '<span>TCP <b class="conns" data-node-live="' + n.id + '" data-kind="conns">—</b></span>'
-      + '<span>UDP <b class="conns-udp" data-node-live="' + n.id + '" data-kind="conns_udp">—</b></span></div>'
-      + '<div class="ncard-live"><span class="live" data-node-live="' + n.id + '" data-kind="rate1">—</span></div>'
-      + '<div class="ncard-grid">'
-      + '<div><div class="ncell-label">今日合计</div><div class="ncell-value">' + fmtBytes(td.rx + td.tx) + '</div>'
-      + '<div class="ncell-sub"><span class="up">↑' + fmtBytes(td.rx) + '</span> <span class="down">↓' + fmtBytes(td.tx) + '</span></div></div>'
-      + '<div><div class="ncell-label">累计合计</div><div class="ncell-value">' + fmtBytes(tt.rx + tt.tx) + '</div>'
-      + '<div class="ncell-sub"><span class="up">↑' + fmtBytes(tt.rx) + '</span> <span class="down">↓' + fmtBytes(tt.tx) + '</span></div></div>'
+      + '<div class="node-status-grid">'
+      + '<div><span>端口</span><b>' + esc(portText(n)) + '</b></div>'
+      + '<div><span>TCP</span><b class="conns" data-node-live="' + n.id + '" data-kind="conns">—</b></div>'
+      + '<div><span>UDP</span><b class="conns-udp" data-node-live="' + n.id + '" data-kind="conns_udp">—</b></div>'
+      + '</div>'
+      + '<div class="node-rate-grid">'
+      + '<div><span class="up">↑ 上传速率</span><b class="up" data-node-live="' + n.id + '" data-kind="rate-up">—</b></div>'
+      + '<div><span class="down">↓ 下载速率</span><b class="down" data-node-live="' + n.id + '" data-kind="rate-down">—</b></div>'
+      + '</div>'
+      + '<div class="node-usage-table">'
+      + '<div class="node-usage-head"><span></span><span>上传</span><span>下载</span><span>合计</span></div>'
+      + '<div class="node-usage-row"><b>今日</b><span class="up">' + fmtBytes(td.rx) + '</span><span class="down">' + fmtBytes(td.tx) + '</span><strong>' + fmtBytes(td.rx + td.tx) + '</strong></div>'
+      + '<div class="node-usage-row"><b>累计</b><span class="up">' + fmtBytes(tt.rx) + '</span><span class="down">' + fmtBytes(tt.tx) + '</span><strong>' + fmtBytes(tt.rx + tt.tx) + '</strong></div>'
       + '</div>'
       + '</div>';
   }).join('');
