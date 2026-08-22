@@ -63,20 +63,16 @@
     </div>
   </section>
 
-  <section class="panel">
+  <section class="panel data-panel">
     <div class="panel-head">
-      <h2>每日流量</h2>
+      <div><h2>每日流量</h2><span class="table-caption">按中国时间统计 · 单位：字节</span></div>
       <div class="seg" role="group" aria-label="天数范围">
         <button data-days="7">7 天</button>
         <button data-days="30" class="on">30 天</button>
         <button data-days="90">90 天</button>
       </div>
     </div>
-    <div class="chart-wrap"><div id="chart-daily" class="chart"></div></div>
-    <div class="legend">
-      <span><i class="sw up"></i>上传（用户上传）</span>
-      <span><i class="sw down"></i>下载（用户下载）</span>
-    </div>
+    <div id="daily-table" class="excel-wrap"></div>
   </section>
 
   <section class="panel">
@@ -105,12 +101,12 @@
     <div id="node-cards" class="node-cards"></div>
   </section>
 
-  <section class="panel">
+  <section class="panel data-panel">
     <div class="panel-head">
-      <h2>单节点每日明细</h2>
+      <div><h2>单节点每日明细</h2><span class="table-caption">选择节点查看每日明细</span></div>
       <select id="node-select" aria-label="选择节点"></select>
     </div>
-    <div class="chart-wrap"><div id="chart-node" class="chart"></div></div>
+    <div id="node-daily-table" class="excel-wrap"></div>
   </section>
 
   <footer class="foot">

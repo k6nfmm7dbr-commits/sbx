@@ -95,65 +95,6 @@ function niceMax(v) {
   return step * base;
 }
 
-function replaceChart(host, node) {
-  if (node) host.replaceChildren(node);
-  else host.replaceChildren();
-}
-function emptyChart(host, text) {
-  var d=document.createElement('div');d.className='empty';d.textContent=text;host.replaceChildren(d);
-}
-
-function volumeAxis(maxBytes){maxBytes=Number(maxBytes)||0;var unit=maxBytes>=1073741824?1073741824:(maxBytes>=1048576?1048576:1024);var v=maxBytes/unit;var step=v>=5?5:(v>=1?1:.2);return {top:Math.max(step,Math.ceil(v/step)*step)*unit,step:step*unit,unit:unit};}
-function fmtAxisVolume(n,unit){var v=n/unit;return (v%1===0?v.toFixed(0):v.toFixed(1))+' '+(unit>=1073741824?'GB':(unit>=1048576?'MB':'KB'));}
-
-/* ---------- 分组柱状图 ---------- */
-function drawGrouped(host, rows, opts) {
-  opts = opts || {};
-  if (!rows.length) { emptyChart(host,'暂无数据'); return; }
-  var avail = Math.max(280, host.parentNode.clientWidth || 600);
-  var slot = opts.slot || 24, padL = 54, padR = 12, padT = 12, padB = 26;
-  var W = Math.max(avail, rows.length * slot + padL + padR), H = opts.height || 220;
-  var iw = W - padL - padR, ih = H - padT - padB;
-  var ax=volumeAxis(rows.reduce(function (m,r){return Math.max(m,r.up,r.down);},0));
-  var maxV=ax.top;
-  var svg = svgEl('svg', { viewBox: '0 0 ' + W + ' ' + H, width: W, height: H, role: 'img' });
-  var ticks=Math.max(1,Math.round(maxV/ax.step));
-  for (var g = 0; g <= ticks; g++) {
-    var y = padT + ih - (ih * g / ticks);
-    svg.appendChild(svgEl('line', { class: 'grid' + (g === 0 ? ' grid-0' : ''), x1: padL, y1: y, x2: W - padR, y2: y }));
-    var t = svgEl('text', { class: 'axis', x: padL - 8, y: y + 3, 'text-anchor': 'end' });
-    t.textContent = fmtAxisVolume(ax.step*g,ax.unit); svg.appendChild(t);
-  }
-  var slotW = iw / rows.length, barW = Math.max(2, Math.min(10, slotW / 2 - 2));
-  var minGap = 46, lastLabelX = -1e9;
-  rows.forEach(function (r, i) {
-    var cx = padL + slotW * (i + 0.5);
-    [['up', 'bar-up', -1], ['down', 'bar-down', 1]].forEach(function (p) {
-      var val = r[p[0]], h = maxV > 0 ? Math.max(val > 0 ? 1.5 : 0, ih * (val / maxV)) : 0;
-      if (h <= 0) return;
-      var bx=cx+(p[2]<0?-barW-1:1), by=padT+ih-h;
-      svg.appendChild(svgEl('rect', { class:p[1], x:bx, y:by, width:barW, height:h, rx:2 }));
-      if (rows.length <= 14 || i % Math.ceil(rows.length/14) === 0 || i === rows.length-1) {
-        var vl=svgEl('text',{class:'value-label '+p[0],x:bx+barW/2,y:Math.max(11,by-4),'text-anchor':'middle'});
-        vl.textContent=fmtBytes(val);svg.appendChild(vl);
-      }
-    });
-    var hit = svgEl('rect', { class: 'hit', x: cx - slotW / 2, y: padT, width: slotW, height: ih });
-    var html = '<b>' + esc(r.title || r.label) + '</b><br>↑ ' + fmtBytes(r.up) + '<br>↓ ' + fmtBytes(r.down) + '<br>合计 ' + fmtBytes(r.up + r.down);
-    hit.addEventListener('pointerenter', function (e) { showTip(e, html); });
-    hit.addEventListener('pointermove', function (e) { showTip(e, html); });
-    hit.addEventListener('pointerleave', hideTip);
-    svg.appendChild(hit);
-    var isLast = i === rows.length - 1;
-    if (cx - lastLabelX >= minGap || (isLast && cx - lastLabelX >= minGap * 0.7)) {
-      lastLabelX = cx;
-      var lb = svgEl('text', { class: 'axis', x: cx, y: H - 8, 'text-anchor': 'middle' });
-      lb.textContent = r.label; svg.appendChild(lb);
-    }
-  });
-  replaceChart(host, svg);
-}
-
 /* ---------- 渲染：概览（低频 summary）---------- */
 function renderSummary(s) {
   state.summary = s;
@@ -272,18 +213,18 @@ var cache = { daily: null, nodeDaily: null };
 function loadSummary() { return api('/api/summary').then(renderSummary).catch(function (e) { toast(e.message); }); }
 function loadLive() { return api('/api/live').then(renderLive).catch(function () {}); }
 
-function drawDaily() {
-  if (!cache.daily) return;
-  drawGrouped(document.getElementById('chart-daily'), cache.daily.map(function (r) {
-    return { label: fmtDay(r.day), title: r.day, up: r.rx, down: r.tx };
-  }), { label: '每日流量', height: 230 });
+function fmtTableBytes(n) { return fmtBytes(Number(n)||0); }
+function renderExcelTable(hostId, rows) {
+  var host=document.getElementById(hostId); if(!host)return;
+  if(!rows||!rows.length){host.innerHTML='<div class="empty">暂无数据</div>';return;}
+  var total=rows.reduce(function(a,r){return {rx:a.rx+r.rx,tx:a.tx+r.tx};},{rx:0,tx:0});
+  var html='<div class="excel-scroll"><table class="excel-table"><thead><tr><th>日期</th><th class="up">上传</th><th class="down">下载</th><th>合计</th></tr></thead><tbody>';
+  rows.slice().reverse().forEach(function(r){html+='<tr><td>'+esc(r.day)+'</td><td class="up">'+fmtTableBytes(r.rx)+'</td><td class="down">'+fmtTableBytes(r.tx)+'</td><td><b>'+fmtTableBytes(r.rx+r.tx)+'</b></td></tr>';});
+  html+='</tbody><tfoot><tr><th>合计</th><th class="up">'+fmtTableBytes(total.rx)+'</th><th class="down">'+fmtTableBytes(total.tx)+'</th><th>'+fmtTableBytes(total.rx+total.tx)+'</th></tr></tfoot></table></div>';
+  host.innerHTML=html;
 }
-function drawNodeDaily() {
-  if (!cache.nodeDaily) return;
-  drawGrouped(document.getElementById('chart-node'), cache.nodeDaily.map(function (r) {
-    return { label: fmtDay(r.day), title: r.day, up: r.rx, down: r.tx };
-  }), { label: '单节点每日流量', height: 200 });
-}
+function drawDaily() { if(cache.daily) renderExcelTable('daily-table',cache.daily); }
+function drawNodeDaily() { if(cache.nodeDaily) renderExcelTable('node-daily-table',cache.nodeDaily); }
 function loadDaily() { return api('/api/daily', { days: state.days }).then(function (d) { cache.daily = d.days; drawDaily(); }).catch(function (e) { toast(e.message); }); }
 function loadNodeDaily() {
   if (state.nodeId == null) return Promise.resolve();
