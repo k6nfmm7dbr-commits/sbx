@@ -7,8 +7,7 @@
  */
 'use strict';
 
-var TOKEN = new URLSearchParams(location.search).get('token') || '';
-var state = { days: 60, nodeId: null, summary: null, live: null };
+var state = { days: 60, nodeId: null, statusNodeId: null, summary: null, live: null };
 
 var inflight = {};
 function api(path, params) {
@@ -16,7 +15,6 @@ function api(path, params) {
   if (inflight[key]) return inflight[key];
   var u = new URL(path, location.origin);
   if (params) Object.keys(params).forEach(function (k) { u.searchParams.set(k, params[k]); });
-  if (TOKEN) u.searchParams.set('token', TOKEN);
   var req = fetch(u, { cache: 'no-store' }).then(function (r) {
     if (r.status === 401) throw new Error('令牌无效，请重新登录');
     if (!r.ok) throw new Error('请求失败 ' + r.status);
@@ -147,42 +145,25 @@ function renderLive(v) {
 /* ---------- 节点表：静态部分（流量随 summary 重建）---------- */
 function renderNodesStatic(s) {
   var tbody = document.getElementById('node-tbody'), cards = document.getElementById('node-cards');
-  var nodes = s.nodes.slice();
-  if (!nodes.length) {
-    tbody.innerHTML = '<tr><td colspan="12" class="empty">还没有节点，先用 sbx 菜单添加一个</td></tr>';
-    cards.innerHTML = '<div class="empty">还没有节点，先用 sbx 菜单添加一个</div>';
-    return;
+  var allNodes = s.nodes.slice();
+  var sel = document.getElementById('status-node-select');
+  var sig = allNodes.map(function(n){return n.id+':'+n.name;}).join('|');
+  if (sel && sel._sig !== sig) {
+    sel._sig=sig;
+    sel.innerHTML=allNodes.map(function(n){return '<option value="'+n.id+'">'+esc(n.name)+'</option>';}).join('');
   }
+  if (state.statusNodeId==null && allNodes.length) state.statusNodeId=allNodes[0].id;
+  if (sel && state.statusNodeId!=null) sel.value=String(state.statusNodeId);
+  var nodes=allNodes.filter(function(n){return Number(n.id)===Number(state.statusNodeId);});
+  if (!nodes.length) { tbody.innerHTML='';cards.innerHTML='<div class="empty">暂无节点</div>';return; }
   function portText(n) { return n.ports ? (n.port ? n.port + ',' + n.ports : n.ports) : (n.port || '—'); }
-
   tbody.innerHTML = nodes.map(function (n) {
-    return '<tr>'
-      + '<td><div class="node-name">' + esc(n.name) + '</div></td>'
-      + '<td><span class="chip">' + esc(n.type || '—') + '</span></td>'
-      + '<td class="num">' + esc(portText(n)) + '</td>'
-      + '<td class="num"><b class="conns" data-node-live="' + n.id + '" data-kind="conns">—</b></td>'
-      + '<td class="num"><b class="conns-udp" data-node-live="' + n.id + '" data-kind="conns_udp">—</b></td>'
-      + '<td class="num live" data-node-live="' + n.id + '" data-kind="rate">—</td>'
-      + '</tr>';
+    return '<tr><td><div class="node-name">'+esc(n.name)+'</div></td><td><span class="chip">'+esc(n.type||'—')+'</span></td><td class="num">'+esc(portText(n))+'</td><td class="num"><b class="conns" data-node-live="'+n.id+'" data-kind="conns">—</b></td><td class="num"><b class="conns-udp" data-node-live="'+n.id+'" data-kind="conns_udp">—</b></td><td class="num live" data-node-live="'+n.id+'" data-kind="rate">—</td></tr>';
   }).join('');
-
   cards.innerHTML = nodes.map(function (n) {
-    return '<div class="ncard node-panel">'
-      + '<div class="ncard-top"><span class="ncard-name">' + esc(n.name) + '</span>'
-      + '<span class="chip">' + esc(n.type || '—') + '</span></div>'
-      + '<div class="node-status-grid">'
-      + '<div><span>端口</span><b>' + esc(portText(n)) + '</b></div>'
-      + '<div><span>TCP</span><b class="conns" data-node-live="' + n.id + '" data-kind="conns">—</b></div>'
-      + '<div><span>UDP</span><b class="conns-udp" data-node-live="' + n.id + '" data-kind="conns_udp">—</b></div>'
-      + '</div>'
-      + '<div class="node-rate-grid">'
-      + '<div><span class="up">↑ 上传速率</span><b class="up" data-node-live="' + n.id + '" data-kind="rate-up">—</b></div>'
-      + '<div><span class="down">↓ 下载速率</span><b class="down" data-node-live="' + n.id + '" data-kind="rate-down">—</b></div>'
-      + '</div>'
-      + '</div>';
+    return '<div class="ncard node-panel"><div class="ncard-top"><span class="ncard-name">'+esc(n.name)+'</span><span class="chip">'+esc(n.type||'—')+'</span></div><div class="node-status-grid"><div><span>端口</span><b>'+esc(portText(n))+'</b></div><div><span>TCP</span><b class="conns" data-node-live="'+n.id+'" data-kind="conns">—</b></div><div><span>UDP</span><b class="conns-udp" data-node-live="'+n.id+'" data-kind="conns_udp">—</b></div></div><div class="node-rate-grid"><div><span class="up">↑ 上传速率</span><b class="up" data-node-live="'+n.id+'" data-kind="rate-up">—</b></div><div><span class="down">↓ 下载速率</span><b class="down" data-node-live="'+n.id+'" data-kind="rate-down">—</b></div></div></div>';
   }).join('');
-
-  if (state.live) renderLive(state.live);   // 立即补上实时列
+  if (state.live) renderLive(state.live);
 }
 
 function renderNodeSelect(s) {
@@ -221,55 +202,6 @@ function loadNodeDaily() {
     .then(function (d) { cache.nodeDaily = d.days; drawNodeDaily(); }).catch(function (e) { toast(e.message); });
 }
 
-/* ---------- 节点管理页 ---------- */
-var manageState={key:'',nodes:[],unlocked:false};
-try{manageState.key=sessionStorage.getItem('sbx-manage-key')||'';}catch(e){}
-function manageFetch(path,body){
-  var opt={cache:'no-store',headers:{'X-SBX-Manage-Key':manageState.key}};
-  if(body){opt.method='POST';opt.headers['Content-Type']='application/json';body.manage_key=manageState.key;opt.body=JSON.stringify(body);}
-  return fetch(path,opt).then(function(r){return r.json().then(function(d){if(!r.ok)throw new Error(d.error||('HTTP '+r.status));return d;});});
-}
-function manageMessage(text,ok){var e=document.getElementById('manage-result');if(e){e.textContent=text||'';e.style.fontWeight='700';e.style.color='#000';}}
-function manageFillNode(){
-  var sel=document.getElementById('manage-node'),id=Number(sel.value),n=manageState.nodes.find(function(x){return Number(x.id)===id;});if(!n)return;
-  document.getElementById('manage-port').value=n.port||'';
-  document.getElementById('manage-sni').value=n.sni||'';
-  document.getElementById('manage-sni-box').hidden=!n.can_sni;
-}
-function manageRender(){
-  var sel=document.getElementById('manage-node');
-  sel.innerHTML=manageState.nodes.map(function(n){return '<option value="'+n.id+'">'+esc(n.name)+' · '+esc(n.type)+'</option>';}).join('');
-  document.getElementById('manage-content').hidden=false;document.getElementById('manage-lock').hidden=true;
-  if(manageState.nodes.length)manageFillNode();else manageMessage('暂无节点');
-}
-function manageUnlock(){
-  var key=document.getElementById('manage-key').value.trim()||manageState.key;if(!key){document.getElementById('manage-msg').textContent='请输入管理密钥';return;}
-  manageState.key=key;
-  manageFetch('/api/manage/nodes').then(function(d){manageState.nodes=d.nodes||[];manageState.unlocked=true;try{sessionStorage.setItem('sbx-manage-key',key);}catch(e){}manageRender();})
-  .catch(function(e){manageState.unlocked=false;document.getElementById('manage-msg').textContent=e.message;});
-}
-function manageSave(){
-  var id=Number(document.getElementById('manage-node').value),port=Number(document.getElementById('manage-port').value);
-  var n=manageState.nodes.find(function(x){return Number(x.id)===id;});if(!n)return;
-  var body={id:id,port:port};if(n.can_sni)body.sni=document.getElementById('manage-sni').value.trim();
-  manageMessage('正在校验并应用…');
-  manageFetch('/api/manage/edit',body).then(function(d){manageState.nodes=d.nodes||[];manageRender();manageMessage('修改成功，服务与计数规则已重载');loadSummary();loadLive();})
-  .catch(function(e){manageMessage('修改失败：'+e.message);});
-}
-function manageDelete(){
-  var id=Number(document.getElementById('manage-node').value),n=manageState.nodes.find(function(x){return Number(x.id)===id;});if(!n)return;
-  if(!confirm('确定删除节点「'+n.name+'」？此操作会重载 sing-box。'))return;
-  var clear=document.getElementById('manage-clear-history').checked;
-  manageMessage('正在删除并重载…');
-  manageFetch('/api/manage/remove',{id:id,clear_history:clear}).then(function(d){manageState.nodes=d.nodes||[];manageRender();manageMessage('节点已删除'+(clear?'，历史流量已清除':'，历史流量已保留'));loadSummary();loadLive();})
-  .catch(function(e){manageMessage('删除失败：'+e.message);});
-}
-document.getElementById('manage-unlock').addEventListener('click',manageUnlock);
-document.getElementById('manage-key').addEventListener('keydown',function(e){if(e.key==='Enter')manageUnlock();});
-document.getElementById('manage-node').addEventListener('change',manageFillNode);
-document.getElementById('manage-save').addEventListener('click',manageSave);
-document.getElementById('manage-delete').addEventListener('click',manageDelete);
-
 /* ---------- 事件 ---------- */
 function bindSeg(attr, cb) {
   document.querySelectorAll('.seg [data-' + attr + ']').forEach(function (b) {
@@ -282,6 +214,10 @@ function bindSeg(attr, cb) {
 }
 // 节点固定按 nodes.json 添加顺序显示
 document.getElementById('node-select').addEventListener('change', function (e) { state.nodeId = e.target.value; loadNodeDaily(); });
+document.getElementById('status-node-select').addEventListener('change', function (e) {
+  state.statusNodeId = e.target.value;
+  if (state.summary) renderNodesStatic(state.summary);
+});
 // CSV 导出入口已按用户要求从页面移除
 
 var reflowTimer;
@@ -289,25 +225,6 @@ window.addEventListener('resize', function () {
   clearTimeout(reflowTimer);
   reflowTimer = setTimeout(function () { drawDaily(); drawNodeDaily(); }, 160);
 });
-
-/* ---------- 三页底部导航 ---------- */
-(function initNavigation(){
-  var valid={home:1,daily:1,node:1,manage:1}, positions={home:0,daily:0,node:0};
-  var current=(location.hash||'#home').slice(1); if(!valid[current])current='home';
-  function show(name,push){
-    if(!valid[name])name='home'; positions[current]=window.scrollY||0; current=name;
-    document.querySelectorAll('.app-view').forEach(function(v){v.classList.toggle('on',v.id==='view-'+name);});
-    document.querySelectorAll('.nav-btn').forEach(function(b){b.classList.toggle('on',b.dataset.view===name);});
-    if(push && location.hash!=='#'+name)history.pushState(null,'','#'+name);
-    requestAnimationFrame(function(){window.scrollTo(0,positions[name]||0);});
-    if(name==='daily'&&!cache.daily)loadDaily();
-    if(name==='node'&&!cache.nodeDaily)loadNodeDaily();
-    if(name==='manage'&&!manageState.unlocked&&manageState.key){document.getElementById('manage-key').value=manageState.key;manageUnlock();}
-  }
-  document.querySelectorAll('.nav-btn').forEach(function(b){b.addEventListener('click',function(){show(b.dataset.view,true);});});
-  window.addEventListener('popstate',function(){show((location.hash||'#home').slice(1),false);});
-  show(current,false);
-})();
 
 /* ---------- 启动与轮询 ---------- */
 setInterval(tickEase, 40);               // 数字缓动循环（setInterval 比 rAF 在后台更可靠）

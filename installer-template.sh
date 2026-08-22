@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 APP_NAME="SBX"
-APP_VERSION="2.7.0"
+APP_VERSION="2.7.1"
 RAW_URL="${SBX_RAW_URL:-https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh}"
 
 # SBX_ROOT 仅用于测试/沙箱安装（把整套目录挪到前缀下），正常安装留空
@@ -289,10 +289,18 @@ EOF
 }
 
 ensure_panel_conf() {
-  [[ -f "$PANEL_CONF" ]] && return 0
-  local token manage_token port
-  token=$(rand_hex 16)
-  manage_token=$(rand_hex 16)
+  if [[ -f "$PANEL_CONF" ]]; then
+    # 旧版本的 token/manage_token 彻底移除：当前面板自用免密
+    python3 - "$PANEL_CONF" <<'PY'
+import json, os, sys
+p=sys.argv[1]
+try:
+ d=json.load(open(p)); d.pop('token',None); d.pop('manage_token',None)
+ tmp=p+'.clean';json.dump(d,open(tmp,'w'),indent=2,ensure_ascii=False);os.replace(tmp,p);os.chmod(p,0o600)
+except Exception: pass
+PY
+    return 0
+  fi
   port=$(pick_port)
   cat > "$PANEL_CONF" <<EOF
 {
@@ -304,8 +312,6 @@ ensure_panel_conf() {
   "backend": "auto",
   "listen": "0.0.0.0",
   "port": $port,
-  "token": "$token",
-  "manage_token": "$manage_token",
   "interval": 2,
   "tz": "Asia/Shanghai"
 }
@@ -547,9 +553,8 @@ print(d[-1]['id'] if d else '')
 # ---------------------------------------------------------------- 服务单元
 setup_services() {
   [[ -n "${SBX_NO_SERVICE:-}" ]] && { warn "已跳过服务注册（SBX_NO_SERVICE）"; return 0; }
-  local panel_port token
+  local panel_port
   panel_port=$(panel_get port)
-  token=$(panel_get token)
 
   case "$INIT_SYS" in
     systemd)
@@ -662,18 +667,16 @@ start_all() {
 
 # ---------------------------------------------------------------- 面板信息
 panel_url() {
-  local host port token
+  local host port
   host=$(py_json get-host); [[ -z "$host" ]] && host="$(public_ip)"
-  port=$(panel_get port); token=$(panel_get token)
-  echo "http://$(host_for_uri "$host"):$port/?token=$token"
+  port=$(panel_get port)
+  echo "http://$(host_for_uri "$host"):$port/"
 }
 
 show_panel_info() {
   hr
   printf '%s流量面板%s\n' "$C_B" "$C_RESET"
   printf '  地址: %s%s%s\n' "$C_CYAN" "$(panel_url)" "$C_RESET"
-  printf '  查看令牌: %s\n' "$(panel_get token)"
-  printf '  管理密钥: %s\n' "$(panel_get manage_token)"
   printf '  状态: %s\n' "$(panel_running && echo "${C_GREEN}运行中${C_RESET}" || echo "${C_RED}未运行${C_RESET}")"
   printf '  后端: %s\n' "$(command -v nft >/dev/null 2>&1 && echo nftables || echo iptables)"
   hr
@@ -845,12 +848,10 @@ menu_panel_settings() {
   printf '%s面板设置%s\n\n' "$C_B" "$C_RESET"
   show_panel_info
   echo "  1) 修改端口"
-  echo "  2) 重新生成查看令牌"
-  echo "  3) 查看 / 重新生成管理密钥"
-  echo "  4) 修改采集间隔（当前 $(panel_get interval) 秒）"
-  echo "  5) 仅本机访问 / 允许公网访问（当前 $(panel_get listen)）"
-  echo "  6) 运行统计自检"
-  echo "  7) 清空所有统计数据"
+  echo "  2) 修改采集间隔（当前 $(panel_get interval) 秒）"
+  echo "  3) 仅本机访问 / 允许公网访问（当前 $(panel_get listen)）"
+  echo "  4) 运行统计自检"
+  echo "  5) 清空所有统计数据"
   echo "  0) 返回"
   echo
   printf '请选择: '
@@ -858,20 +859,16 @@ menu_panel_settings() {
   case "$c" in
     1) printf '新端口: '; read -r p || true
        valid_port "$p" && { panel_set port "$p"; svc_do restart sbx-panel; ok "已改为 $p"; } || warn "无效端口" ;;
-    2) panel_set token "$(rand_hex 16)"; svc_do restart sbx-panel; ok "新查看令牌: $(panel_get token)" ;;
-    3) printf '当前管理密钥: %s\n' "$(panel_get manage_token)"
-       printf '是否重新生成管理密钥? [y/N] '; read -r yn || true
-       if [[ "${yn,,}" == "y" ]]; then panel_set manage_token "$(rand_hex 16)"; svc_do restart sbx-panel; ok "新管理密钥: $(panel_get manage_token)"; fi ;;
-    4) printf '采集间隔秒数 (1-60): '; read -r n || true
+    2) printf '采集间隔秒数 (1-60): '; read -r n || true
        [[ "$n" =~ ^[0-9]+$ ]] && ((n>=1 && n<=60)) && { panel_set interval "$n"; svc_do restart sbx-panel; ok "已改为 ${n}s"; } || warn "无效数值" ;;
-    5) if [[ "$(panel_get listen)" == "127.0.0.1" ]]; then
-         panel_set listen "0.0.0.0"; ok "已允许公网访问（务必保留查看令牌和管理密钥）"
+    3) if [[ "$(panel_get listen)" == "127.0.0.1" ]]; then
+         panel_set listen "0.0.0.0"; ok "已允许公网访问"
        else
          panel_set listen "127.0.0.1"; ok "已限制为仅本机访问"
        fi
        svc_do restart sbx-panel ;;
-    6) hr; python3 "$PANEL_PY" selftest; hr ;;
-    7) printf '%s确认清空全部流量统计? 此操作不可恢复 [y/N] %s' "$C_YEL" "$C_RESET"
+    4) hr; python3 "$PANEL_PY" selftest; hr ;;
+    5) printf '%s确认清空全部流量统计? 此操作不可恢复 [y/N] %s' "$C_YEL" "$C_RESET"
        read -r yn || true
        [[ "${yn,,}" == "y" ]] && { python3 "$PANEL_PY" reset; svc_do restart sbx-panel; } || echo "已取消" ;;
     0|"") return 0 ;;
