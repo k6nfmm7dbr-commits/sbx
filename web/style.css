@@ -181,10 +181,6 @@ tbody tr:hover { background: color-mix(in srgb, var(--down) 8%, transparent); }
   background: color-mix(in srgb, var(--down) 14%, transparent);
   border: 1px solid color-mix(in srgb, var(--down) 22%, transparent); white-space: nowrap;
 }
-.bar-col { width: 128px; }
-.bar { height: 6px; border-radius: 999px; background: var(--line-strong); overflow: hidden; min-width: 84px; }
-.bar > i { display: block; height: 100%; background: linear-gradient(90deg, var(--down), var(--up)); transition: width .5s ease; }
-.pct { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .live { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; transition: color .3s; }
 .conns { color: var(--accent); font-variant-numeric: tabular-nums; font-weight: 640; }
 .conns-udp { color: var(--up); font-variant-numeric: tabular-nums; font-weight: 640; }
@@ -204,7 +200,6 @@ tbody tr:hover { background: color-mix(in srgb, var(--down) 8%, transparent); }
 .ncell-label { font-size: 11.5px; color: var(--muted); }
 .ncell-value { font-size: 14px; font-weight: 640; font-variant-numeric: tabular-nums; }
 .ncell-sub { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
-.ncard-bar { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
 @media (max-width: 820px) {
   .table-wrap { display: none; }
   .node-cards { display: flex; }

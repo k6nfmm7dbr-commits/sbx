@@ -9,7 +9,8 @@
 
 var TOKEN = new URLSearchParams(location.search).get('token') || '';
 var state = { days: 30, sortScope: 'today', nodeId: null, summary: null, live: null, range: '30m' };
-var RANGE_LABEL = { '30m': '近 30 分钟', '2h': '近 2 小时', '1d': '近 1 天', '7d': '近 7 天', '30d': '近 30 天' };
+var RANGE_LABEL = { '5m': '近 5 分钟', '30m': '近 30 分钟', '2h': '近 2 小时', '6h': '近 6 小时' };
+var RANGE_BUCKET_TXT = { '5m': '每点 5 秒', '30m': '每点 15 秒', '2h': '每点 1 分钟', '6h': '每点 3 分钟' };
 
 function api(path, params) {
   var u = new URL(path, location.origin);
@@ -180,7 +181,7 @@ function drawGrouped(host, rows, opts) {
 /* ---------- 速率面积图 ---------- */
 function drawArea(host, points, opts) {
   opts = opts || {}; host.textContent = '';
-  if (points.length < 2) { host.innerHTML = '<div class="empty">采集中，稍候即会出现曲线</div>'; return; }
+  if (!points || points.length < 2) { host.innerHTML = '<div class="empty">采集中，稍候即会出现曲线</div>'; return; }
   var W = Math.max(300, host.parentNode.clientWidth || 700), H = opts.height || 200;
   var padL = 54, padR = 12, padT = 12, padB = 24, iw = W - padL - padR, ih = H - padT - padB;
   var maxV = niceMax(points.reduce(function (m, p) { return Math.max(m, p.rx, p.tx); }, 0));
@@ -192,11 +193,13 @@ function drawArea(host, points, opts) {
     var t = svgEl('text', { class: 'axis', x: padL - 8, y: y + 3, 'text-anchor': 'end' });
     t.textContent = fmtRate(maxV * g / 4); svg.appendChild(t);
   }
-  [0, 0.5, 1].forEach(function (f) {
-    var x = padL + iw * f;
-    var lb = svgEl('text', { class: 'axis', x: x, y: H - 6, 'text-anchor': f === 0 ? 'start' : (f === 1 ? 'end' : 'middle') });
-    lb.textContent = (opts.fmtX || fmtClock)(t0 + span * f); svg.appendChild(lb);
-  });
+  // 横轴：均匀 4 段真实时刻
+  for (var f = 0; f <= 4; f++) {
+    var frac = f / 4, x = padL + iw * frac;
+    var lb = svgEl('text', { class: 'axis', x: x, y: H - 6,
+      'text-anchor': f === 0 ? 'start' : (f === 4 ? 'end' : 'middle') });
+    lb.textContent = (opts.fmtX || fmtClock)(t0 + span * frac); svg.appendChild(lb);
+  }
   function xOf(p) { return padL + iw * ((p.ts - t0) / span); }
   function yOf(v) { return padT + ih - (maxV > 0 ? ih * (v / maxV) : 0); }
   function path(key, color) {
@@ -213,8 +216,8 @@ function drawArea(host, points, opts) {
   overlay.addEventListener('pointermove', function (e) {
     var rect = svg.getBoundingClientRect();
     var rel = (e.clientX - rect.left) / rect.width * W;
-    var frac = Math.min(1, Math.max(0, (rel - padL) / iw));
-    var idx = Math.round(frac * (points.length - 1));
+    var frac2 = Math.min(1, Math.max(0, (rel - padL) / iw));
+    var idx = Math.round(frac2 * (points.length - 1));
     var p = points[idx]; if (!p) return;
     cur.setAttribute('x1', xOf(p)); cur.setAttribute('x2', xOf(p)); cur.setAttribute('opacity', 1);
     showTip(e, (opts.fmtX || fmtClock)(p.ts) + '<br>↑ ' + fmtRate(p.rx) + '<br>↓ ' + fmtRate(p.tx));
@@ -274,34 +277,20 @@ function renderLive(v) {
   });
 }
 
-/* ---------- 节点表：静态部分（流量/占比，随 summary 重建）---------- */
+/* ---------- 节点表：静态部分（流量随 summary 重建）---------- */
 function renderNodesStatic(s) {
   var tbody = document.getElementById('node-tbody'), cards = document.getElementById('node-cards');
   var key = state.sortScope;
   var nodes = s.nodes.slice().sort(function (a, b) { return (b[key].rx + b[key].tx) - (a[key].rx + a[key].tx); });
-  var maxSum = nodes.reduce(function (m, n) { return Math.max(m, n[key].rx + n[key].tx); }, 0) || 1;
-  var grandSum = nodes.reduce(function (t, n) { return t + n[key].rx + n[key].tx; }, 0) || 1;
   if (!nodes.length) {
-    tbody.innerHTML = '<tr><td colspan="13" class="empty">还没有节点，先用 sbx 菜单添加一个</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="12" class="empty">还没有节点，先用 sbx 菜单添加一个</td></tr>';
     cards.innerHTML = '<div class="empty">还没有节点，先用 sbx 菜单添加一个</div>';
     return;
   }
   function portText(n) { return n.ports ? (n.port ? n.port + ',' + n.ports : n.ports) : (n.port || '—'); }
-  // 占比条：该节点用量 ÷ 所有节点合计（纯分布对比，与流量限额无关）
-  // 无流量时不画条；只有一个节点时百分比恒为 100% 没有信息量，改标"唯一节点"
-  function shareHTML(n, inCard) {
-    var sum = n[key].rx + n[key].tx;
-    if (sum <= 0) return '<span class="pct">—</span>';
-    var w = (sum / maxSum * 100).toFixed(1);
-    var pct = nodes.length === 1 ? '唯一节点' : (sum / grandSum * 100).toFixed(1) + '%';
-    var title = nodes.length === 1 ? '当前只有一个节点，全部流量都来自它'
-      : ('占所有节点' + (key === 'today' ? '今日' : '累计') + '合计的 ' + (sum / grandSum * 100).toFixed(1) + '%');
-    return '<div class="bar"' + (inCard ? ' style="flex:1"' : '') + ' title="' + title + '"><i style="width:' + w + '%"></i></div>'
-      + '<span class="pct" title="' + title + '">' + pct + '</span>';
-  }
 
   tbody.innerHTML = nodes.map(function (n) {
-    var td = n.today, tt = n.total, sum = n[key].rx + n[key].tx;
+    var td = n.today, tt = n.total;
     return '<tr>'
       + '<td><div class="node-name">' + esc(n.name) + '</div></td>'
       + '<td><span class="chip">' + esc(n.type || '—') + '</span></td>'
@@ -315,12 +304,11 @@ function renderNodesStatic(s) {
       + '<td class="num up">' + fmtBytes(tt.rx) + '</td>'
       + '<td class="num down">' + fmtBytes(tt.tx) + '</td>'
       + '<td class="num"><b>' + fmtBytes(tt.rx + tt.tx) + '</b></td>'
-      + '<td>' + shareHTML(n, false) + '</td>'
       + '</tr>';
   }).join('');
 
   cards.innerHTML = nodes.map(function (n) {
-    var td = n.today, tt = n.total, sum = n[key].rx + n[key].tx;
+    var td = n.today, tt = n.total;
     return '<div class="ncard">'
       + '<div class="ncard-top"><span class="ncard-name">' + esc(n.name) + '</span>'
       + '<span class="chip">' + esc(n.type || '—') + '</span></div>'
@@ -334,8 +322,6 @@ function renderNodesStatic(s) {
       + '<div><div class="ncell-label">累计合计</div><div class="ncell-value">' + fmtBytes(tt.rx + tt.tx) + '</div>'
       + '<div class="ncell-sub"><span class="up">↑' + fmtBytes(tt.rx) + '</span> <span class="down">↓' + fmtBytes(tt.tx) + '</span></div></div>'
       + '</div>'
-      + (nodes.length > 1 || sum > 0
-          ? '<div class="ncard-bar">' + shareHTML(n, true) + '</div>' : '')
       + '</div>';
   }).join('');
 
@@ -368,11 +354,10 @@ function drawDaily() {
 }
 function drawSeries() {
   if (!cache.series) return;
-  var d = cache.series, bucket = d.bucket || ((state.summary && state.summary.interval) || 5);
-  var fmtX = (state.range === '7d' || state.range === '30d') ? fmtDate : (state.range === '1d' ? fmtDateTime : fmtClock);
+  var d = cache.series, bucket = d.bucket || 15;
   drawArea(document.getElementById('chart-live'), d.points.map(function (p) {
     return { ts: p.ts, rx: p.rx / bucket, tx: p.tx / bucket };
-  }), { label: '速率曲线', fmtX: fmtX });
+  }), { label: '速率曲线', fmtX: fmtClock });
 }
 function drawNodeDaily() {
   if (!cache.nodeDaily) return;
@@ -385,9 +370,7 @@ function loadSeries() {
   return api('/api/series', { range: state.range }).then(function (d) {
     cache.series = d; drawSeries();
     var n = (d.points || []).length;
-    setText('live-hint', RANGE_LABEL[state.range] + ' · '
-      + (state.range === '30m' || state.range === '2h' ? '每点 ' + (d.bucket || 5) + ' 秒'
-        : (d.bucket >= 86400 ? '每点 1 天' : '每点 1 小时')) + '（' + n + ' 点）');
+    setText('live-hint', RANGE_LABEL[state.range] + ' · ' + (RANGE_BUCKET_TXT[state.range] || '') + '（' + n + ' 点）');
   }).catch(function (e) { toast(e.message); });
 }
 function loadNodeDaily() {
@@ -426,20 +409,16 @@ loadSummary().then(function () { loadLive(); loadSeries(); loadDaily(); });
 
 // 实时数据：2 秒一次（轻量 /api/live）
 setInterval(function () { if (!document.hidden) loadLive(); }, 2000);
-// 概览+节点表：10 秒一次（较重的 /api/summary）
-setInterval(function () { if (!document.hidden) loadSummary(); }, 10000);
-// 短范围速率曲线：10 秒刷新；长范围随每日刷新
-setInterval(function () {
-  if (document.hidden) return;
-  if (state.range === '30m' || state.range === '2h') loadSeries();
-}, 10000);
-// 每日图 + 长范围曲线：60 秒
+// 概览+节点表：8 秒一次（较重的 /api/summary）
+setInterval(function () { if (!document.hidden) loadSummary(); }, 8000);
+// 速率曲线：全部是短范围（5分~6时），5 秒刷新即可跟上
+setInterval(function () { if (!document.hidden) loadSeries(); }, 5000);
+// 每日流量图 + 单节点明细：60 秒
 setInterval(function () {
   if (document.hidden) return;
   loadDaily(); loadNodeDaily();
-  if (state.range === '1d' || state.range === '7d' || state.range === '30d') loadSeries();
 }, 60000);
 // 页面重新可见时立即刷新一次
 document.addEventListener('visibilitychange', function () {
-  if (!document.hidden) { loadLive(); loadSummary(); }
+  if (!document.hidden) { loadLive(); loadSeries(); loadSummary(); }
 });

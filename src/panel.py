@@ -37,8 +37,7 @@ CONF_PATH = os.environ.get("SBX_CONF", os.path.join(APP_DIR, "panel.json"))
 NFT_TABLE = "sbx_traffic"
 IPT_CHAIN_IN = "SBX_IN"
 IPT_CHAIN_OUT = "SBX_OUT"
-SAMPLE_KEEP_SECONDS = 3 * 3600          # 5s 精细采样保留 3 小时（够画 30 分钟 / 2 小时）
-HOURLY_KEEP_DAYS = 40                    # 小时聚合保留 40 天（够画 1 天 / 7 天，daily 表覆盖 30 天）
+SAMPLE_KEEP_SECONDS = 6 * 3600 + 600     # 精细采样保留约 6 小时（够画 5分/30分/2时/6时 速率曲线）
 
 DEFAULT_CONF = {
     "db": os.path.join(APP_DIR, "traffic.db"),
@@ -181,14 +180,6 @@ CREATE TABLE IF NOT EXISTS samples (
     PRIMARY KEY (ts, scope)
 );
 CREATE INDEX IF NOT EXISTS idx_samples_ts ON samples(ts);
-CREATE TABLE IF NOT EXISTS hourly (
-    hour_ts INTEGER NOT NULL,
-    scope   TEXT NOT NULL,
-    rx      INTEGER NOT NULL DEFAULT 0,
-    tx      INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (hour_ts, scope)
-);
-CREATE INDEX IF NOT EXISTS idx_hourly_ts ON hourly(hour_ts);
 """
 
 
@@ -425,11 +416,6 @@ class Collector(threading.Thread):
                     "ON CONFLICT(ts,scope) DO UPDATE SET rx=rx+excluded.rx, tx=tx+excluded.tx",
                     (ts, scope, d["rx"], d["tx"]),
                 )
-                cur.execute(
-                    "INSERT INTO hourly(hour_ts,scope,rx,tx) VALUES(?,?,?,?) "
-                    "ON CONFLICT(hour_ts,scope) DO UPDATE SET rx=rx+excluded.rx, tx=tx+excluded.tx",
-                    (ts - ts % 3600, scope, d["rx"], d["tx"]),
-                )
             cur.execute("DELETE FROM counter_state")
             cur.executemany(
                 "INSERT INTO counter_state(name,last_bytes,last_pkts,updated_at) VALUES(?,?,?,?)",
@@ -439,7 +425,6 @@ class Collector(threading.Thread):
                 cur.execute("INSERT INTO meta(k,v) VALUES('epoch',?) "
                             "ON CONFLICT(k) DO UPDATE SET v=excluded.v", (str(epoch),))
             cur.execute("DELETE FROM samples WHERE ts < ?", (ts - SAMPLE_KEEP_SECONDS,))
-            cur.execute("DELETE FROM hourly WHERE hour_ts < ?", (ts - HOURLY_KEEP_DAYS * 86400,))
             cur.execute("COMMIT")
         except Exception:
             with contextlib.suppress(Exception):
@@ -548,60 +533,45 @@ def q_rate(con, conf, window=None):
 
 
 SERIES_RANGES = {
-    #  key   : (源表, 跨度秒, 桶秒)  —— 桶秒=每个数据点代表的时间宽度，前端用 rate=bytes/桶秒
-    "30m": ("samples", 30 * 60, None),      # None=按采集间隔的原始点
-    "2h":  ("samples", 2 * 3600, 60),       # 1 分钟一个点
-    "1d":  ("hourly", 24 * 3600, 3600),     # 1 小时一个点
-    "7d":  ("hourly", 7 * 86400, 3600),
-    "30d": ("hourly", 30 * 86400, 86400),   # 1 天一个点
+    #  key : (跨度秒, 桶秒) —— 全部来自 samples 精细采样，保证 Y 轴口径一致（都是"该桶平均速率"）。
+    #  刻意不做"天/周"速率线：那属于 volume（每日流量柱状图），做成速率线既无意义又会因大桶平均把单位压成 KB/s。
+    "5m":  (5 * 60, 5),        # 实时：5 秒一个点 → 60 点
+    "30m": (30 * 60, 15),      # 15 秒一个点 → 120 点
+    "2h":  (2 * 3600, 60),     # 1 分钟一个点 → 120 点
+    "6h":  (6 * 3600, 180),    # 3 分钟一个点 → 120 点
 }
 
 
 def q_series(con, conf, rng="30m"):
     """
-    返回某时间范围内的节点合计速率序列。
-    结果: {"range": key, "bucket": 桶秒, "points": [{"ts":桶起点, "rx":字节, "tx":字节}, ...]}
-    前端用 rate = rx / bucket 得到平均速率(字节/秒)。
+    节点合计速率序列（固定时间栅格 + 零填充）。全部取自 samples 表。
+    结果: {"range", "bucket", "points": [{"ts":桶起点, "rx":字节, "tx":字节}, ...]}
+      前端 rate = rx / bucket = 该桶内平均速率(字节/秒)。
+    固定栅格保证:
+      * 横轴时间点真实对齐到当前时刻，不会因采样稀疏而全挤在一起；
+      * 没有流量的时段填 0，不会把偶发突发连成"持续高速"的假平台。
     """
     if rng not in SERIES_RANGES:
         rng = "30m"
-    src, span, bucket = SERIES_RANGES[rng]
-    iv = max(1, int(conf.get("interval", 5)))
+    span, bucket = SERIES_RANGES[rng]
     now = int(time.time())
-    since = now - span
+    end = (now // bucket) * bucket
+    n_buckets = max(1, span // bucket)
+    start = end - (n_buckets - 1) * bucket
 
-    if src == "samples":
-        b = bucket or iv
-        if bucket:
-            rows = con.execute(
-                "SELECT (ts/?)*? AS b, SUM(rx) rx, SUM(tx) tx FROM samples "
-                "WHERE ts > ? AND scope LIKE 'node:%' GROUP BY b ORDER BY b",
-                (bucket, bucket, since),
-            ).fetchall()
-            pts = [{"ts": r["b"], "rx": r["rx"], "tx": r["tx"]} for r in rows]
-        else:
-            rows = con.execute(
-                "SELECT ts, SUM(rx) rx, SUM(tx) tx FROM samples "
-                "WHERE ts > ? AND scope LIKE 'node:%' GROUP BY ts ORDER BY ts",
-                (since,),
-            ).fetchall()
-            pts = [{"ts": r["ts"], "rx": r["rx"], "tx": r["tx"]} for r in rows]
-        return {"range": rng, "bucket": b, "points": pts}
+    rows = con.execute(
+        "SELECT (ts/?)*? AS b, SUM(rx) rx, SUM(tx) tx FROM samples "
+        "WHERE ts >= ? AND scope LIKE 'node:%' GROUP BY b",
+        (bucket, bucket, start),
+    ).fetchall()
+    have = {int(r["b"]): (r["rx"], r["tx"]) for r in rows}
 
-    # hourly 源
-    if bucket == 86400:
-        rows = con.execute(
-            "SELECT (hour_ts/86400)*86400 AS b, SUM(rx) rx, SUM(tx) tx FROM hourly "
-            "WHERE hour_ts > ? AND scope LIKE 'node:%' GROUP BY b ORDER BY b",
-            (since,),
-        ).fetchall()
-    else:
-        rows = con.execute(
-            "SELECT hour_ts AS b, SUM(rx) rx, SUM(tx) tx FROM hourly "
-            "WHERE hour_ts > ? AND scope LIKE 'node:%' GROUP BY b ORDER BY b",
-            (since,),
-        ).fetchall()
-    pts = [{"ts": r["b"], "rx": r["rx"], "tx": r["tx"]} for r in rows]
+    pts = []
+    b = start
+    while b <= end:
+        rx, tx = have.get(b, (0, 0))
+        pts.append({"ts": b, "rx": rx, "tx": tx})
+        b += bucket
     return {"range": rng, "bucket": bucket, "points": pts}
 
 

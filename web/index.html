@@ -67,11 +67,10 @@
     <div class="panel-head">
       <h2>速率曲线</h2>
       <div class="seg" role="group" aria-label="速率时间范围">
+        <button data-range="5m">5分</button>
         <button data-range="30m" class="on">30分</button>
         <button data-range="2h">2时</button>
-        <button data-range="1d">1天</button>
-        <button data-range="7d">7天</button>
-        <button data-range="30d">30天</button>
+        <button data-range="6h">6时</button>
       </div>
     </div>
     <div class="chart-wrap"><div id="chart-live" class="chart"></div></div>
@@ -116,7 +115,6 @@
             <th class="num">实时</th>
             <th class="num">今日↑</th><th class="num">今日↓</th><th class="num">今日</th>
             <th class="num">累计↑</th><th class="num">累计↓</th><th class="num">累计</th>
-            <th class="bar-col" title="该节点用量占所有节点合计的比例（不是流量限额）">流量占比</th>
           </tr>
         </thead>
         <tbody id="node-tbody"></tbody>

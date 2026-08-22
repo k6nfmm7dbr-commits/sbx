@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 APP_NAME="SBX"
-APP_VERSION="1.6.0"
+APP_VERSION="1.7.0"
 RAW_URL="${SBX_RAW_URL:-https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh}"
 
 # SBX_ROOT 仅用于测试/沙箱安装（把整套目录挪到前缀下），正常安装留空
@@ -457,8 +457,8 @@ add_vless() {
   priv=$(echo "$kp" | awk '/PrivateKey/{print $2}')
   pub=$(echo "$kp" | awk '/PublicKey/{print $2}')
   sid=$(rand_hex 8)
-  py_json add vless --port "$port" --name "$name" --uuid "$uuid" --sni "$sni" \
-    --flow xtls-rprx-vision --private-key "$priv" --public-key "$pub" --short-id "$sid" >/dev/null
+  py_json add vless --port="$port" --name="$name" --uuid="$uuid" --sni="$sni" \
+    --flow xtls-rprx-vision --private-key="$priv" --public-key="$pub" --short-id="$sid" >/dev/null
   commit_node && { ok "VLESS Reality 节点已添加"; show_links_for_last; }
 }
 
@@ -468,7 +468,7 @@ add_ss() {
   name=$(prompt_name "ss-$port")
   method="2022-blake3-aes-128-gcm"
   pw=$(rand_b64 16)
-  py_json add shadowsocks --port "$port" --name "$name" --method "$method" --password "$pw" >/dev/null
+  py_json add shadowsocks --port="$port" --name="$name" --method="$method" --password="$pw" >/dev/null
   commit_node && { ok "Shadowsocks 2022 节点已添加"; show_links_for_last; }
 }
 
@@ -479,7 +479,7 @@ add_hy2() {
   sni=$(prompt_sni www.bing.com)
   ensure_certs "$sni"
   pw=$(rand_hex 12)
-  py_json add hysteria2 --port "$port" --name "$name" --password "$pw" --sni "$sni" >/dev/null
+  py_json add hysteria2 --port="$port" --name="$name" --password="$pw" --sni="$sni" >/dev/null
   commit_node && { ok "Hysteria2 节点已添加"; show_links_for_last; }
 }
 
@@ -490,7 +490,7 @@ add_trojan() {
   sni=$(prompt_sni www.bing.com)
   ensure_certs "$sni"
   pw=$(rand_hex 12)
-  py_json add trojan --port "$port" --name "$name" --password "$pw" --sni "$sni" >/dev/null
+  py_json add trojan --port="$port" --name="$name" --password="$pw" --sni="$sni" >/dev/null
   commit_node && { ok "Trojan 节点已添加"; show_links_for_last; }
 }
 
@@ -501,7 +501,7 @@ add_tuic() {
   sni=$(prompt_sni www.bing.com)
   ensure_certs "$sni"
   uuid=$(rand_uuid); pw=$(rand_hex 12)
-  py_json add tuic --port "$port" --name "$name" --uuid "$uuid" --password "$pw" --sni "$sni" >/dev/null
+  py_json add tuic --port="$port" --name="$name" --uuid="$uuid" --password="$pw" --sni="$sni" >/dev/null
   commit_node && { ok "TUIC 节点已添加"; show_links_for_last; }
 }
 
@@ -510,7 +510,7 @@ add_vmess() {
   port=$(prompt_port "VMess WebSocket" 8080)
   name=$(prompt_name "vmess-$port")
   uuid=$(rand_uuid); path="/$(rand_hex 4)"
-  py_json add vmess --port "$port" --name "$name" --uuid "$uuid" --path "$path" >/dev/null
+  py_json add vmess --port="$port" --name="$name" --uuid="$uuid" --path="$path" >/dev/null
   commit_node && { ok "VMess WS 节点已添加"; show_links_for_last; }
 }
 
@@ -521,7 +521,7 @@ add_anytls() {
   sni=$(prompt_sni www.bing.com)
   ensure_certs "$sni"
   pw=$(rand_hex 12)
-  py_json add anytls --port "$port" --name "$name" --password "$pw" --sni "$sni" >/dev/null
+  py_json add anytls --port="$port" --name="$name" --password="$pw" --sni="$sni" >/dev/null
   commit_node && { ok "AnyTLS 节点已添加"; show_links_for_last; }
 }
 
@@ -757,7 +757,7 @@ if n: print('%s\t%s\t%s\t%s' % (n['type'], n.get('sni',''), n.get('port',''), n.
       printf '%s端口 %s 已被系统其它进程监听，仍要使用? [y/N] %s' "$C_YEL" "$np" "$C_RESET"
       read -r yn || true; [[ "${yn,,}" == "y" ]] || { pause; return 1; }
     }
-    args+=(--port "$np")
+    args+=("--port=$np")
   fi
 
   # 仅对支持 SNI 的类型询问
@@ -767,7 +767,7 @@ if n: print('%s\t%s\t%s\t%s' % (n['type'], n.get('sni',''), n.get('port',''), n.
       read -r ns || true
       if [[ -n "$ns" ]]; then
         [[ "$ns" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || { warn "域名格式无效"; pause; return 1; }
-        args+=(--sni "$ns")
+        args+=("--sni=$ns")
       fi ;;
   esac
 
@@ -775,8 +775,8 @@ if n: print('%s\t%s\t%s\t%s' % (n['type'], n.get('sni',''), n.get('port',''), n.
   if [[ "$type" == "hysteria2" ]]; then
     printf '端口跳跃范围 如 20000-30000 (回车不改，输入 - 清空): '
     read -r nr || true
-    if [[ "$nr" == "-" ]]; then args+=(--ports "")
-    elif [[ -n "$nr" ]]; then args+=(--ports "$nr"); fi
+    if [[ "$nr" == "-" ]]; then args+=("--ports=")
+    elif [[ -n "$nr" ]]; then args+=("--ports=$nr"); fi
   fi
 
   if [[ ${#args[@]} -le 1 ]]; then echo "未做任何修改"; pause; return 0; fi
