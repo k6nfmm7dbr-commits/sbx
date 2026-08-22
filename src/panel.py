@@ -50,7 +50,7 @@ DEFAULT_CONF = {
     "listen": "0.0.0.0",
     "port": 8080,
     "token": "",
-    "interval": 5,
+    "interval": 2,
     "tz": "Asia/Shanghai",
 }
 
@@ -668,6 +668,34 @@ def build_summary(conf, con, collector=None):
     }
 
 
+def build_live(conf, con, collector=None):
+    """
+    轻量实时端点：只算当前速率 + 连接数，不碰 daily/totals，
+    供前端高频（~2s）轮询，避免用重的 /api/summary 拖慢实时读数。
+    """
+    nodes = load_nodes(conf)
+    rates = q_rate(con, conf)
+    conns = count_tcp_conns(nodes)
+    node_live = []
+    for n in nodes:
+        scope = "node:%s" % n["id"]
+        r = rates.get(scope, {"rx": 0, "tx": 0})
+        node_live.append({"id": n["id"], "rate": r, "conns": conns.get(n["id"])})
+    rx = sum(v["rx"] for k, v in rates.items() if k.startswith("node:"))
+    tx = sum(v["tx"] for k, v in rates.items() if k.startswith("node:"))
+    return {
+        "now": int(time.time()),
+        "healthy": bool(collector and not collector.last_error),
+        "error": collector.last_error if collector else "",
+        "last_sample": collector.last_ok_ts if collector else 0,
+        "interval": conf.get("interval", 5),
+        "rate_known": bool(rates),
+        "rate_total": {"rx": rx, "tx": tx},
+        "conns_total": sum(v for v in conns.values() if v),
+        "nodes": node_live,
+    }
+
+
 # --------------------------------------------------------------------------
 # HTTP 服务
 # --------------------------------------------------------------------------
@@ -778,6 +806,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if route == "/api/summary":
                 self._json(build_summary(self.conf, con, self.collector))
+            elif route == "/api/live":
+                self._json(build_live(self.conf, con, self.collector))
             elif route == "/api/daily":
                 days = min(365, max(1, int((qs.get("days") or ["30"])[0])))
                 scope = (qs.get("scope") or [""])[0] or None

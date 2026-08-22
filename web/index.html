@@ -9,46 +9,77 @@
 <body>
 <header class="topbar">
   <div class="brand">
-    <span class="dot" id="health-dot" aria-hidden="true"></span>
-    <h1>sing-box 流量统计</h1>
+    <span class="logo" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 12h4l3 8 4-16 3 8h4"/>
+      </svg>
+    </span>
+    <div class="brand-txt">
+      <h1>sing-box 流量面板</h1>
+      <span class="brand-sub" id="brand-sub">实时监控</span>
+    </div>
   </div>
   <div class="topbar-meta">
-    <span id="meta-backend" class="tag">—</span>
-    <span id="meta-clock" class="clock">—</span>
+    <span class="status" id="status"><span class="dot" id="health-dot"></span><span id="status-txt">连接中…</span></span>
+    <span class="tag" id="meta-backend">—</span>
+    <span class="clock" id="meta-clock">—</span>
   </div>
 </header>
 
 <main>
-  <section class="cards" aria-label="总览">
-    <article class="card">
-      <div class="card-label">今日总用量</div>
-      <div class="card-value" id="kpi-today-total">—</div>
-      <div class="card-sub">
-        <span class="up">↑ <b id="kpi-today-up">—</b></span>
-        <span class="down">↓ <b id="kpi-today-down">—</b></span>
+  <!-- 实时速率主卡：大数字 + 迷你实时曲线 -->
+  <section class="hero">
+    <div class="hero-live">
+      <div class="hero-head">
+        <span class="hero-label">实时速率</span>
+        <span class="hero-pulse" id="pulse"></span>
       </div>
-    </article>
-    <article class="card">
-      <div class="card-label">累计总用量</div>
-      <div class="card-value" id="kpi-all-total">—</div>
-      <div class="card-sub">
-        <span class="up">↑ <b id="kpi-all-up">—</b></span>
-        <span class="down">↓ <b id="kpi-all-down">—</b></span>
+      <div class="hero-rate" id="hero-rate">—</div>
+      <div class="hero-split">
+        <span class="up">↑ 上传 <b id="hero-up">—</b></span>
+        <span class="down">↓ 下载 <b id="hero-down">—</b></span>
       </div>
-    </article>
-    <article class="card">
-      <div class="card-label">实时速率</div>
-      <div class="card-value" id="kpi-rate">—</div>
-      <div class="card-sub">
-        <span class="up">↑ <b id="kpi-rate-up">—</b></span>
-        <span class="down">↓ <b id="kpi-rate-down">—</b></span>
+      <div class="spark" id="spark"></div>
+    </div>
+    <div class="hero-stats">
+      <div class="mini">
+        <span class="mini-label">TCP 连接</span>
+        <span class="mini-value" id="kpi-conns">—</span>
       </div>
-    </article>
-    <article class="card">
-      <div class="card-label">节点数量</div>
-      <div class="card-value" id="kpi-nodes">—</div>
-      <div class="card-sub"><span id="kpi-conns">TCP 连接 —</span></div>
-    </article>
+      <div class="mini">
+        <span class="mini-label">节点</span>
+        <span class="mini-value" id="kpi-nodes">—</span>
+      </div>
+      <div class="mini">
+        <span class="mini-label">今日流量</span>
+        <span class="mini-value" id="kpi-today-total">—</span>
+        <span class="mini-sub"><i class="up" id="kpi-today-up">—</i> <i class="down" id="kpi-today-down">—</i></span>
+      </div>
+      <div class="mini">
+        <span class="mini-label">累计流量</span>
+        <span class="mini-value" id="kpi-all-total">—</span>
+        <span class="mini-sub"><i class="up" id="kpi-all-up">—</i> <i class="down" id="kpi-all-down">—</i></span>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>速率曲线</h2>
+      <div class="seg" role="group" aria-label="速率时间范围">
+        <button data-range="30m" class="on">30分</button>
+        <button data-range="2h">2时</button>
+        <button data-range="1d">1天</button>
+        <button data-range="7d">7天</button>
+        <button data-range="30d">30天</button>
+      </div>
+    </div>
+    <div class="chart-wrap"><div id="chart-live" class="chart"></div></div>
+    <div class="legend">
+      <span><i class="sw up"></i>上传</span>
+      <span><i class="sw down"></i>下载</span>
+      <span class="hint" id="live-hint" style="margin-left:auto">—</span>
+    </div>
   </section>
 
   <section class="panel">
@@ -69,27 +100,8 @@
 
   <section class="panel">
     <div class="panel-head">
-      <h2>速率曲线</h2>
-      <div class="seg" role="group" aria-label="速率时间范围">
-        <button data-range="30m" class="on">近30分钟</button>
-        <button data-range="2h">近2小时</button>
-        <button data-range="1d">近1天</button>
-        <button data-range="7d">近7天</button>
-        <button data-range="30d">近30天</button>
-      </div>
-    </div>
-    <div class="chart-wrap"><div id="chart-live" class="chart"></div></div>
-    <div class="legend">
-      <span><i class="sw up"></i>上传（用户上传）</span>
-      <span><i class="sw down"></i>下载（用户下载）</span>
-      <span class="hint" id="live-hint" style="margin-left:auto">—</span>
-    </div>
-  </section>
-
-  <section class="panel">
-    <div class="panel-head">
       <h2>各节点用量</h2>
-      <div class="seg" role="group" aria-label="排序与范围">
+      <div class="seg" role="group" aria-label="排序">
         <button data-scope="today" class="on">按今日</button>
         <button data-scope="total">按累计</button>
       </div>
@@ -99,10 +111,11 @@
         <thead>
           <tr>
             <th>节点</th><th>类型</th><th>端口</th>
-            <th class="num">连接数</th>
-            <th class="num">今日↑</th><th class="num">今日↓</th><th class="num">今日合计</th>
-            <th class="num">累计↑</th><th class="num">累计↓</th><th class="num">累计合计</th>
-            <th class="num">实时</th><th class="bar-col">占比</th>
+            <th class="num">连接</th>
+            <th class="num">实时</th>
+            <th class="num">今日↑</th><th class="num">今日↓</th><th class="num">今日</th>
+            <th class="num">累计↑</th><th class="num">累计↓</th><th class="num">累计</th>
+            <th class="bar-col">占比</th>
           </tr>
         </thead>
         <tbody id="node-tbody"></tbody>
@@ -126,6 +139,7 @@
 </main>
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
+<div id="tip" class="tip"></div>
 <script src="app.js"></script>
 </body>
 </html>
