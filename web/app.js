@@ -103,6 +103,9 @@ function emptyChart(host, text) {
   var d=document.createElement('div');d.className='empty';d.textContent=text;host.replaceChildren(d);
 }
 
+function volumeAxis(maxBytes){maxBytes=Number(maxBytes)||0;var unit=maxBytes>=1073741824?1073741824:(maxBytes>=1048576?1048576:1024);var v=maxBytes/unit;var step=v>=5?5:(v>=1?1:.2);return {top:Math.max(step,Math.ceil(v/step)*step)*unit,step:step*unit,unit:unit};}
+function fmtAxisVolume(n,unit){var v=n/unit;return (v%1===0?v.toFixed(0):v.toFixed(1))+' '+(unit>=1073741824?'GB':(unit>=1048576?'MB':'KB'));}
+
 /* ---------- 分组柱状图 ---------- */
 function drawGrouped(host, rows, opts) {
   opts = opts || {};
@@ -111,13 +114,15 @@ function drawGrouped(host, rows, opts) {
   var slot = opts.slot || 24, padL = 54, padR = 12, padT = 12, padB = 26;
   var W = Math.max(avail, rows.length * slot + padL + padR), H = opts.height || 220;
   var iw = W - padL - padR, ih = H - padT - padB;
-  var maxV = niceMax(rows.reduce(function (m, r) { return Math.max(m, r.up, r.down); }, 0));
+  var ax=volumeAxis(rows.reduce(function (m,r){return Math.max(m,r.up,r.down);},0));
+  var maxV=ax.top;
   var svg = svgEl('svg', { viewBox: '0 0 ' + W + ' ' + H, width: W, height: H, role: 'img' });
-  for (var g = 0; g <= 4; g++) {
-    var y = padT + ih - (ih * g / 4);
+  var ticks=Math.max(1,Math.round(maxV/ax.step));
+  for (var g = 0; g <= ticks; g++) {
+    var y = padT + ih - (ih * g / ticks);
     svg.appendChild(svgEl('line', { class: 'grid' + (g === 0 ? ' grid-0' : ''), x1: padL, y1: y, x2: W - padR, y2: y }));
     var t = svgEl('text', { class: 'axis', x: padL - 8, y: y + 3, 'text-anchor': 'end' });
-    t.textContent = fmtBytes(maxV * g / 4); svg.appendChild(t);
+    t.textContent = fmtAxisVolume(ax.step*g,ax.unit); svg.appendChild(t);
   }
   var slotW = iw / rows.length, barW = Math.max(2, Math.min(10, slotW / 2 - 2));
   var minGap = 46, lastLabelX = -1e9;
@@ -126,7 +131,12 @@ function drawGrouped(host, rows, opts) {
     [['up', 'bar-up', -1], ['down', 'bar-down', 1]].forEach(function (p) {
       var val = r[p[0]], h = maxV > 0 ? Math.max(val > 0 ? 1.5 : 0, ih * (val / maxV)) : 0;
       if (h <= 0) return;
-      svg.appendChild(svgEl('rect', { class: p[1], x: cx + (p[2] < 0 ? -barW - 1 : 1), y: padT + ih - h, width: barW, height: h, rx: 2 }));
+      var bx=cx+(p[2]<0?-barW-1:1), by=padT+ih-h;
+      svg.appendChild(svgEl('rect', { class:p[1], x:bx, y:by, width:barW, height:h, rx:2 }));
+      if (rows.length <= 14 || i % Math.ceil(rows.length/14) === 0 || i === rows.length-1) {
+        var vl=svgEl('text',{class:'value-label '+p[0],x:bx+barW/2,y:Math.max(11,by-4),'text-anchor':'middle'});
+        vl.textContent=fmtBytes(val);svg.appendChild(vl);
+      }
     });
     var hit = svgEl('rect', { class: 'hit', x: cx - slotW / 2, y: padT, width: slotW, height: ih });
     var html = '<b>' + esc(r.title || r.label) + '</b><br>↑ ' + fmtBytes(r.up) + '<br>↓ ' + fmtBytes(r.down) + '<br>合计 ' + fmtBytes(r.up + r.down);
