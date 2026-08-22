@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 APP_NAME="SBX"
-APP_VERSION="2.5.3"
+APP_VERSION="2.5.4"
 RAW_URL="${SBX_RAW_URL:-https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh}"
 
 # SBX_ROOT 仅用于测试/沙箱安装（把整套目录挪到前缀下），正常安装留空
@@ -1066,7 +1066,7 @@ do_update() {
   require_root
   detect_platform
 
-  local tmp new_ver
+  local tmp new_ver current_sha remote_sha
   tmp=$(mktemp)
   info "从 GitHub 拉取最新版本..."
   if ! curl -fsSL -m 60 -o "$tmp" "$(gh_url "$RAW_URL")"; then
@@ -1082,13 +1082,21 @@ do_update() {
 
   new_ver=$(remote_version "$tmp")
   [[ -z "$new_ver" ]] && new_ver="unknown"
+  # 版本号相同时，再用 sha256 比较脚本内容，避免开发者忘记升版本导致更新被误跳过。
+  current_sha=$(sha256sum "$SELF_PATH" 2>/dev/null | awk '{print $1}')
+  remote_sha=$(sha256sum "$tmp" 2>/dev/null | awk '{print $1}')
+  local same_content="no"
+  [[ -n "$current_sha" && "$current_sha" == "$remote_sha" ]] && same_content="yes"
   info "当前版本: $APP_VERSION    最新版本: $new_ver"
 
-  if [[ "$new_ver" != "unknown" ]] && ver_ge "$APP_VERSION" "$new_ver" && [[ "$force" != "--force" ]]; then
+  if [[ "$same_content" == "yes" && "$force" != "--force" ]]; then
     rm -f "$tmp"
     ok "已是最新版本，无需升级"
     printf '%s如需强制重装当前版本，运行: sbx --update --force%s\n' "$C_DIM" "$C_RESET"
     return 0
+  fi
+  if [[ "$new_ver" != "unknown" ]] && ver_ge "$APP_VERSION" "$new_ver" && [[ "$same_content" != "yes" ]]; then
+    warn "版本号未递增但脚本内容不同，仍将更新（检测到远端代码变化）"
   fi
 
   # 备份当前本体，便于回滚
