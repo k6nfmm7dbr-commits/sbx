@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  SBX — sing-box 节点搭建 + 精确流量统计面板
+#  SBX — sing-box 节点搭建 + 流量统计面板
 #  一键安装:  bash <(curl -fsSL <RAW_URL>)
 #  管理菜单:  sbx
 # =============================================================================
@@ -58,7 +58,7 @@ banner() {
   printf '%s%s' "$C_CYAN" "$C_B"
   cat <<'EOF'
    ___ ___  __  __
-  / __| _ )\ \/ /   sing-box 节点 + 精确流量面板
+  / __| _ )\ \/ /   sing-box 节点 + 流量面板
   \__ \ _ \ >  <
   |___/___//_/\_\
 EOF
@@ -1238,7 +1238,7 @@ main() {
     --version) echo "$APP_NAME v$APP_VERSION"; exit 0 ;;
     -h|--help)
       cat <<EOF
-$APP_NAME v$APP_VERSION — sing-box 节点 + 精确流量面板
+$APP_NAME v$APP_VERSION — sing-box 节点 + 流量面板
 
 安装:   bash <(curl -fsSL $RAW_URL)
 菜单:   sbx
