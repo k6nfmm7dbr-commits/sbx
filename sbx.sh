@@ -385,7 +385,16 @@ PY
 fw_apply() {
   python3 "$PANEL_PY" apply || warn "计数规则应用失败，流量统计可能不准"
 }
-fw_clear() { python3 "$PANEL_PY" clear >/dev/null 2>&1 || true; }
+fw_clear() {
+  # 先停面板（停掉采集线程，避免其 repair() 自愈机制把刚删的表重建回来）
+  svc_do stop sbx-panel >/dev/null 2>&1 || true
+  python3 "$PANEL_PY" clear >/dev/null 2>&1 || true
+  # 兜底：直删一次并确认，保证卸载后内核里不残留 sbx_traffic 表
+  if command -v nft >/dev/null 2>&1; then
+    nft delete table inet sbx_traffic >/dev/null 2>&1 || true
+    nft delete table inet sbx_traffic >/dev/null 2>&1 || true
+  fi
+}
 
 # ---------------------------------------------------------------- 添加节点
 prompt_port() {
@@ -897,6 +906,7 @@ uninstall_all() {
 
   svc_do stop sbx-panel || true
   svc_do stop sing-box || true
+  svc_do stop sbx-firewall || true
   fw_clear
   case "$INIT_SYS" in
     systemd)
