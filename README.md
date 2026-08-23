@@ -13,14 +13,14 @@ bash <(curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/
 ## 当前版本
 
 ```text
-v2.7.0
+v2.8.0
 ```
 
 ## 节点
 
-支持 VLESS Reality、Shadowsocks 2022、Hysteria2、Trojan、TUIC v5、VMess WebSocket、AnyTLS。
+支持 VLESS Reality、Shadowsocks 2022、Trojan、AnyTLS。
 
-菜单支持添加、删除节点，修改端口，修改 SNI，修改 Hysteria2 端口跳跃范围，生成 IPv4/IPv6 分享链接和 Base64 订阅。
+菜单采用两级结构：主菜单（添加节点 / 节点管理 / 流量统计 / 系统设置 / 检查更新 / 卸载），节点管理下可查看分享链接与订阅、修改节点（端口 / SNI）、删除节点；系统设置下可调面板、分享地址（域名 / IP）、服务管理。支持生成 IPv4/IPv6 分享链接和 Base64 订阅。
 
 全新安装不会自动创建默认节点。节点按 `nodes.json` 添加顺序显示。
 
@@ -28,11 +28,11 @@ v2.7.0
 
 底部三页导航：首页 / 每日 / 节点。
 
-- 首页：实时速率、TCP/UDP、今日/累计、可下拉切换的单节点状态
+- 首页：实时速率、TCP/UDP、今日/累计、全部节点状态卡片
 - 每日：最近60天每日流量
 - 节点：选择节点查看最近60天明细
 
-本版 UI 已从零重写，不继承旧版追加样式：紧凑卡片、适中黑框、较小圆角和字体，底栏预留安全距离不遮挡内容。保留面板查看 Token；没有管理页和管理密钥。
+UI 为简洁现代主题：吸顶栏 + 实时状态指示、渐变品牌标识、卡片式布局、语义色（上传绿 / 下载蓝）、底部毛玻璃导航栏，适配手机安全区。访问需令牌登录（POST 提交，登录后令牌不再出现在 URL，改用 HttpOnly Cookie）。
 
 ## 统计
 
@@ -48,7 +48,7 @@ v2.7.0
 
 客户端通常只显示应用层有效载荷，面板数字一般会高约2%～5%；云厂商计费口径通常更接近面板。
 
-TCP连接读取 `/proc/net/tcp[6]`，UDP会话读取 `/proc/net/udp[6]`。Hysteria2/TUIC基于QUIC多路复用，UDP socket数仅作活跃度参考。
+TCP连接读取 `/proc/net/tcp[6]`，UDP会话读取 `/proc/net/udp[6]`。连接数由采集线程缓存，API 请求不再逐次读 /proc。
 
 ## 在线升级
 
@@ -108,10 +108,12 @@ src/panel.py            采集器和HTTP服务
 src/nodes_tool.py       节点管理和链接生成
 web/                    面板前端
 build.py                发布构建脚本
-test_*.py / test_*.sh    回归测试
+tests/run_all.py        回归测试
 ```
 
 重新构建：`python3 build.py`
+
+运行测试：`python3 tests/run_all.py`
 
 沙箱安装：
 

@@ -8,9 +8,12 @@ nodes_tool.py — 节点增删改与分享链接生成
 
 用法:
   add <type> --port N [...]     新增节点 -> 输出候选配置路径 + 节点 id
-  edit <id> [--port|--sni|--ports] 修改已装节点
+  edit <id> [--port|--sni]      修改已装节点
   remove <id>                   删除节点
   list                          列出节点
+  count                         输出节点数量
+  last                          输出最后一个节点 id
+  info <id>                     输出节点 type/sni/port（制表符分隔）
   links [id] [--host6 IP]       输出分享链接（有 IPv6 则附 IPv6 版）
   port-used <port>              端口是否已被现有节点占用（退出码 0=占用）
   set-host <host>               设置分享链接使用的地址（IPv4/域名）
@@ -23,7 +26,6 @@ import argparse
 import base64
 import json
 import os
-import re
 import sys
 import urllib.parse
 
@@ -35,7 +37,7 @@ CERT_DIR = os.path.join(APP_DIR, "certs")
 
 TAG_PREFIX = "sbx-n"
 
-TYPES = ("vless", "vmess", "shadowsocks", "trojan", "hysteria2", "tuic", "anytls")
+TYPES = ("vless", "shadowsocks", "trojan", "anytls")
 
 
 # ------------------------------------------------------------------ 读写
@@ -66,11 +68,27 @@ def load_state():
 
 
 def next_id(nodes):
-    used = {int(n["id"]) for n in nodes if str(n.get("id", "")).isdigit()}
-    i = 1
-    while i in used:
-        i += 1
-    return i
+    """分配节点 ID：单调递增、永不回收。
+
+    旧实现取最小空闲 id，删除节点后新节点会复用该 id，导致数据库里
+    node:<id> 的累计/每日流量被混入无关节点。这里把分配游标持久化到
+    state.json（next_node_id），并兜底兼容"已有节点 id 更大"的手工数据。
+    """
+    st = load_state()
+    try:
+        base = int(st.get("next_node_id", 0))
+    except (TypeError, ValueError):
+        base = 0
+    used_max = 0
+    for n in nodes:
+        try:
+            used_max = max(used_max, int(n["id"]))
+        except (TypeError, ValueError):
+            continue
+    nid = max(base, used_max) + 1
+    st["next_node_id"] = nid
+    write_json(STATE_JSON, st)
+    return nid
 
 
 def tag_of(node_id):
@@ -100,25 +118,12 @@ def build_inbound(node):
                 "short_id": [node["short_id"]],
             },
         }
-    elif t == "vmess":
-        base["users"] = [{"name": "u", "uuid": node["uuid"], "alterId": 0}]
-        if node.get("path"):
-            base["transport"] = {"type": "ws", "path": node["path"]}
     elif t == "shadowsocks":
         base["method"] = node["method"]
         base["password"] = node["password"]
     elif t == "trojan":
         base["users"] = [{"name": "u", "password": node["password"]}]
         base["tls"] = tls_selfsigned(node)
-    elif t == "hysteria2":
-        base["users"] = [{"name": "u", "password": node["password"]}]
-        base["tls"] = tls_selfsigned(node, alpn=["h3"])
-        if node.get("ports"):
-            base["listen_port"] = port
-    elif t == "tuic":
-        base["users"] = [{"name": "u", "uuid": node["uuid"], "password": node["password"]}]
-        base["congestion_control"] = "bbr"
-        base["tls"] = tls_selfsigned(node, alpn=["h3"])
     elif t == "anytls":
         base["users"] = [{"name": "u", "password": node["password"]}]
         base["tls"] = tls_selfsigned(node)
@@ -127,16 +132,13 @@ def build_inbound(node):
     return base
 
 
-def tls_selfsigned(node, alpn=None):
-    tls = {
+def tls_selfsigned(node):
+    return {
         "enabled": True,
         "server_name": node["sni"],
         "certificate_path": node["cert"],
         "key_path": node["key"],
     }
-    if alpn:
-        tls["alpn"] = alpn
-    return tls
 
 
 def rebuild_config(nodes, src=SB_CONF):
@@ -191,17 +193,6 @@ def node_link(node, host=None, label_suffix=""):
         return "vless://%s@%s:%s?%s#%s" % (
             node["uuid"], h, port, urllib.parse.urlencode(q), name)
 
-    if t == "vmess":
-        obj = {
-            "v": "2", "ps": (node.get("name") or "vmess") + label_suffix,
-            "add": host, "port": str(port),
-            "id": node["uuid"], "aid": "0", "scy": "auto",
-            "net": "ws" if node.get("path") else "tcp",
-            "type": "none", "host": "", "path": node.get("path", ""), "tls": "",
-        }
-        raw = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
-        return "vmess://" + base64.b64encode(raw).decode()
-
     if t == "shadowsocks":
         userinfo = base64.urlsafe_b64encode(
             ("%s:%s" % (node["method"], node["password"])).encode()).decode().rstrip("=")
@@ -211,19 +202,6 @@ def node_link(node, host=None, label_suffix=""):
         q = {"security": "tls", "sni": node["sni"], "allowInsecure": "1", "type": "tcp"}
         return "trojan://%s@%s:%s?%s#%s" % (
             urllib.parse.quote(node["password"]), h, port, urllib.parse.urlencode(q), name)
-
-    if t == "hysteria2":
-        q = {"sni": node["sni"], "insecure": "1"}
-        if node.get("ports"):
-            q["mport"] = node["ports"]
-        return "hysteria2://%s@%s:%s?%s#%s" % (
-            urllib.parse.quote(node["password"]), h, port, urllib.parse.urlencode(q), name)
-
-    if t == "tuic":
-        q = {"sni": node["sni"], "alpn": "h3", "congestion_control": "bbr", "allow_insecure": "1"}
-        return "tuic://%s:%s@%s:%s?%s#%s" % (
-            node["uuid"], urllib.parse.quote(node["password"]), h, port,
-            urllib.parse.urlencode(q), name)
 
     if t == "anytls":
         q = {"sni": node["sni"], "insecure": "1"}
@@ -251,16 +229,14 @@ def cmd_add(args):
     node = {"id": nid, "type": args.type, "port": int(args.port),
             "name": args.name or ("%s-%d" % (args.type, nid))}
 
-    for key in ("uuid", "password", "method", "sni", "path", "flow",
-                "private_key", "public_key", "short_id", "ports", "net"):
+    for key in ("uuid", "password", "method", "sni", "flow",
+                "private_key", "public_key", "short_id"):
         val = getattr(args, key, None)
         if val:
             node[key] = val
-    if args.type in ("trojan", "hysteria2", "tuic", "anytls"):
+    if args.type in ("trojan", "anytls"):
         node["cert"] = os.path.join(CERT_DIR, "cert.pem")
         node["key"] = os.path.join(CERT_DIR, "key.pem")
-    if args.type in ("hysteria2", "tuic"):
-        node["net"] = "udp"
 
     nodes.append(node)
     cfg = rebuild_config(nodes)
@@ -302,8 +278,8 @@ def cmd_remove(args):
     return 0
 
 
-# 各类型允许修改 sni 的（自签证书类 + reality）
-SNI_TYPES = ("vless", "trojan", "hysteria2", "tuic", "anytls")
+# 各类型允许修改 sni 的（reality + 自签证书类）
+SNI_TYPES = ("vless", "trojan", "anytls")
 
 
 def cmd_edit(args):
@@ -337,12 +313,8 @@ def cmd_edit(args):
         target["sni"] = args.sni
         changed.append("SNI→%s" % args.sni)
 
-    if args.ports is not None:
-        target["ports"] = args.ports.strip()
-        changed.append("端口范围→%s" % (args.ports.strip() or "(清空)"))
-
     if not changed:
-        raise SystemExit("未指定要修改的内容（--port / --sni / --ports）")
+        raise SystemExit("未指定要修改的内容（--port / --sni）")
 
     cfg = rebuild_config(nodes)
     cand = write_candidate(cfg)
@@ -370,11 +342,33 @@ def cmd_list(args):
     if not nodes:
         print("(暂无节点)")
         return 0
-    print("%-4s %-14s %-14s %-8s %s" % ("ID", "名称", "类型", "端口", "端口范围"))
+    print("%-4s %-16s %-14s %-8s" % ("ID", "名称", "类型", "端口"))
     for n in nodes:
-        print("%-4s %-14s %-14s %-8s %s" % (
-            n["id"], (n.get("name") or "")[:14], n["type"], n["port"], n.get("ports", "")))
+        print("%-4s %-16s %-14s %-8s" % (
+            n["id"], (n.get("name") or "")[:16], n["type"], n["port"]))
     return 0
+
+
+def cmd_count(args):
+    """输出节点数量，供外层 shell 菜单显示用。"""
+    print(len(load_nodes()))
+    return 0
+
+
+def cmd_last(args):
+    """输出最后一个节点的 id（无节点输出空行），供"新增后立即展示链接"用。"""
+    nodes = load_nodes()
+    print(nodes[-1]["id"] if nodes else "")
+    return 0
+
+
+def cmd_info(args):
+    """输出单个节点的 type/sni/port（制表符分隔），供 shell 编辑菜单读取。"""
+    for n in load_nodes():
+        if str(n["id"]) == str(args.id):
+            print("%s\t%s\t%s" % (n["type"], n.get("sni", ""), n.get("port", "")))
+            return 0
+    raise SystemExit("未找到节点 id=%s" % args.id)
 
 
 def cmd_links(args):
@@ -401,18 +395,9 @@ def cmd_port_used(args):
     nodes = load_nodes()
     p = int(args.port)
     for n in nodes:
-        if int(n["port"]) == p:
+        if int(n.get("port", 0)) == p:
             print("used by node %s" % n["id"])
             return 0
-        rng = str(n.get("ports") or "")
-        for part in re.split(r"[,\s]+", rng):
-            m = re.match(r"^(\d+)[-:](\d+)$", part)
-            if m and int(m.group(1)) <= p <= int(m.group(2)):
-                print("in range of node %s" % n["id"])
-                return 0
-            if part.isdigit() and int(part) == p:
-                print("used by node %s" % n["id"])
-                return 0
     return 1
 
 
@@ -458,13 +443,10 @@ def main():
     a.add_argument("--password")
     a.add_argument("--method")
     a.add_argument("--sni")
-    a.add_argument("--path")
     a.add_argument("--flow")
     a.add_argument("--private-key", dest="private_key")
     a.add_argument("--public-key", dest="public_key")
     a.add_argument("--short-id", dest="short_id")
-    a.add_argument("--ports")
-    a.add_argument("--net")
     a.set_defaults(func=cmd_add)
 
     r = sub.add_parser("remove"); r.add_argument("id"); r.set_defaults(func=cmd_remove)
@@ -476,11 +458,14 @@ def main():
     e.add_argument("id")
     e.add_argument("--port")
     e.add_argument("--sni")
-    e.add_argument("--ports")
     e.set_defaults(func=cmd_edit)
 
     l = sub.add_parser("list"); l.add_argument("--json", action="store_true")
     l.set_defaults(func=cmd_list)
+
+    cnt = sub.add_parser("count"); cnt.set_defaults(func=cmd_count)
+    last = sub.add_parser("last"); last.set_defaults(func=cmd_last)
+    info = sub.add_parser("info"); info.add_argument("id"); info.set_defaults(func=cmd_info)
 
     k = sub.add_parser("links")
     k.add_argument("id", nargs="?")

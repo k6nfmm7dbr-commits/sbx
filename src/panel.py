@@ -73,7 +73,7 @@ def load_conf():
 
 
 def load_nodes(conf):
-    """nodes.json: [{"id":1,"name":"...","type":"vless","port":443,"ports":"20000-30000","link":"..."}]"""
+    """nodes.json: [{"id":1,"name":"...","type":"vless","port":443,...}]"""
     try:
         with open(conf["nodes_file"], "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -195,16 +195,29 @@ def db_connect(conf):
     with contextlib.suppress(sqlite3.OperationalError, sqlite3.DatabaseError):
         con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA busy_timeout=30000")
-    con.executescript(SCHEMA)
-    # 无损迁移旧数据库：旧 samples 没有 duration_ms / valid。
-    cols = {r["name"] for r in con.execute("PRAGMA table_info(samples)").fetchall()}
-    if "duration_ms" not in cols:
-        con.execute("ALTER TABLE samples ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0")
-    if "valid" not in cols:
-        con.execute("ALTER TABLE samples ADD COLUMN valid INTEGER NOT NULL DEFAULT 1")
-    # 升级前的旧样本没有真实耗时，不能用于实时速率计算；daily/totals 不受影响。
-    con.execute("UPDATE samples SET valid=0 WHERE duration_ms<=0")
+    _migrate(con, path)
     return con
+
+
+# 建表/迁移只做一次：API 请求高频开连接，把 CREATE/ALTER/UPDATE 移出请求热路径。
+_MIGRATE_LOCK = threading.Lock()
+_MIGRATED = set()
+
+
+def _migrate(con, path):
+    with _MIGRATE_LOCK:
+        if path in _MIGRATED:
+            return
+        con.executescript(SCHEMA)
+        # 无损迁移旧数据库：旧 samples 没有 duration_ms / valid。
+        cols = {r["name"] for r in con.execute("PRAGMA table_info(samples)").fetchall()}
+        if "duration_ms" not in cols:
+            con.execute("ALTER TABLE samples ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0")
+        if "valid" not in cols:
+            con.execute("ALTER TABLE samples ADD COLUMN valid INTEGER NOT NULL DEFAULT 1")
+        # 升级前的旧样本没有真实耗时，不能用于实时速率计算；daily/totals 不受影响。
+        con.execute("UPDATE samples SET valid=0 WHERE duration_ms<=0")
+        _MIGRATED.add(path)
 
 
 # --------------------------------------------------------------------------
@@ -382,6 +395,7 @@ class Collector(threading.Thread):
         self.last_error = ""
         self.last_ok_ts = 0
         self.last_sample_ts = 0
+        self.last_conns = None      # 连接数缓存：采集线程每轮刷新，API 直接读
         self.repair_at = 0
 
     def _ensure_con(self):
@@ -514,6 +528,11 @@ class Collector(threading.Thread):
         self.last_sample_ts = ts
         self.last_ok_ts = wall_ts
         self.last_error = ""
+        # 连接数缓存：由采集线程每轮算一次，HTTP 请求不再逐次读 /proc
+        try:
+            self.last_conns = count_conns(load_nodes(self.conf))
+        except Exception:
+            self.last_conns = {}
         if fresh_ruleset:
             log("检测到规则集世代 %s -> %s, 累计流量已衔接，速率从新基线开始" % (prev_epoch, epoch))
         if reset_hits:
@@ -587,11 +606,37 @@ def q_rate(con, conf, window=None):
     return out
 
 
+def _node_rate_conns(nodes, rates, conns):
+    """每个节点对应的 (rate, conns)，供 summary / live 复用，避免两处重复映射。"""
+    return {
+        n["id"]: (
+            rates.get("node:%s" % n["id"], {"rx": 0, "tx": 0}),
+            conns.get(n["id"], {"tcp": None, "udp": None}),
+        )
+        for n in nodes
+    }
+
+
+def _rate_total(rates):
+    return {
+        "rx": sum(v["rx"] for k, v in rates.items() if k.startswith("node:")),
+        "tx": sum(v["tx"] for k, v in rates.items() if k.startswith("node:")),
+    }
+
+
+def _conns_total(conns):
+    return (
+        sum(v["tcp"] for v in conns.values() if v["tcp"]),
+        sum(v["udp"] for v in conns.values() if v["udp"]),
+    )
+
+
 def build_summary(conf, con, collector=None):
     nodes = load_nodes(conf)
     totals = q_totals(con)
     rates = q_rate(con, conf)
-    conns = count_conns(nodes)
+    conns = (collector.last_conns if collector and collector.last_conns is not None
+             else count_conns(nodes))
     today = today_str(conf)
     today_rows = {
         r["scope"]: dict(r)
@@ -600,6 +645,7 @@ def build_summary(conf, con, collector=None):
         ).fetchall()
     }
     zero = {"rx": 0, "tx": 0, "rx_pkts": 0, "tx_pkts": 0}
+    rc = _node_rate_conns(nodes, rates, conns)
 
     node_list = []
     agg_today = dict(zero)
@@ -608,19 +654,15 @@ def build_summary(conf, con, collector=None):
         scope = "node:%s" % n["id"]
         t = today_rows.get(scope, zero)
         a = totals.get(scope, zero)
-        r = rates.get(scope, {"rx": 0, "tx": 0})
-        c = conns.get(n["id"], {"tcp": None, "udp": None})
+        r, c = rc[n["id"]]
         node_list.append({
             "id": n["id"],
             "name": n.get("name") or n.get("type") or ("node%s" % n["id"]),
             "type": n.get("type", ""),
             "port": n.get("port"),
-            "ports": n.get("ports", ""),
-            "link": n.get("link", ""),
             "today": {k: t.get(k, 0) for k in zero},
             "total": {k: a.get(k, 0) for k in zero},
             "rate": r,
-            "conns": c["tcp"],           # 兼容旧字段
             "conns_tcp": c["tcp"],
             "conns_udp": c["udp"],
         })
@@ -630,6 +672,7 @@ def build_summary(conf, con, collector=None):
 
     sys_today = today_rows.get("system", zero)
     sys_total = totals.get("system", zero)
+    ct, cu = _conns_total(conns)
     return {
         "now": int(time.time()),
         "day": today,
@@ -644,13 +687,10 @@ def build_summary(conf, con, collector=None):
         "total": agg_total,
         "system_today": {k: sys_today.get(k, 0) for k in zero},
         "system_total": {k: sys_total.get(k, 0) for k in zero},
-        "rate_total": {
-            "rx": sum(v["rx"] for k, v in rates.items() if k.startswith("node:")),
-            "tx": sum(v["tx"] for k, v in rates.items() if k.startswith("node:")),
-        },
+        "rate_total": _rate_total(rates),
         "rate_known": bool(rates),
-        "conns_total": sum(v["tcp"] for v in conns.values() if v["tcp"]),
-        "conns_udp_total": sum(v["udp"] for v in conns.values() if v["udp"]),
+        "conns_total": ct,
+        "conns_udp_total": cu,
     }
 
 
@@ -661,16 +701,15 @@ def build_live(conf, con, collector=None):
     """
     nodes = load_nodes(conf)
     rates = q_rate(con, conf)
-    conns = count_conns(nodes)
+    conns = (collector.last_conns if collector and collector.last_conns is not None
+             else count_conns(nodes))
+    rc = _node_rate_conns(nodes, rates, conns)
     node_live = []
     for n in nodes:
-        scope = "node:%s" % n["id"]
-        r = rates.get(scope, {"rx": 0, "tx": 0})
-        c = conns.get(n["id"], {"tcp": None, "udp": None})
+        r, c = rc[n["id"]]
         node_live.append({"id": n["id"], "rate": r,
-                          "conns": c["tcp"], "conns_tcp": c["tcp"], "conns_udp": c["udp"]})
-    rx = sum(v["rx"] for k, v in rates.items() if k.startswith("node:"))
-    tx = sum(v["tx"] for k, v in rates.items() if k.startswith("node:"))
+                          "conns_tcp": c["tcp"], "conns_udp": c["udp"]})
+    ct, cu = _conns_total(conns)
     return {
         "now": int(time.time()),
         "healthy": bool(collector and not collector.last_error),
@@ -678,9 +717,9 @@ def build_live(conf, con, collector=None):
         "last_sample": collector.last_ok_ts if collector else 0,
         "interval": conf.get("interval", 5),
         "rate_known": bool(rates),
-        "rate_total": {"rx": rx, "tx": tx},
-        "conns_total": sum(v["tcp"] for v in conns.values() if v["tcp"]),
-        "conns_udp_total": sum(v["udp"] for v in conns.values() if v["udp"]),
+        "rate_total": _rate_total(rates),
+        "conns_total": ct,
+        "conns_udp_total": cu,
         "nodes": node_live,
     }
 
@@ -749,6 +788,34 @@ class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.do_GET()
 
+    def do_POST(self):
+        """仅处理 /login：POST 提交令牌，成功后下发 HttpOnly 会话 Cookie 并重定向。
+
+        令牌不再出现在 URL 里，避免漏进浏览器历史 / 反代访问日志 / Referer。
+        """
+        parsed = urllib.parse.urlparse(self.path)
+        route = parsed.path.rstrip("/") or "/"
+        if route != "/login":
+            self._send(404, "not found", "text/plain; charset=utf-8")
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length).decode("utf-8", "replace") if length else ""
+        given = (urllib.parse.parse_qs(body).get("token") or [""])[0]
+        token = self._token()
+        if token and hmac.compare_digest(given, token):
+            cookie = ("sbx_token=%s; Path=/; Max-Age=604800; HttpOnly; SameSite=Strict"
+                      % urllib.parse.quote(token))
+            self.send_response(302)
+            self.send_header("Location", "/")
+            self.send_header("Set-Cookie", cookie)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        else:
+            self.send_response(302)
+            self.send_header("Location", "/login?error=1")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         route = parsed.path.rstrip("/") or "/"
@@ -763,18 +830,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._serve_file(os.path.join(self.conf["web_root"], "login.html"),
                                  "text/html; charset=utf-8")
                 return
-            extra = {}
-            tok = (qs.get("token") or [""])[0]
-            if tok and self._token() and hmac.compare_digest(tok, self._token()):
-                extra["Set-Cookie"] = ("sbx_token=%s; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax"
-                                       % urllib.parse.quote(tok))
             try:
                 with open(os.path.join(self.conf["web_root"], "index.html"), "rb") as f:
                     data = f.read()
             except OSError:
                 self._send(500, "web assets missing", "text/plain; charset=utf-8")
                 return
-            self._send(200, data, "text/html; charset=utf-8", extra)
+            self._send(200, data, "text/html; charset=utf-8")
             return
 
         if route in ("/app.js", "/style.css"):
@@ -904,65 +966,52 @@ def cmd_reset(conf, scope=None):
     print("统计数据已清空" + (" (%s)" % scope if scope else ""))
 
 
+def cmd_config_get(conf, key):
+    print(conf.get(key, ""))
+    return 0
+
+
+def cmd_config_set(conf, key, value):
+    """写回单个配置项，供外层 shell（面板设置菜单）修改 panel.json。"""
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        pass
+    conf[key] = value
+    tmp = CONF_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(conf, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    os.replace(tmp, CONF_PATH)
+    os.chmod(CONF_PATH, 0o600)
+    return 0
+
+
 # --------------------------------------------------------------------------
 # 防火墙计数规则生成
 # --------------------------------------------------------------------------
 
 def parse_ports(node):
-    """
-    返回归一化、已排序、已合并的端口区间 [(lo, hi), ...]。
-    支持 port=443, ports="20000-30000", ports="443,8443,20000-30000", ports="1000:2000"
-    合并重叠/相邻区间很关键：iptables 后端一个包若命中同节点两条规则会重复计数。
-    """
-    spec = []
-    if node.get("port"):
-        spec.append(str(node["port"]))
-    raw = str(node.get("ports") or "").strip()
-    if raw:
-        spec += [x for x in re.split(r"[,\s]+", raw) if x]
-    ranges = []
-    for item in spec:
-        m = re.match(r"^(\d+)(?:[-:](\d+))?$", item)
-        if not m:
-            continue
-        lo = int(m.group(1))
-        hi = int(m.group(2) or lo)
-        if lo > hi:
-            lo, hi = hi, lo
-        if 1 <= lo <= 65535 and 1 <= hi <= 65535:
-            ranges.append((lo, hi))
-    ranges.sort()
-    merged = []
-    for lo, hi in ranges:
-        if merged and lo <= merged[-1][1] + 1:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
-        else:
-            merged.append((lo, hi))
-    return [tuple(x) for x in merged]
+    """节点唯一监听端口 -> [(port, port)]。端口非法返回 []。"""
+    try:
+        p = int(node.get("port"))
+    except (TypeError, ValueError):
+        return []
+    return [(p, p)] if 1 <= p <= 65535 else []
 
 
-def node_protocols(node):
-    net = str(node.get("net") or "").lower()
-    if net in ("tcp", "udp"):
-        return [net]
-    return ["tcp", "udp"]
-
-
-# 连接数显示用的协议归属（按 inbound 实际监听的传输层）：
-#   TCP 系：vless/vmess/trojan/anytls  ·  UDP 系(QUIC)：hysteria2/tuic  ·  双栈：shadowsocks
-# 与 node_protocols（计流量时为稳妥默认双栈）不同——这里只影响"该显示 TCP 还是 UDP 连接数"。
-CONN_PROTOS = {
-    "vless": ("tcp",), "vmess": ("tcp",), "trojan": ("tcp",), "anytls": ("tcp",),
-    "hysteria2": ("udp",), "tuic": ("udp",), "shadowsocks": ("tcp", "udp"),
+# 各协议实际监听的传输层：vless/trojan/anytls 纯 TCP，shadowsocks(2022) 为 TCP+UDP 双栈
+PROTO_TRANSPORTS = {
+    "vless": ("tcp",),
+    "trojan": ("tcp",),
+    "anytls": ("tcp",),
+    "shadowsocks": ("tcp", "udp"),
 }
 
 
-def conn_protocols(node):
-    t = str(node.get("type") or "").lower()
-    if t in CONN_PROTOS:
-        return CONN_PROTOS[t]
-    # 未知类型：回落到 net 字段或双栈
-    return tuple(node_protocols(node))
+def node_protocols(node):
+    """计数规则与连接数显示统一按此传输层归属生成，避免为纯 TCP 协议生成无用 UDP 规则。"""
+    return list(PROTO_TRANSPORTS.get(str(node.get("type") or "").lower(), ("tcp", "udp")))
 
 
 # --------------------------------------------------------------------------
@@ -1023,35 +1072,23 @@ def count_conns(nodes):
     返回 {node_id: {"tcp": int|None, "udp": int|None}}。
     tcp：ESTABLISHED 的 TCP socket 数（仅 TCP 类协议，否则 None）。
     udp：已建立会话（远端非零）的 UDP socket 数（仅 UDP 类协议，否则 None）。
-      说明：hysteria2/tuic 基于 QUIC，服务端通常单 socket 多路复用，
-      因此该值反映"有对端的 UDP 会话 socket 数"，是内核可见的真实计数，
-      不一定等于 QUIC 层的逻辑连接数。
-    数据来自内核 /proc/net/{tcp,udp}[6]。
+    数据来自内核 /proc/net/{tcp,udp}[6]，按节点监听端口归属。
     """
     tcp_hits = _count_by_port(TCP_PROC_FILES, lambda st, rem: st == TCP_ESTABLISHED)
     udp_hits = _count_by_port(UDP_PROC_FILES, lambda st, rem: _rem_connected(rem))
 
     def sum_hits(node, hits):
-        cnt = 0
-        for lo, hi in parse_ports(node):
-            for p, c in hits.items():
-                if lo <= p <= hi:
-                    cnt += c
-        return cnt
+        (lo, hi), = parse_ports(node)
+        return sum(c for p, c in hits.items() if lo <= p <= hi)
 
     result = {}
     for n in nodes:
-        protos = conn_protocols(n)
+        protos = node_protocols(n)
         result[n["id"]] = {
             "tcp": (sum_hits(n, tcp_hits) if "tcp" in protos else None),
             "udp": (sum_hits(n, udp_hits) if "udp" in protos else None),
         }
     return result
-
-
-def count_tcp_conns(nodes):
-    """向后兼容：返回 {node_id: tcp连接数 或 None}"""
-    return {nid: v["tcp"] for nid, v in count_conns(nodes).items()}
 
 
 def gen_nft(conf, nodes, epoch=None):
@@ -1231,6 +1268,10 @@ def main():
         cmd_daily(conf, int(args[1]) if len(args) > 1 else 14)
     elif cmd == "reset":
         cmd_reset(conf, args[1] if len(args) > 1 else None)
+    elif cmd == "config-get":
+        sys.exit(cmd_config_get(conf, args[1]) if len(args) > 1 else 2)
+    elif cmd == "config-set":
+        sys.exit(cmd_config_set(conf, args[1], args[2]) if len(args) > 2 else 2)
     elif cmd == "rules":
         cmd_rules(conf)
     elif cmd == "apply":
@@ -1240,7 +1281,7 @@ def main():
     elif cmd == "selftest":
         sys.exit(cmd_selftest(conf))
     else:
-        print("用法: panel.py [serve|once|show|daily [N]|rules|apply|clear|selftest|reset [scope]]")
+        print("用法: panel.py [serve|once|show|daily [N]|rules|apply|clear|selftest|reset [scope]|config-get <key>|config-set <key> <value>]")
         sys.exit(2)
 
 

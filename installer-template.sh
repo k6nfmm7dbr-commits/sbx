@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 APP_NAME="SBX"
-APP_VERSION="2.7.0"
+APP_VERSION="2.8.0"
 RAW_URL="${SBX_RAW_URL:-https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh}"
 
 # SBX_ROOT 仅用于测试/沙箱安装（把整套目录挪到前缀下），正常安装留空
@@ -324,21 +324,8 @@ EOF
   ok "面板配置已生成（端口 $port）"
 }
 
-panel_get() { python3 -c "
-import json,sys
-print(json.load(open('$PANEL_CONF')).get(sys.argv[1],''))
-" "$1"; }
-
-panel_set() { python3 -c "
-import json,sys
-p='$PANEL_CONF'
-d=json.load(open(p))
-k,v=sys.argv[1],sys.argv[2]
-try: v=int(v)
-except ValueError: pass
-d[k]=v
-json.dump(d,open(p,'w'),indent=2,ensure_ascii=False)
-" "$1" "$2"; }
+panel_get() { python3 "$PANEL_PY" config-get "$1"; }
+panel_set() { python3 "$PANEL_PY" config-set "$1" "$2"; }
 
 # ---------------------------------------------------------------- 服务管理
 svc_do() {  # svc_do <start|stop|restart|enable|status> <name>
@@ -444,13 +431,15 @@ commit_node() {
     py_json rollback >/dev/null 2>&1 || true
     return 1
   fi
+  # 同时备份配置与节点数据源：任一环节失败都能整体回滚，避免两者错位
   cp -f "$SB_CONF" "$SB_CONF.bak" 2>/dev/null || true
+  cp -f "$NODES_JSON" "$NODES_JSON.bak" 2>/dev/null || true
   mv -f "$cand" "$SB_CONF"
   py_json commit >/dev/null
   if ! sb_restart; then
-    warn "sing-box 启动失败，回滚配置"
+    warn "sing-box 启动失败，回滚配置与节点数据"
     cp -f "$SB_CONF.bak" "$SB_CONF" 2>/dev/null || true
-    py_json sync >/dev/null 2>&1 || true
+    cp -f "$NODES_JSON.bak" "$NODES_JSON" 2>/dev/null || true
     sb_restart || true
     return 1
   fi
@@ -484,17 +473,6 @@ add_ss() {
   commit_node && { ok "Shadowsocks 2022 节点已添加"; show_links_for_last; }
 }
 
-add_hy2() {
-  local port name sni pw
-  port=$(prompt_port "Hysteria2" "$(pick_port)")
-  name=$(prompt_name "hy2-$port")
-  sni=$(prompt_sni www.bing.com)
-  ensure_certs "$sni"
-  pw=$(rand_hex 12)
-  py_json add hysteria2 --port="$port" --name="$name" --password="$pw" --sni="$sni" >/dev/null
-  commit_node && { ok "Hysteria2 节点已添加"; show_links_for_last; }
-}
-
 add_trojan() {
   local port name sni pw
   port=$(prompt_port "Trojan" 8443)
@@ -504,26 +482,6 @@ add_trojan() {
   pw=$(rand_hex 12)
   py_json add trojan --port="$port" --name="$name" --password="$pw" --sni="$sni" >/dev/null
   commit_node && { ok "Trojan 节点已添加"; show_links_for_last; }
-}
-
-add_tuic() {
-  local port name sni pw uuid
-  port=$(prompt_port "TUIC" "$(pick_port)")
-  name=$(prompt_name "tuic-$port")
-  sni=$(prompt_sni www.bing.com)
-  ensure_certs "$sni"
-  uuid=$(rand_uuid); pw=$(rand_hex 12)
-  py_json add tuic --port="$port" --name="$name" --uuid="$uuid" --password="$pw" --sni="$sni" >/dev/null
-  commit_node && { ok "TUIC 节点已添加"; show_links_for_last; }
-}
-
-add_vmess() {
-  local port name uuid path
-  port=$(prompt_port "VMess WebSocket" 8080)
-  name=$(prompt_name "vmess-$port")
-  uuid=$(rand_uuid); path="/$(rand_hex 4)"
-  py_json add vmess --port="$port" --name="$name" --uuid="$uuid" --path="$path" >/dev/null
-  commit_node && { ok "VMess WS 节点已添加"; show_links_for_last; }
 }
 
 add_anytls() {
@@ -539,11 +497,7 @@ add_anytls() {
 
 show_links_for_last() {
   local last host6
-  last=$(python3 -c "
-import json
-d=json.load(open('$NODES_JSON'))
-print(d[-1]['id'] if d else '')
-")
+  last=$(py_json last)
   [[ -z "$last" ]] && return 0
   host6=$(py_json get-host6)
   hr
@@ -671,16 +625,17 @@ start_all() {
 
 # ---------------------------------------------------------------- 面板信息
 panel_url() {
-  local host port token
+  local host port
   host=$(py_json get-host); [[ -z "$host" ]] && host="$(public_ip)"
-  port=$(panel_get port); token=$(panel_get token)
-  echo "http://$(host_for_uri "$host"):$port/?token=$token"
+  port=$(panel_get port)
+  echo "http://$(host_for_uri "$host"):$port/"
 }
 
 show_panel_info() {
   hr
   printf '%s流量面板%s\n' "$C_B" "$C_RESET"
   printf '  地址: %s%s%s\n' "$C_CYAN" "$(panel_url)" "$C_RESET"
+  printf '  令牌: %s%s%s\n' "$C_CYAN" "$(panel_get token)" "$C_RESET"
   printf '  状态: %s\n' "$(panel_running && echo "${C_GREEN}运行中${C_RESET}" || echo "${C_RED}未运行${C_RESET}")"
   printf '  后端: %s\n' "$(command -v nft >/dev/null 2>&1 && echo nftables || echo iptables)"
   hr
@@ -690,20 +645,16 @@ show_panel_info() {
 menu_add_node() {
   banner
   printf '%s添加节点%s\n\n' "$C_B" "$C_RESET"
-  echo "  1) VLESS + Reality      (推荐，抗封锁)"
-  echo "  2) Shadowsocks 2022     (轻量高速)"
-  echo "  3) Hysteria2            (UDP，弱网优化)"
-  echo "  4) Trojan               (自签证书)"
-  echo "  5) TUIC v5              (UDP)"
-  echo "  6) VMess + WebSocket    (可套 CDN)"
-  echo "  7) AnyTLS"
+  echo "  1) VLESS + Reality   (推荐，抗封锁)"
+  echo "  2) Shadowsocks 2022  (轻量高速)"
+  echo "  3) Trojan            (自签证书)"
+  echo "  4) AnyTLS"
   echo "  0) 返回"
   echo
   printf '请选择: '
   read -r c || true
   case "$c" in
-    1) add_vless ;; 2) add_ss ;; 3) add_hy2 ;; 4) add_trojan ;;
-    5) add_tuic ;; 6) add_vmess ;; 7) add_anytls ;;
+    1) add_vless ;; 2) add_ss ;; 3) add_trojan ;; 4) add_anytls ;;
     0|"") return 0 ;;
     *) warn "无效选择" ;;
   esac
@@ -737,20 +688,14 @@ menu_edit_node() {
   read -r id || true
   [[ -z "$id" ]] && return 0
   # 取该节点信息
-  local info type sni port ports
-  info=$(python3 -c "
-import json
-d=json.load(open('$NODES_JSON'))
-n=next((x for x in d if str(x['id'])==str('$id')), None)
-if n: print('%s\t%s\t%s\t%s' % (n['type'], n.get('sni',''), n.get('port',''), n.get('ports','')))
-")
+  local info type sni port
+  info=$(py_json info "$id")
   [[ -z "$info" ]] && { warn "未找到节点 $id"; pause; return 1; }
   type=$(echo "$info" | cut -f1); sni=$(echo "$info" | cut -f2)
-  port=$(echo "$info" | cut -f3); ports=$(echo "$info" | cut -f4)
+  port=$(echo "$info" | cut -f3)
 
   printf '\n节点类型: %s   当前端口: %s\n' "$type" "$port"
   [[ -n "$sni" ]] && printf '当前 SNI: %s\n' "$sni"
-  [[ -n "$ports" ]] && printf '当前端口范围(跳跃): %s\n' "$ports"
   echo
 
   local args=("$id")
@@ -772,7 +717,7 @@ if n: print('%s\t%s\t%s\t%s' % (n['type'], n.get('sni',''), n.get('port',''), n.
 
   # 仅对支持 SNI 的类型询问
   case "$type" in
-    vless|trojan|hysteria2|tuic|anytls)
+    vless|trojan|anytls)
       printf '新 SNI 伪装域名 (回车不改): '
       read -r ns || true
       if [[ -n "$ns" ]]; then
@@ -780,14 +725,6 @@ if n: print('%s\t%s\t%s\t%s' % (n['type'], n.get('sni',''), n.get('port',''), n.
         args+=("--sni=$ns")
       fi ;;
   esac
-
-  # hysteria2 额外支持端口跳跃范围
-  if [[ "$type" == "hysteria2" ]]; then
-    printf '端口跳跃范围 如 20000-30000 (回车不改，输入 - 清空): '
-    read -r nr || true
-    if [[ "$nr" == "-" ]]; then args+=("--ports=")
-    elif [[ -n "$nr" ]]; then args+=("--ports=$nr"); fi
-  fi
 
   if [[ ${#args[@]} -le 1 ]]; then echo "未做任何修改"; pause; return 0; fi
 
@@ -984,11 +921,7 @@ main_menu() {
   while :; do
     banner
     local nnum
-    nnum=$(python3 -c "
-import json
-try: print(len(json.load(open('$NODES_JSON'))))
-except Exception: print(0)
-")
+    nnum=$(py_json count)
     printf '  节点: %s%s%s 个    sing-box: %s    面板: %s    %sv%s%s\n' \
       "$C_B" "$nnum" "$C_RESET" \
       "$(sb_running && echo "${C_GREEN}●${C_RESET}" || echo "${C_RED}●${C_RESET}")" \
@@ -996,32 +929,68 @@ except Exception: print(0)
       "$C_DIM" "$APP_VERSION" "$C_RESET"
     printf '  面板: %s%s%s\n\n' "$C_CYAN" "$(panel_url)" "$C_RESET"
     echo "  1) 添加节点"
-    echo "  2) 修改节点（端口 / SNI）"
-    echo "  3) 删除节点"
-    echo "  4) 查看节点与分享链接"
-    echo "  5) 流量统计"
-    echo "  6) 面板设置"
-    echo "  7) 服务管理"
-    echo "  8) 设置分享地址（域名/IP）"
-    echo "  9) 检查更新 / 升级"
-    echo " 10) 卸载"
+    echo "  2) 节点管理"
+    echo "  3) 流量统计"
+    echo "  4) 系统设置"
+    echo "  5) 检查更新"
+    echo "  6) 卸载"
     echo "  0) 退出"
     echo
     printf '请选择: '
     read -r c || true
     case "$c" in
       1) menu_add_node ;;
-      2) menu_edit_node ;;
-      3) menu_remove_node ;;
-      4) menu_show_links ;;
-      5) menu_traffic ;;
-      6) menu_panel_settings ;;
-      7) menu_service ;;
-      8) menu_host ;;
-      9) do_update; pause ;;
-      10) uninstall_all ;;
+      2) menu_nodes ;;
+      3) menu_traffic ;;
+      4) menu_settings ;;
+      5) do_update; pause ;;
+      6) uninstall_all ;;
       0|"") clear 2>/dev/null || true; exit 0 ;;
       *) warn "无效选择"; sleep 1 ;;
+    esac
+  done
+}
+
+menu_nodes() {
+  while :; do
+    banner
+    printf '%s节点管理%s\n\n' "$C_B" "$C_RESET"
+    py_json list
+    echo
+    echo "  1) 查看分享链接与订阅"
+    echo "  2) 修改节点（端口 / SNI）"
+    echo "  3) 删除节点"
+    echo "  0) 返回"
+    echo
+    printf '请选择: '
+    read -r c || true
+    case "$c" in
+      1) menu_show_links ;;
+      2) menu_edit_node ;;
+      3) menu_remove_node ;;
+      0|"") return 0 ;;
+      *) warn "无效选择" ;;
+    esac
+  done
+}
+
+menu_settings() {
+  while :; do
+    banner
+    printf '%s系统设置%s\n\n' "$C_B" "$C_RESET"
+    echo "  1) 面板设置（端口 / 间隔 / 监听 / 自检 / 清空）"
+    echo "  2) 分享地址（域名 / IP）"
+    echo "  3) 服务管理（重启 / 停止 / 日志）"
+    echo "  0) 返回"
+    echo
+    printf '请选择: '
+    read -r c || true
+    case "$c" in
+      1) menu_panel_settings ;;
+      2) menu_host ;;
+      3) menu_service ;;
+      0|"") return 0 ;;
+      *) warn "无效选择" ;;
     esac
   done
 }
@@ -1133,7 +1102,37 @@ apply_update() {
   [[ -f "$PANEL_CONF" ]] || die "未检测到已安装的 SBX，无法应用升级"
   install -d -m 0755 "$APP_DIR" "$WEB_DIR"
   info "更新面板与工具文件..."
+
+  # 先备份当前资源，写入后立即校验，失败即整体回滚，
+  # 避免一次损坏的下载把 panel.py 写坏导致面板永久失效。
+  local bak="$APP_DIR/.bak-upgrade"
+  rm -rf "$bak"; install -d -m 0755 "$bak/web"
+  cp -f "$PANEL_PY" "$APP_DIR/nodes_tool.py" "$bak/" 2>/dev/null || true
+  local _f
+  for _f in index.html login.html app.js style.css; do
+    cp -f "$WEB_DIR/$_f" "$bak/web/" 2>/dev/null || true
+  done
+
   write_payload                       # 覆盖 panel.py / nodes_tool.py / web，不动 nodes.json / panel.json / db
+
+  # 校验：Python 语法 + web 资源非空，全部通过才继续
+  local bad=""
+  python3 -m py_compile "$PANEL_PY" "$APP_DIR/nodes_tool.py" 2>/dev/null || bad=1
+  for _f in index.html login.html app.js style.css; do
+    [[ -s "$WEB_DIR/$_f" ]] || { bad=1; break; }
+  done
+  if [[ -n "$bad" ]]; then
+    warn "内置资源校验失败，回滚到升级前版本（现有安装未改动）"
+    cp -f "$bak/panel.py" "$PANEL_PY" 2>/dev/null || true
+    cp -f "$bak/nodes_tool.py" "$APP_DIR/nodes_tool.py" 2>/dev/null || true
+    for _f in index.html login.html app.js style.css; do
+      cp -f "$bak/web/$_f" "$WEB_DIR/$_f" 2>/dev/null || true
+    done
+    rm -rf "$bak"
+    die "升级未成功，已恢复原版本"
+  fi
+  rm -rf "$bak"
+
   install_self                        # 刷新 /usr/local/bin/sbx 封装
   setup_services                      # 服务单元可能有更新
   # 节点 schema 或计数规则若有变化，重建一次（幂等，配置校验失败会保留旧配置）
@@ -1185,11 +1184,7 @@ do_install() {
   fw_apply
 
   local nnum
-  nnum=$(python3 -c "
-import json
-try: print(len(json.load(open('$NODES_JSON'))))
-except Exception: print(0)
-")
+  nnum=$(py_json count)
 
   banner
   ok "安装完成"

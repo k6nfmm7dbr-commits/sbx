@@ -3,47 +3,96 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>sing-box 流量面板</title>
+<title>SBX 流量面板</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<header class="app-header"><h1>sing-box 流量面板</h1></header>
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark">SBX</div>
+    <div class="brand-text">
+      <h1>流量面板</h1>
+      <p id="status-txt" class="status-txt">连接中…</p>
+    </div>
+  </div>
+  <span id="pulse" class="pulse"></span>
+</header>
 
-<main class="app-main">
-  <div id="view-home" class="app-view on">
-    <section class="speed-card">
-      <div class="section-title"><span>实时速率</span><i id="pulse"></i></div>
-      <div id="hero-rate" class="speed-value">—</div>
-      <div class="speed-pair"><span>↑ 上传 <b id="hero-up">—</b></span><span>↓ 下载 <b id="hero-down">—</b></span></div>
+<main class="main">
+  <!-- 首页 -->
+  <div id="view-home" class="view on">
+    <section class="hero">
+      <div class="hero-head">
+        <span class="hero-label">实时速率</span>
+        <span class="hero-sub">字节 / 秒</span>
+      </div>
+      <div id="hero-rate" class="hero-value">—</div>
+      <div class="hero-pair">
+        <div class="hero-item">
+          <span class="tag up">↑ 上传</span>
+          <b id="hero-up" class="up">—</b>
+        </div>
+        <div class="hero-item">
+          <span class="tag down">↓ 下载</span>
+          <b id="hero-down" class="down">—</b>
+        </div>
+      </div>
     </section>
 
-    <section class="summary-grid">
-      <div><label>TCP 连接</label><strong id="kpi-conns">—</strong></div>
-      <div><label>UDP 会话</label><strong id="kpi-conns-udp">—</strong></div>
-      <div><label>今日流量</label><strong id="kpi-today-total">—</strong><small><i id="kpi-today-up">—</i> <i id="kpi-today-down">—</i></small></div>
-      <div><label>累计流量 · <span id="kpi-nodes">—</span> 节点</label><strong id="kpi-all-total">—</strong><small><i id="kpi-all-up">—</i> <i id="kpi-all-down">—</i></small></div>
+    <section class="stats">
+      <div class="stat">
+        <label>今日流量</label>
+        <strong id="kpi-today-total">—</strong>
+        <small><i id="kpi-today-up" class="up">—</i><i id="kpi-today-down" class="down">—</i></small>
+      </div>
+      <div class="stat">
+        <label>累计流量</label>
+        <strong id="kpi-all-total">—</strong>
+        <small><i id="kpi-all-up" class="up">—</i><i id="kpi-all-down" class="down">—</i></small>
+      </div>
+      <div class="stat">
+        <label>TCP 连接</label>
+        <strong id="kpi-conns">—</strong>
+      </div>
+      <div class="stat">
+        <label>UDP 会话</label>
+        <strong id="kpi-conns-udp">—</strong>
+      </div>
     </section>
 
-    <section class="card">
-      <div class="card-head"><h2>节点状态</h2><select id="status-node-select" aria-label="选择状态节点"></select></div>
-      <div class="table-wrap"><table id="node-table"><thead><tr><th>节点</th><th>类型</th><th>端口</th><th>TCP</th><th>UDP</th><th>实时速率</th></tr></thead><tbody id="node-tbody"></tbody></table></div>
-      <div id="node-cards" class="node-cards"></div>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>节点状态</h2>
+        <span class="count">共 <b id="kpi-nodes">0</b> 个</span>
+      </div>
+      <div id="node-cards" class="node-list"></div>
     </section>
   </div>
 
-  <div id="view-daily" class="app-view">
-    <section class="card"><div class="card-head"><h2>每日流量</h2></div><div id="daily-table" class="excel-wrap"></div></section>
+  <!-- 每日 -->
+  <div id="view-daily" class="view">
+    <section class="panel">
+      <div class="panel-head"><h2>每日流量</h2><span class="panel-sub">最近 60 天</span></div>
+      <div id="daily-table"></div>
+    </section>
   </div>
 
-  <div id="view-node" class="app-view">
-    <section class="card"><div class="card-head"><h2>单节点每日明细</h2><select id="node-select" aria-label="选择节点"></select></div><div id="node-daily-table" class="excel-wrap"></div></section>
+  <!-- 节点 -->
+  <div id="view-node" class="view">
+    <section class="panel">
+      <div class="panel-head">
+        <h2>节点明细</h2>
+        <select id="node-select" aria-label="选择节点"></select>
+      </div>
+      <div id="node-daily-table"></div>
+    </section>
   </div>
 </main>
 
-<nav class="bottom-nav">
-  <button class="nav-btn on" data-view="home"><span>⌂</span>首页</button>
-  <button class="nav-btn" data-view="daily"><span>▦</span>每日</button>
-  <button class="nav-btn" data-view="node"><span>◎</span>节点</button>
+<nav class="tabbar">
+  <button class="tab on" data-view="home"><span class="ico">⌂</span>首页</button>
+  <button class="tab" data-view="daily"><span class="ico">▤</span>每日</button>
+  <button class="tab" data-view="node"><span class="ico">◎</span>节点</button>
 </nav>
 <div id="toast" class="toast"></div>
 <script src="app.js"></script>
