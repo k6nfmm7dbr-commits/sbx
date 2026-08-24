@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -68,6 +69,11 @@ type Config struct {
 }
 
 // Load 读取配置。文件不存在或损坏时使用默认值并记日志（与 Python 行为一致）。
+//
+// 注意：Load 是宽松读取，仅限纯只读场景（config-get / show / daily 等）。
+// serve / config-set / config-ensure-token / apply / rules / clear 等会
+// 启动网络服务、修改配置或系统状态的路径必须使用 LoadStrict（fail-closed），
+// 防止 panel.json 意外损坏时带着默认值（0.0.0.0 + 空 token）无认证启动。
 func Load() *Config {
 	path := ConfPath()
 	c := &Config{raw: defaultConf()}
@@ -91,6 +97,48 @@ func Load() *Config {
 	}
 	c.normalize()
 	return c
+}
+
+// LoadStrict 严格读取配置（fail-closed）：
+//   - 文件不存在：返回默认值（合法的全新安装状态）；
+//   - 文件存在但 ReadFile 失败：返回错误；
+//   - 文件存在但 JSON 损坏（含尾部多余数据）：返回错误；
+//   - 文件存在且合法：正常合并读取。
+//
+// 典型事故场景：原配置含 token，文件意外损坏后宽松读取回退到
+// listen=0.0.0.0 + token="" 的默认值并无认证公网启动——strict 模式下
+// 这类路径必须拒绝启动、拒绝覆盖，把明确错误交给调用方。
+func LoadStrict() (*Config, error) {
+	path := ConfPath()
+	c := &Config{raw: defaultConf()}
+	data, err := os.ReadFile(path)
+	switch {
+	case os.IsNotExist(err):
+		slog.Info("配置不存在, 使用默认值", "path", path)
+		c.normalize()
+		return c, nil
+	case err != nil:
+		return nil, fmt.Errorf("配置文件读取失败, 拒绝使用默认值继续 (%s): %w", path, err)
+	}
+	var file map[string]any
+	dec := json.NewDecoder(strings.NewReader(string(data)))
+	dec.UseNumber()
+	if jerr := dec.Decode(&file); jerr != nil {
+		return nil, fmt.Errorf("配置文件损坏, 拒绝使用默认值继续(请修复 %s 或恢复备份): %w", path, jerr)
+	}
+	// 尾部只允许空白与 EOF：`} garbage`、多个 JSON 值同样视为损坏。
+	var extra any
+	if jerr := dec.Decode(&extra); jerr != io.EOF {
+		if jerr == nil {
+			return nil, fmt.Errorf("配置文件损坏(%s): 存在多个 JSON 值", path)
+		}
+		return nil, fmt.Errorf("配置文件损坏(%s): 尾部存在非法数据: %w", path, jerr)
+	}
+	for k, v := range file {
+		c.raw[k] = v
+	}
+	c.normalize()
+	return c, nil
 }
 
 func (c *Config) normalize() {
@@ -164,9 +212,13 @@ func (c *Config) Int(key string) int64 {
 
 // Set 写回单个配置项（int 可解析则存数字，否则存字符串——与 Python 一致），
 // 并把合并后的完整配置原子写回 CONF_PATH，权限 600。
+// 读取阶段使用 LoadStrict：panel.json 存在但损坏时拒绝修改并原样返回错误，
+// 绝不允许“损坏→回退 defaults→把默认值写回正式文件”的覆盖路径。
 func Set(key, value string) error {
-	path := ConfPath()
-	c := Load()
+	c, err := LoadStrict()
+	if err != nil {
+		return fmt.Errorf("拒绝修改配置: %w", err)
+	}
 	var v any = value
 	trimmed := strings.TrimSpace(value)
 	if i, err := strconv.ParseInt(trimmed, 10, 64); err == nil && trimmed != "" {
@@ -179,13 +231,18 @@ func Set(key, value string) error {
 		return err
 	}
 	data = append(data, '\n')
-	return fsx.WriteFileAtomic(path, data, 0o600)
+	return fsx.WriteFileAtomic(ConfPath(), data, 0o600)
 }
 
 // EnsureToken 保证 token 非空；为空则生成 32 位十六进制随机令牌并写回。
 // 替代旧安装器里的内联 python3 secrets.token_hex(16)。
+// 读取阶段使用 LoadStrict：panel.json 存在但损坏时直接报错，
+// 绝不基于 defaults 生成新文件覆盖原损坏文件（避免丢失原有配置内容）。
 func EnsureToken() (string, error) {
-	c := Load()
+	c, err := LoadStrict()
+	if err != nil {
+		return "", fmt.Errorf("拒绝生成访问令牌: %w", err)
+	}
 	tok := c.Token
 	if tok != "" {
 		return tok, nil

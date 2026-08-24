@@ -40,6 +40,9 @@ jobs:
       - name: 安装器 checksum 流程测试（提取模板真实逻辑）
         run: bash tests/checksum_flow_test.sh
 
+      - name: 安装器 commit/rollback 流程测试（提取模板真实逻辑）
+        run: bash tests/commit_flow_test.sh
+
       - name: Python reference suite（旧实现回归，src/ 仅作参考保留）
         run: python3 tests/run_all.py
 

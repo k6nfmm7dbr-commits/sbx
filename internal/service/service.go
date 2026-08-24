@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -20,8 +21,26 @@ import (
 
 // Serve 启动采集器与面板 HTTP 服务，阻塞直至 SIGINT/SIGTERM。
 // 退出顺序：停止采集器（等待在途事务提交）→ 排空 HTTP → 关闭数据库。
+//
+// v3.0.3 fail-closed：panel.json 存在但损坏时拒绝启动（绝不带默认值上线）；
+// 非 loopback 监听 + 空 token 直接拒绝启动（原为仅告警后继续，存在
+// 无认证公网暴露风险）。
 func Serve() int {
-	cfg := config.Load()
+	cfg, err := config.LoadStrict()
+	if err != nil {
+		slog.Error(err.Error())
+		return 1
+	}
+
+	if cfg.Token == "" && listenIsPublic(cfg.Listen) {
+		slog.Error("拒绝启动: 面板监听在非本机地址(" + cfg.Listen + ")且未设置 token, " +
+			"公网无认证暴露已被禁止。请先执行 sbx-core config-ensure-token 设置访问令牌, " +
+			"或将 listen 改为 127.0.0.1")
+		return 1
+	}
+	if cfg.Token == "" {
+		slog.Warn("警告: 面板监听在本机回环地址且未设置 token, 仅本机可访问")
+	}
 
 	db, err := database.Open(cfg.DB)
 	if err != nil {
@@ -33,9 +52,6 @@ func Serve() int {
 	collector := traffic.NewCollector(cfg, db)
 
 	addr := net.JoinHostPort(cfg.Listen, fmt.Sprint(cfg.Port))
-	if cfg.Token == "" && cfg.Listen != "127.0.0.1" && cfg.Listen != "::1" {
-		slog.Warn("警告: 面板监听在非本机地址且未设置 token, 任何人都能读取统计数据")
-	}
 
 	_, hs := api.New(cfg, db, collector)
 
@@ -82,4 +98,24 @@ func Serve() int {
 		slog.Warn("HTTP 关闭超时", "err", err)
 	}
 	return 0
+}
+
+// listenIsPublic 判断监听地址是否面向非本机（fail-closed 口径）：
+//   - 127.x.x.x / ::1 / localhost → 非公网（false）；
+//   - 0.0.0.0 / :: / 公网 IP / 空串 / 其它不可解析主机名 → 按公网处理（true）。
+//
+// 空 token 时只有确认回环的监听才被允许；无法证明是回环的一律拒绝，
+// 避免“看起来像主机名实际暴露公网”的边角案例。
+func listenIsPublic(listen string) bool {
+	l := strings.ToLower(strings.TrimSpace(listen))
+	switch l {
+	case "":
+		return true // 未配置等价于全接口监听
+	case "localhost", "::1":
+		return false
+	}
+	if ip := net.ParseIP(l); ip != nil {
+		return !ip.IsLoopback()
+	}
+	return true
 }

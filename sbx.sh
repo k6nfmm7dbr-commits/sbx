@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 APP_NAME="SBX"
-APP_VERSION="3.0.2"
+APP_VERSION="3.0.3"
 RAW_URL="${SBX_RAW_URL:-https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh}"
 
 # SBX_ROOT 仅用于测试/沙箱安装（把整套目录挪到前缀下），正常安装留空
@@ -500,7 +500,13 @@ prompt_sni() {
   echo "$s"
 }
 
-# 通用提交流程：校验 → 备份 → 提交 config → 提交 nodes → 重启 → 重建计数规则
+# 通用提交流程：校验 → 备份 → 提交 config → 提交 nodes → 重启确认 → 才删备份
+# v3.0.3 修复（P0）：
+#   1) 备份在整个操作真正成功之前绝不删除——旧实现先删 .bak 再 restart，
+#      restart 失败后的“回滚”实际上无备份可用，rollback 名存实亡；
+#   2) 备份创建失败立即中止 mutation——绝不允许在无备份的情况下改动正式文件；
+#   3) 原文件不存在属合法状态（全新安装），按 original_exists=false 记录，
+#      回滚时恢复为“不存在”；但“存在却备份失败”必须中止。
 # >>> commit-node-flow（tests/commit_flow_test.sh 提取本段做回滚一致性测试）
 commit_node() {
   local cand="$SB_CONF.candidate"
@@ -511,29 +517,57 @@ commit_node() {
     core_node rollback >/dev/null 2>&1 || true
     return 1
   fi
-  # 同时备份配置与节点数据源：任一环节失败都能整体回滚，避免两者错位
-  cp -f "$SB_CONF" "$SB_CONF.bak" 2>/dev/null || true
-  cp -f "$NODES_JSON" "$NODES_JSON.bak" 2>/dev/null || true
+  # ---- 备份阶段：任一备份创建失败都必须立即中止，正式文件一个都不动 ----
+  local conf_existed=0 nodes_existed=0
+  if [[ -f "$SB_CONF" ]]; then
+    conf_existed=1
+    cp -f "$SB_CONF" "$SB_CONF.bak" || { warn "config 备份创建失败，已中止本次修改（正式文件未被改动）"; return 1; }
+  fi
+  if [[ -f "$NODES_JSON" ]]; then
+    nodes_existed=1
+    cp -f "$NODES_JSON" "$NODES_JSON.bak" || { warn "nodes 备份创建失败，已中止本次修改（正式文件未被改动）"; return 1; }
+  fi
+
+  restore_old() {
+    core_node rollback >/dev/null 2>&1 || true
+    # 逐项尽力恢复：单项失败不中断其余恢复动作，最后统一以非 0 返回
+    if [[ "$conf_existed" == 1 ]]; then
+      cp -f "$SB_CONF.bak" "$SB_CONF" || warn "config 回滚失败! 请手工从 $SB_CONF.bak 恢复"
+    else
+      rm -f "$SB_CONF"
+    fi
+    if [[ "$nodes_existed" == 1 ]]; then
+      cp -f "$NODES_JSON.bak" "$NODES_JSON" || warn "nodes 回滚失败! 请手工从 $NODES_JSON.bak 恢复"
+    else
+      rm -f "$NODES_JSON"
+    fi
+    rm -f "$NODES_JSON.candidate"
+  }
+
   mv -f "$cand" "$SB_CONF"
   # config 已提交；nodes 提交失败绝不允许静默继续（否则两者状态分叉）
   local cerr
   if ! cerr=$("$CORE_BIN" node commit 2>&1); then
     warn "节点数据提交失败，正在回滚: $cerr"
-    cp -f "$SB_CONF.bak" "$SB_CONF" 2>/dev/null || true
-    cp -f "$NODES_JSON.bak" "$NODES_JSON" 2>/dev/null || true
-    rm -f "$NODES_JSON.candidate"
+    restore_old
     sb_restart || true   # 让 sing-box 回到原有效配置
     warn "已回滚到操作前状态（config 与 nodes 保持一致）"
     return 1
   fi
-  rm -f "$SB_CONF.bak" "$NODES_JSON.bak" 2>/dev/null || true
+  # restart 失败时 .bak 必须仍在——这是 rollback 能真正完成的唯一保证
   if ! sb_restart; then
     warn "sing-box 启动失败，回滚配置与节点数据"
-    cp -f "$SB_CONF.bak" "$SB_CONF" 2>/dev/null || true
-    cp -f "$NODES_JSON.bak" "$NODES_JSON" 2>/dev/null || true
-    sb_restart || true
+    restore_old
+    if sb_restart; then
+      warn "已回滚到操作前状态，旧配置已恢复运行（config 与 nodes 保持一致）"
+    else
+      warn "严重: 已恢复旧配置文件，但 sing-box 仍未运行！请检查 $SB_CONF 与服务日志后手动处理"
+      warn "已回滚到操作前状态（config 与 nodes 保持一致）"
+    fi
     return 1
   fi
+  # 整个操作真正成功以后才允许删除备份
+  rm -f "$SB_CONF.bak" "$NODES_JSON.bak" 2>/dev/null || true
   fw_apply
   panel_running && svc_do restart sbx-panel || true
   return 0

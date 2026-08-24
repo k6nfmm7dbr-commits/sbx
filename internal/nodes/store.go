@@ -118,6 +118,10 @@ func decodeNodesFile(data []byte) ([]Node, bool, error) {
 
 // LoadPanelNodes 对齐 panel.load_nodes：容忍 {"nodes":[...]} 包装，
 // 且只保留含 "id" 字段的对象。
+//
+// 注意：宽松读取仅限纯展示场景。所有会生成/覆盖防火墙规则
+// （nftables / iptables）或改写 counter_state / epoch 的路径必须使用
+// LoadPanelNodesStrict。
 func LoadPanelNodes(path string) []Node {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -145,6 +149,45 @@ func LoadPanelNodes(path string) []Node {
 		}
 	}
 	return out
+}
+
+// LoadPanelNodesStrict 严格读取面板节点列表（元素过滤规则与宽松版一致）：
+//   - 文件不存在：返回空列表（全新安装合法状态，允许以 0 节点首次建规则）；
+//   - 文件存在但读取失败 / JSON 损坏 / 顶层结构错误：返回错误。
+//
+// 典型事故场景：nodes.json 损坏 → 宽松读取得到空列表 → Apply 以 0 节点重建
+// nftables/iptables 并清掉全部 per-node counter 基线。strict 模式下这类路径
+// 必须在改动任何防火墙状态之前中止。
+func LoadPanelNodesStrict(path string) ([]Node, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil // 不存在 = 空列表（与全新安装行为一致）
+		}
+		return nil, fmt.Errorf("nodes.json 读取失败: %w", err)
+	}
+	v, err := DecodeJSON(data)
+	if err != nil {
+		return nil, fmt.Errorf("nodes.json 损坏, 拒绝据此修改防火墙规则(请修复 %s): %w", path, err)
+	}
+	if m, ok := v.(map[string]any); ok {
+		v = m["nodes"]
+	}
+	list, ok := v.([]any)
+	if !ok {
+		return nil, fmt.Errorf("nodes.json 结构错误, 拒绝据此修改防火墙规则(%s): 顶层必须是数组或 {\"nodes\":[...]}", path)
+	}
+	out := make([]Node, 0, len(list))
+	for _, it := range list {
+		m, ok := it.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, has := m["id"]; has {
+			out = append(out, Node(m))
+		}
+	}
+	return out, nil
 }
 
 // SaveNodesFile 原子写 nodes.json（indent=2 + 结尾换行，Python 兼容格式）。

@@ -136,10 +136,20 @@ func Reset(scope string) error {
 }
 
 // Rules 生成计数规则文件（旧 cmd_rules），返回世代号。
+// 配置与 nodes.json 均为严格读取：任一文件存在但损坏时拒绝生成，
+// 防止以空节点列表重建规则、清空 per-node counter 基线。
+// epoch 使用 UnixNano（v3.0.3 起弃用秒级）：同一秒内连续两次 Apply
+// 不再产生相同世代号，Collector 能可靠识别规则集换代。
 func Rules() (uint64, error) {
-	cfg := config.Load()
-	list := nodes.LoadPanelNodes(cfg.NodesFile)
-	epoch := uint64(time.Now().Unix())
+	cfg, err := config.LoadStrict()
+	if err != nil {
+		return 0, err
+	}
+	list, err := nodes.LoadPanelNodesStrict(cfg.NodesFile)
+	if err != nil {
+		return 0, err
+	}
+	epoch := uint64(time.Now().UnixNano())
 	if err := os.MkdirAll(config.AppDir(), 0o755); err != nil {
 		return 0, err
 	}
@@ -156,27 +166,30 @@ func Rules() (uint64, error) {
 	return epoch, nil
 }
 
-// Apply 先强制采样一次落库旧计数，再重建并应用规则（旧 cmd_apply）。
+// Apply 先把旧规则的最后一轮计数强制落库，再重建并应用规则（旧 cmd_apply）。
+//
+// v3.0.3 安全闸门：
+//  1. 配置 / nodes.json 损坏 → 立即中止，不碰防火墙与 counter_state；
+//  2. 最终采样失败（SQLite 写入失败、provider 失败、部分快照等）→ 中止，
+//     内核计数器原样保留，下一轮还有机会重新采集；仅明确的 LookupError
+//     （旧规则不存在/首次安装）放行。
 func Apply() int {
-	cfg := config.Load()
+	cfg, err := config.LoadStrict()
+	if err != nil {
+		slog.Error(err.Error())
+		return 1
+	}
+	// 损坏的 nodes.json 绝不能被宽松读取当成空列表：那会以 0 节点重建
+	// 防火墙规则并清空全部 per-node 计数基线。先严格校验再动手。
+	if _, err := nodes.LoadPanelNodesStrict(cfg.NodesFile); err != nil {
+		slog.Error("nodes.json 校验失败, 已中止 apply(规则/计数器/epoch 均未改动)", "err", err)
+		return 1
+	}
 
-	// 先把旧规则的计数落库；失败不阻塞重建（LookupError 静默）。
-	func() {
-		db, closer, err := openDB(cfg)
-		if err != nil {
-			slog.Warn("重建前采样失败(可忽略):", "err", err)
-			return
-		}
-		defer closer()
-		c := traffic.NewCollector(cfg, db)
-		tickErr := c.Tick(context.Background())
-		switch {
-		case tickErr == nil:
-		case firewall.IsLookup(tickErr):
-		default:
-			slog.Warn("重建前采样失败(可忽略):", "err", tickErr)
-		}
-	}()
+	if err := finalSampleForRebuild(context.Background(), cfg); err != nil {
+		slog.Error("重建前最终采样失败, 已中止 apply(内核计数器保留, 排除故障后重试)", "err", err)
+		return 1
+	}
 
 	if _, err := Rules(); err != nil {
 		slog.Error("规则生成失败", "err", err)
@@ -203,9 +216,38 @@ func Apply() int {
 	return 0
 }
 
+// finalSampleForRebuild 在重建规则前做最后一次采样落库。
+// 明确的 LookupError（计数器/规则不存在，即首次安装或规则被外部清除）允许继续；
+// 其余任何错误（数据库打开/写入失败、provider 执行失败、部分快照等）必须上抛，
+// 由调用方中止重建——宁可推迟一轮重建，也不能丢掉旧 counter 的最后一段流量。
+func finalSampleForRebuild(ctx context.Context, cfg *config.Config) error {
+	db, closer, err := openDB(cfg)
+	if err != nil {
+		return fmt.Errorf("数据库打开失败: %w", err)
+	}
+	defer closer()
+	c := traffic.NewCollector(cfg, db)
+	tickErr := c.Tick(ctx)
+	switch {
+	case tickErr == nil:
+		return nil
+	case firewall.IsLookup(tickErr):
+		slog.Info("计数规则不存在(首次安装?), 跳过重建前采样", "err", tickErr)
+		return nil
+	default:
+		return fmt.Errorf("最终采样落库失败: %w", tickErr)
+	}
+}
+
 // Clear 移除内核计数规则，保留历史统计（旧 cmd_clear）。
+// 会改动系统防火墙状态，配置读取同样 strict：panel.json 存在但损坏时
+// 拒绝在默认路径猜测下执行清理动作。
 func Clear() int {
-	cfg := config.Load()
+	cfg, err := config.LoadStrict()
+	if err != nil {
+		slog.Error(err.Error())
+		return 1
+	}
 	func() {
 		db, closer, err := openDB(cfg)
 		if err != nil {
