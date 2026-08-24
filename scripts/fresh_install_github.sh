@@ -29,7 +29,7 @@ curl -fsS --max-time 10 "http://127.0.0.1:$PORT/api/live?token=$(python3 -c "imp
 import json,sys
 d=json.load(sys.stdin)
 assert d['healthy'] is True, d
-assert any(x['id']==n_id for x in d['nodes']), d
+assert any(x["id"]==1 for x in d["nodes"]), d
 print('live ok, nodes:', [x['id'] for x in d['nodes']], 'healthy:', d['healthy'])"; ck "/api/live healthy 且含节点" $?
 
 echo "== 清理卸载 =="

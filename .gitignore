@@ -21,3 +21,4 @@ certs/
 # 编辑器
 .DS_Store
 *.swp
+dist/
