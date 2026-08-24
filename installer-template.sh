@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 APP_NAME="SBX"
-APP_VERSION="3.0.1"
+APP_VERSION="3.0.2"
 RAW_URL="${SBX_RAW_URL:-https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh}"
 
 # SBX_ROOT 仅用于测试/沙箱安装（把整套目录挪到前缀下），正常安装留空
@@ -500,7 +500,8 @@ prompt_sni() {
   echo "$s"
 }
 
-# 通用提交流程：校验 → 落盘 → 重启 → 重建计数规则
+# 通用提交流程：校验 → 备份 → 提交 config → 提交 nodes → 重启 → 重建计数规则
+# >>> commit-node-flow（tests/commit_flow_test.sh 提取本段做回滚一致性测试）
 commit_node() {
   local cand="$SB_CONF.candidate"
   [[ -f "$cand" ]] || { warn "未生成候选配置"; return 1; }
@@ -514,7 +515,18 @@ commit_node() {
   cp -f "$SB_CONF" "$SB_CONF.bak" 2>/dev/null || true
   cp -f "$NODES_JSON" "$NODES_JSON.bak" 2>/dev/null || true
   mv -f "$cand" "$SB_CONF"
-  core_node commit >/dev/null
+  # config 已提交；nodes 提交失败绝不允许静默继续（否则两者状态分叉）
+  local cerr
+  if ! cerr=$("$CORE_BIN" node commit 2>&1); then
+    warn "节点数据提交失败，正在回滚: $cerr"
+    cp -f "$SB_CONF.bak" "$SB_CONF" 2>/dev/null || true
+    cp -f "$NODES_JSON.bak" "$NODES_JSON" 2>/dev/null || true
+    rm -f "$NODES_JSON.candidate"
+    sb_restart || true   # 让 sing-box 回到原有效配置
+    warn "已回滚到操作前状态（config 与 nodes 保持一致）"
+    return 1
+  fi
+  rm -f "$SB_CONF.bak" "$NODES_JSON.bak" 2>/dev/null || true
   if ! sb_restart; then
     warn "sing-box 启动失败，回滚配置与节点数据"
     cp -f "$SB_CONF.bak" "$SB_CONF" 2>/dev/null || true
@@ -526,6 +538,7 @@ commit_node() {
   panel_running && svc_do restart sbx-panel || true
   return 0
 }
+# <<< commit-node-flow
 
 add_vless() {
   local port name sni uuid kp priv pub sid
@@ -1189,7 +1202,18 @@ apply_update() {
     core_node sync >/dev/null 2>&1 || true
     if [[ -f "$SB_CONF.candidate" ]]; then
       if "$SB_BIN" check -c "$SB_CONF.candidate" >/dev/null 2>&1; then
-        mv -f "$SB_CONF.candidate" "$SB_CONF"; core_node commit >/dev/null 2>&1 || true
+        cp -f "$SB_CONF" "$SB_CONF.upd-bak" 2>/dev/null || true
+        if mv -f "$SB_CONF.candidate" "$SB_CONF" \
+           && "$CORE_BIN" node commit >/dev/null 2>&1; then
+          rm -f "$SB_CONF.upd-bak"
+        else
+          # 升级路径的提交失败同样必须回滚，避免 config/nodes 分叉
+          warn "升级期节点提交失败，已恢复原配置"
+          cp -f "$SB_CONF.upd-bak" "$SB_CONF" 2>/dev/null || true
+          rm -f "$SB_CONF.candidate" "$NODES_JSON.candidate"
+          "$CORE_BIN" node rollback >/dev/null 2>&1 || true
+          rm -f "$SB_CONF.upd-bak"
+        fi
       else
         rm -f "$SB_CONF.candidate"; core_node rollback >/dev/null 2>&1 || true
       fi

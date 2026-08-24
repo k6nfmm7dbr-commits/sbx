@@ -74,17 +74,37 @@ func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
 	// rename 后 fsync 父目录，持久化新的目录项。
 	// 个别文件系统对目录 Sync 返回“不支持”（EINVAL/ENOTSUP/EOPNOTSUPP），
 	// 这类明确的不支持错误可以忽略；正常 I/O 错误必须上抛。
-	if d, derr := os.Open(dir); derr == nil {
-		serr := d.Sync()
-		cerr := d.Close()
-		if serr != nil && !isUnsupportedSync(serr) {
-			return fmt.Errorf("目录 fsync 失败: %w", serr)
+	if err := syncDir(dir); err != nil {
+		return err
+	}
+	return nil
+}
+
+// RenameAtomic 将已就绪的文件原子改名到目标位置（同文件系统内 rename），
+// 成功后 fsync 目标父目录以持久化目录项。真实 I/O 错误会原样返回。
+func RenameAtomic(oldpath, newpath string) error {
+	if err := os.Rename(oldpath, newpath); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(newpath))
+}
+
+// syncDir 对目录执行 fsync；仅忽略“文件系统明确不支持”类错误。
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
 		}
-		if cerr != nil && !isUnsupportedSync(cerr) {
-			return fmt.Errorf("目录句柄关闭失败: %w", cerr)
-		}
-	} else if !errors.Is(derr, os.ErrNotExist) {
-		return fmt.Errorf("打开父目录失败: %w", derr)
+		return fmt.Errorf("打开父目录失败: %w", err)
+	}
+	serr := d.Sync()
+	cerr := d.Close()
+	if serr != nil && !isUnsupportedSync(serr) {
+		return fmt.Errorf("目录 fsync 失败: %w", serr)
+	}
+	if cerr != nil && !isUnsupportedSync(cerr) {
+		return fmt.Errorf("目录句柄关闭失败: %w", cerr)
 	}
 	return nil
 }

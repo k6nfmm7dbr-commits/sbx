@@ -3,6 +3,7 @@ package traffic
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"sort"
 	"strconv"
@@ -268,6 +269,22 @@ func (c *Collector) Tick(ctx context.Context) error {
 	if !freshRuleset {
 		if state, err = c.loadState(ctx); err != nil {
 			return err
+		}
+		// 跨进程重启保护：同一 epoch 内，历史基线中存在的计数器若在本轮
+		// 快照中缺失，说明快照不完整（典型场景：服务重启后 ip6tables 单侧
+		// 读取失败被上游当作完整快照返回）。此时禁止提交任何变更，
+		// 否则 DELETE+重写的 counter_state 会丢掉缺失家族的基线，
+		// 恢复后该家族被当成新计数器全量重复入账。
+		//
+		// 合法消失只有一条路径：规则重建 ⇒ epoch 变化（上方 freshRuleset
+		// 分支已整体换基线，不会走到这里）。本系统的计数器集合由单次
+		// gen_nft/gen_iptables 一次性生成，同 epoch 内集合恒定。
+		if len(state) > 0 {
+			for name := range state {
+				if _, ok := snapshot[name]; !ok {
+					return fmt.Errorf("快照缺少既有计数器 %s（epoch 未变化）——疑似部分读取, 本轮放弃提交", name)
+				}
+			}
 		}
 	}
 

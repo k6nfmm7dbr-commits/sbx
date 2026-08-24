@@ -3,8 +3,11 @@
 package nodes
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -82,9 +85,13 @@ func LoadToolNodesStrict(path string) ([]Node, error) {
 }
 
 // decodeNodesFile 解析顶层数组；返回 (列表, 是否为合法 JSON, 错误)。
+// 严格模式要求：一个合法 JSON value 之后只允许空白与 EOF——
+// `[] garbage`、`[] {}` 这类 trailing data 一律拒绝。
 func decodeNodesFile(data []byte) ([]Node, bool, error) {
-	v, err := DecodeJSON(data)
-	if err != nil {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
 		return nil, false, err
 	}
 	list, ok := v.([]any)
@@ -99,7 +106,14 @@ func decodeNodesFile(data []byte) ([]Node, bool, error) {
 		}
 		out = append(out, Node(m))
 	}
-	return out, true, nil
+	var extra any
+	if err := dec.Decode(&extra); err != nil {
+		if errors.Is(err, io.EOF) {
+			return out, true, nil
+		}
+		return nil, true, fmt.Errorf("尾部存在非法数据: %w", err)
+	}
+	return nil, true, fmt.Errorf("存在多个 JSON 值")
 }
 
 // LoadPanelNodes 对齐 panel.load_nodes：容忍 {"nodes":[...]} 包装，

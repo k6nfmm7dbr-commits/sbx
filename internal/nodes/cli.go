@@ -7,6 +7,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/k6nfmm7dbr-commits/sbx/internal/fsx"
 )
 
 // CLI 是 nodes_tool.py 的 Go 版命令入口。stdout/stderr 可注入便于测试。
@@ -351,7 +353,8 @@ func (c *CLI) cmdSync() int {
 func (c *CLI) cmdCommit() int {
 	cand := c.Store.NodesPath() + ".candidate"
 	if _, err := os.Stat(cand); err == nil {
-		if err := os.Rename(cand, c.Store.NodesPath()); err != nil {
+		// durable rename：rename 成功后 fsync 父目录，掉电场景下目录项不丢
+		if err := fsx.RenameAtomic(cand, c.Store.NodesPath()); err != nil {
 			return c.fail(err.Error())
 		}
 	}
