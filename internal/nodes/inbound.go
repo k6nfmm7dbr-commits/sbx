@@ -139,7 +139,7 @@ func RebuildConfig(store *Store, list []Node) (map[string]any, error) {
 // WriteCandidate 写出候选配置文件（SB_CONF.candidate），返回路径。
 func WriteCandidate(store *Store, cfg map[string]any) (string, error) {
 	path := store.SBConf + ".candidate"
-	if err := saveJSONFile(path, cfg, 0o644); err != nil {
+	if err := saveJSONFile(path, cfg, 0o600); err != nil {
 		return "", err
 	}
 	return path, nil
@@ -152,7 +152,7 @@ func WriteNodesCandidate(store *Store, list []Node) (string, error) {
 	for i, n := range list {
 		arr[i] = map[string]any(n)
 	}
-	if err := saveJSONFile(path, arr, 0o644); err != nil {
+	if err := saveJSONFile(path, arr, 0o600); err != nil {
 		return "", err
 	}
 	return path, nil

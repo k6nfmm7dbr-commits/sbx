@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 APP_NAME="SBX"
-APP_VERSION="3.0.0"
+APP_VERSION="3.0.1"
 RAW_URL="${SBX_RAW_URL:-https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh}"
 
 # SBX_ROOT 仅用于测试/沙箱安装（把整套目录挪到前缀下），正常安装留空
@@ -133,10 +133,31 @@ rand_uuid() {
 
 core_node() { "$CORE_BIN" node "$@"; }
 
+# >>> checksum-helpers（CI/tests/checksum_flow_test.sh 提取本区块做一致性测试）
 sha256_of() {  # sha256_of <file>
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
   else openssl dgst -sha256 -r "$1" | awk '{print $1}'; fi
 }
+
+verify_core_checksum() {  # <binary_file> <SHA256SUMS_file> <binary_name>
+  local f="$1" sums="$2" name="$3" n expect got
+  [[ -s "$f" ]] || { warn "二进制为空或不存在: $f"; return 1; }
+  [[ -s "$sums" ]] || { warn "SHA256SUMS 缺失或为空"; return 1; }
+  # 目标 binary 必须在 SHA256SUMS 中恰好出现一次（缺失/重复/格式异常都算失败）
+  n=$(awk -v x="$name" '$2==x{c++} END{print c+0}' "$sums")
+  if [[ "$n" != "1" ]]; then
+    warn "SHA256SUMS 中 $name 出现 ${n} 次（应为 1 次）"
+    return 1
+  fi
+  expect=$(awk -v x="$name" '$2==x{print $1}' "$sums")
+  got=$(sha256_of "$f")
+  if [[ -z "$expect" || "$expect" != "$got" ]]; then
+    warn "校验和不匹配: 期望 ${expect:-空} 实得 $got"
+    return 1
+  fi
+  return 0
+}
+# <<< checksum-helpers
 
 valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535)); }
 
@@ -275,7 +296,8 @@ install_sbx_core() {
   # 开发/测试：直接使用本地构建的二进制
   if [[ -n "${SBX_CORE_BIN:-}" && -x "${SBX_CORE_BIN}" ]]; then
     cat "$SBX_CORE_BIN" > "$CORE_BIN.tmp.$$" && chmod 0755 "$CORE_BIN.tmp.$$" \
-      && mv -f "$CORE_BIN.tmp.$$" "$CORE_BIN"
+      && mv -f "$CORE_BIN.tmp.$$" "$CORE_BIN" \
+      || die "本地 sbx-core 拷贝失败；现有安装未被改动"
     ok "使用本地 sbx-core: $("$CORE_BIN" version 2>/dev/null | head -1)"
     return 0
   fi
@@ -285,35 +307,35 @@ install_sbx_core() {
     return 0
   fi
 
-  local arch url sum_url tmp bin_ok=0
+  local arch name tmp dl rc=0
   arch="$(sb_arch)"
+  name="sbx-core-linux-${arch}"
   tmp=$(mktemp -d)
-  # armv6 与 amd64/arm64 同仓发布（Go 纯 Go SQLite 全架构支持）
-  url="$RELEASE_BASE/v${APP_VERSION}/sbx-core-linux-${arch}"
-  sum_url="$RELEASE_BASE/v${APP_VERSION}/SHA256SUMS"
+  # 临时文件放在目标目录内：最后的 mv 是同文件系统 rename，保证原子性
+  dl="$BIN_DIR/.sbx-core.dl.$$"
+  cleanup() { rm -rf "$tmp" "$dl" 2>/dev/null || true; }
+
+  # 全程不触碰现有安装：下载 → 校验 → 自检全部通过后才原子替换
   info "下载 sbx-core (${arch})..."
-  if curl -fsSL -m 300 -o "$tmp/core" "$(gh_url "$url")" \
-     && curl -fsSL -m 60 -o "$tmp/SHA256SUMS" "$(gh_url "$sum_url")"; then
-    local expect got
-    expect=$(awk -v f="sbx-core-linux-${arch}" '$2==f{print $1}' "$tmp/SHA256SUMS")
-    got=$(sha256_of "$tmp/core")
-    if [[ -n "$expect" && "$expect" == "$got" ]]; then
-      bin_ok=1
-    else
-      warn "SHA256 校验失败 (期望 $expect 实得 $got)"
-    fi
-  fi
-  if [[ "$bin_ok" != 1 ]]; then
-    rm -rf "$tmp"
-    die "下载 sbx-core 失败或校验不通过（可设置 SBX_GH_PROXY 使用镜像；现有安装未被改动）"
-  fi
-  chmod 0755 "$tmp/core"
-  # 原子替换：先备份旧版，验证可执行后再提交，失败回滚
+  curl -fsSL -m 300 -o "$dl" "$(gh_url "$RELEASE_BASE/v${APP_VERSION}/${name}")" \
+    || { cleanup; die "下载 sbx-core 失败（可设置 SBX_GH_PROXY 使用镜像）；现有安装未被改动"; }
+  curl -fsSL -m 60 -o "$tmp/SHA256SUMS" "$(gh_url "$RELEASE_BASE/v${APP_VERSION}/SHA256SUMS")" \
+    || { cleanup; die "下载 SHA256SUMS 失败；现有安装未被改动"; }
+  verify_core_checksum "$dl" "$tmp/SHA256SUMS" "$name" \
+    || { cleanup; die "sbx-core 校验失败；现有安装未被改动"; }
+
+  chmod 0755 "$dl"
+  # 替换前自检：新二进制必须能在本机执行
+  "$dl" version >/dev/null 2>&1 \
+    || { cleanup; die "sbx-core 自检失败（架构或 libc 不匹配）；现有安装未被改动"; }
+
+  # 原子替换；保留旧版备份以备极端回滚
   [[ -x "$CORE_BIN" ]] && cp -f "$CORE_BIN" "$CORE_BIN.bak" 2>/dev/null || true
-  mv -f "$tmp/core" "$CORE_BIN" && chmod 0755 "$CORE_BIN"; rm -rf "$tmp"
+  mv -f "$dl" "$CORE_BIN"
+  rm -rf "$tmp"
   if ! "$CORE_BIN" version >/dev/null 2>&1; then
-    [[ -f "$CORE_BIN.bak" ]] && { mv -f "$CORE_BIN.bak" "$CORE_BIN"; warn "新二进制不可用，已回滚"; }
-    die "sbx-core 无法运行（架构或 libc 不匹配）"
+    [[ -f "$CORE_BIN.bak" ]] && { mv -f "$CORE_BIN.bak" "$CORE_BIN"; warn "新二进制异常，已回滚"; }
+    die "sbx-core 安装后自检失败"
   fi
   rm -f "$CORE_BIN.bak"
   ok "sbx-core 安装完成: $("$CORE_BIN" version | head -1)"

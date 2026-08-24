@@ -49,27 +49,57 @@ func DecodeJSON(data []byte) (any, error) {
 	return v, nil
 }
 
-// LoadToolNodes 对齐 nodes_tool.load_nodes：只接受顶层数组。
+// LoadToolNodes 对齐 nodes_tool.load_nodes：只接受顶层数组，任何异常静默返回 nil。
+// 仅限只读场景（list/count/last/info/links 等）；修改类操作必须用 LoadToolNodesStrict。
 func LoadToolNodes(path string) []Node {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}
-	v, err := DecodeJSON(data)
+	list, _, err := decodeNodesFile(data)
 	if err != nil {
 		return nil
 	}
+	return list
+}
+
+// LoadToolNodesStrict 严格读取：文件不存在视为空列表（保持“全新安装可直接添加”）；
+// 但存在却损坏/顶层结构错误时返回错误——修改类操作必须据此拒绝覆盖原文件，
+// 防止把损坏误判为空而写回只剩新数据的文件。
+func LoadToolNodesStrict(path string) ([]Node, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil // 不存在 = 空列表（与旧行为一致）
+		}
+		return nil, fmt.Errorf("nodes.json 读取失败: %w", err)
+	}
+	list, _, err := decodeNodesFile(data)
+	if err != nil {
+		return nil, fmt.Errorf("nodes.json 解析失败，已拒绝修改。原文件未被覆盖: %w", err)
+	}
+	return list, nil
+}
+
+// decodeNodesFile 解析顶层数组；返回 (列表, 是否为合法 JSON, 错误)。
+func decodeNodesFile(data []byte) ([]Node, bool, error) {
+	v, err := DecodeJSON(data)
+	if err != nil {
+		return nil, false, err
+	}
 	list, ok := v.([]any)
 	if !ok {
-		return nil
+		return nil, true, fmt.Errorf("顶层必须是数组")
 	}
 	out := make([]Node, 0, len(list))
 	for _, it := range list {
-		if m, ok := it.(map[string]any); ok {
-			out = append(out, Node(m))
+		m, isMap := it.(map[string]any)
+		if !isMap {
+			return nil, true, fmt.Errorf("数组元素必须是对象")
 		}
+		out = append(out, Node(m))
 	}
-	return out
+	return out, true, nil
 }
 
 // LoadPanelNodes 对齐 panel.load_nodes：容忍 {"nodes":[...]} 包装，
@@ -109,7 +139,7 @@ func SaveNodesFile(path string, list []Node) error {
 	for i, n := range list {
 		arr[i] = map[string]any(n)
 	}
-	return saveJSONFile(path, arr, 0o644)
+	return saveJSONFile(path, arr, 0o600)
 }
 
 // LoadState 读取 state.json（损坏时返回空表，不报错——对齐 read_json 容错）。
@@ -131,7 +161,7 @@ func LoadState(path string) map[string]any {
 
 // SaveState 原子写 state.json。
 func SaveState(path string, st map[string]any) error {
-	return saveJSONFile(path, st, 0o644)
+	return saveJSONFile(path, st, 0o600)
 }
 
 // NextID 单调递增分配节点 ID，永不回收；立即持久化游标到 state.json。

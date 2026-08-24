@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 func osStat(path string) (os.FileInfo, error) { return os.Stat(path) }
@@ -26,7 +27,15 @@ var iptLine = regexp.MustCompile(`^\s*(\d+)\s+(\d+)\s+.*?/\*\s*(sbx:[A-Za-z0-9_:
 
 // Iptables 通过 exec iptables/ip6tables 读取自定义链计数（完整保留回退路径，
 // 兼容 iptables-nft 与 iptables-legacy）。
-type Iptables struct{ scriptPath string }
+type Iptables struct {
+	scriptPath string
+
+	// enabled 记录“曾经成功读到的 family”。一旦启用，后续任何一轮失败
+	// 都必须让整轮 Read 失败（防止 partial snapshot 破坏 baseline）；
+	// 从未成功的 family 视为不存在（纯 IPv4 环境不受影响）。
+	mu      sync.Mutex
+	enabled map[string]bool
+}
 
 // NewIptables 构造回退后端，scriptPath 用于 repair()。
 func NewIptables(scriptPath string) *Iptables { return &Iptables{scriptPath: scriptPath} }
@@ -68,23 +77,43 @@ func (p *Iptables) readOne(ctx context.Context, binary, family string) (Snapshot
 }
 
 func (p *Iptables) Read(ctx context.Context) (Snapshot, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.enabled == nil {
+		p.enabled = map[string]bool{}
+	}
 	res := Snapshot{}
-	ok := false
+	sawAny := false
 	for _, pair := range [][2]string{{"iptables", "v4"}, {"ip6tables", "v6"}} {
 		binary, fam := pair[0], pair[1]
+		// 命令永久缺失：不参与统计（与旧行为一致，纯 IPv4 机器不受影响）。
 		if !whichFn(binary) {
 			continue
 		}
 		part, err := p.readOne(ctx, binary, fam)
 		if err != nil {
-			continue // LookupError -> 尝试下一个 family
+			// 该 family 此前已成功纳入统计 → 本轮任何失败都必须整轮失败：
+			// 绝不提交缺一半的 snapshot（partial snapshot 会摧毁 baseline，
+			// 导致恢复后该 family 被当成新计数器全量重复入账）。
+			// 尚未启用过的失败按“缺失”处理，避免把暂时故障误判成永久存在。
+			if p.enabled[fam] {
+				// 注意：此处刻意用 %s 切断错误链——底层多为 ErrLookup
+				// （链缺失），若被 errors.As 穿透，Run 循环会把“已启用来源的
+				// 暂时故障”误判为“规则不存在”而触发 repair 语义。
+				return nil, fmt.Errorf("%s 读取失败(该来源此前已纳入统计, 本轮放弃提交): %v", binary, err)
+			}
+			continue
 		}
+		// 首次成功后该 family 成为必须项；进程生命周期内不降级
+		// （临时 exec 失败不能被误判成“命令不存在”）。
+		p.enabled[fam] = true
 		for k, v := range part {
 			res[k] = v
 		}
-		ok = true
+		sawAny = true
 	}
-	if !ok {
+	if !sawAny {
 		return nil, &ErrLookup{Msg: "iptables 计数链不存在"}
 	}
 	return res, nil

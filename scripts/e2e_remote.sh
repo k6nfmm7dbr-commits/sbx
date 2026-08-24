@@ -32,7 +32,7 @@ ck "安装脚本退出码 0" $?
 grep -q "安装完成" /tmp/e2e-install.log; ck "输出含「安装完成」" $?
 [[ -x "$CORE" ]]; ck "sbx-core 已安装" $?
 [[ -x "$ROOT/usr/local/bin/sing-box" ]]; ck "sing-box 已安装" $?
-"$CORE" version | grep -q "v3.0.0"; ck "core 版本 3.0.0 ($("$CORE" version))" $?
+"$CORE" version | grep -q "v3.0.1"; ck "core 版本 3.0.1 ($("$CORE" version))" $?
 python3 -c "import json;d=json.load(open('$PANEL_CONF'));assert d['token'] and 1<=int(d['port'])<=65535"
 ck "panel.json 合法(token+port)" $?
 

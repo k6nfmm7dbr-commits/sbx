@@ -28,6 +28,18 @@ jobs:
       - name: go test (race)
         run: go test -race ./...
 
+      - name: sbx.sh 与模板同步检查（防 drift）
+        run: |
+          python3 build.py >/dev/null
+          git diff --exit-code -- sbx.sh installer-template.sh || {
+            echo "::error::sbx.sh 与 installer-template.sh 不同步，请运行 python3 build.py";
+            git diff -- sbx.sh | head -40;
+            exit 1;
+          }
+
+      - name: 安装器 checksum 流程测试（提取模板真实逻辑）
+        run: bash tests/checksum_flow_test.sh
+
       - name: Python reference suite（旧实现回归，src/ 仅作参考保留）
         run: python3 tests/run_all.py
 

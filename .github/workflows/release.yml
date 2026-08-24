@@ -22,9 +22,25 @@ jobs:
           go vet ./...
           go test -race ./...
 
+      - name: sbx.sh 与模板同步检查（防 drift）
+        run: |
+          python3 build.py >/dev/null
+          git diff --exit-code -- sbx.sh installer-template.sh || {
+            echo "::error::发布脚本与模板不同步"; exit 1;
+          }
+
       - name: 构建全架构二进制
         run: ./scripts/build-release.sh dist
 
+      - name: SHA256SUMS 自检
+        run: cd dist && sha256sum -c SHA256SUMS
+
+      - name: 发布物一致性与版本三方一致性检查
+        env:
+          EXPECT_TAG: ${{ github.ref_name }}
+        run: bash scripts/artifact_check.sh dist "$EXPECT_TAG"
+
+      # 以上全部通过后才允许上传发布资产（先验证后上传）
       - name: 发布
         uses: softprops/action-gh-release@v2
         with:

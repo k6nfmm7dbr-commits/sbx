@@ -154,7 +154,11 @@ func (c *CLI) cmdAdd(args []string) int {
 		return c.usageError("缺少 --port")
 	}
 
-	list := LoadToolNodes(c.Store.NodesPath())
+	// 修改类操作必须严格读取：损坏文件拒绝继续，绝不静默覆盖
+	list, err := LoadToolNodesStrict(c.Store.NodesPath())
+	if err != nil {
+		return c.fail(err.Error())
+	}
 	nid, err := NextID(c.Store, list) // 先持久化游标（对齐旧实现顺序）
 	if err != nil {
 		return c.fail(err.Error())
@@ -215,6 +219,15 @@ func findByID(list []Node, id string) int {
 	return -1
 }
 
+// strictLoadForMutation 供 edit/remove/sync 使用。
+func (c *CLI) strictLoadForMutation() ([]Node, int) {
+	list, err := LoadToolNodesStrict(c.Store.NodesPath())
+	if err != nil {
+		return nil, c.fail(err.Error())
+	}
+	return list, exitOK
+}
+
 func (c *CLI) writeCandidates(list []Node) (string, string, int) {
 	cfg, err := RebuildConfig(c.Store, list)
 	if err != nil {
@@ -239,7 +252,10 @@ func (c *CLI) cmdRemove(args []string) int {
 	if len(p.positional) != 1 {
 		return c.usageError("用法: remove <id>")
 	}
-	list := LoadToolNodes(c.Store.NodesPath())
+	list, rc := c.strictLoadForMutation()
+	if rc != exitOK {
+		return rc
+	}
 	idx := findByID(list, p.positional[0])
 	if idx < 0 {
 		return c.fail(fmt.Sprintf("未找到节点 id=%s", p.positional[0]))
@@ -266,7 +282,10 @@ func (c *CLI) cmdEdit(args []string) int {
 		return c.usageError("用法: edit <id> [--port N] [--sni DOMAIN]")
 	}
 	id := p.positional[0]
-	list := LoadToolNodes(c.Store.NodesPath())
+	list, rc := c.strictLoadForMutation()
+	if rc != exitOK {
+		return rc
+	}
 	idx := findByID(list, id)
 	if idx < 0 {
 		return c.fail(fmt.Sprintf("未找到节点 id=%s", id))
@@ -316,7 +335,10 @@ func (c *CLI) cmdEdit(args []string) int {
 }
 
 func (c *CLI) cmdSync() int {
-	list := LoadToolNodes(c.Store.NodesPath())
+	list, rc := c.strictLoadForMutation()
+	if rc != exitOK {
+		return rc
+	}
 	cand, nodesCand, rc := c.writeCandidates(list)
 	if rc != exitOK {
 		return rc
