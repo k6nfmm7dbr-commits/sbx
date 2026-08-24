@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 APP_NAME="SBX"
-APP_VERSION="2.8.0"
+APP_VERSION="3.0.0"
 RAW_URL="${SBX_RAW_URL:-https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh}"
 
 # SBX_ROOT 仅用于测试/沙箱安装（把整套目录挪到前缀下），正常安装留空
@@ -18,7 +18,7 @@ BIN_DIR="$ROOT/usr/local/bin"
 SB_BIN="$BIN_DIR/sing-box"
 SB_DIR="$ROOT/etc/sing-box"
 SB_CONF="$SB_DIR/config.json"
-PANEL_PY="$APP_DIR/panel.py"
+CORE_BIN="$BIN_DIR/sbx-core"
 PANEL_CONF="$APP_DIR/panel.json"
 NODES_JSON="$APP_DIR/nodes.json"
 CERT_DIR="$APP_DIR/certs"
@@ -32,6 +32,7 @@ export SBX_CONF="$PANEL_CONF"
 
 SB_VERSION_PIN="${SBX_SB_VERSION:-}"     # 留空=取最新稳定版
 GH_PROXY="${SBX_GH_PROXY:-}"             # 例: https://ghfast.top/
+RELEASE_BASE="https://github.com/k6nfmm7dbr-commits/sbx/releases/download"
 
 OS_FAMILY="unknown"
 INIT_SYS="unknown"
@@ -110,7 +111,6 @@ install_deps() {
   command -v curl    >/dev/null 2>&1 || need+=(curl)
   command -v tar     >/dev/null 2>&1 || need+=(tar)
   command -v openssl >/dev/null 2>&1 || need+=(openssl)
-  command -v python3 >/dev/null 2>&1 || need+=(python3)
   ((${#need[@]})) && { info "安装: ${need[*]}"; pkg_install "${need[@]}"; }
 
   # 计数后端：优先 nftables
@@ -119,8 +119,7 @@ install_deps() {
     pkg_install nftables || pkg_install iptables \
       || die "无法安装 nftables/iptables，流量统计依赖其中之一"
   fi
-  command -v python3 >/dev/null 2>&1 || die "python3 安装失败（本脚本的 JSON 处理全部依赖它）"
-  ok "依赖就绪"
+  ok "依赖就绪（Go 单二进制后端，无需 Python）"
 }
 
 # ---------------------------------------------------------------- 通用工具
@@ -128,10 +127,16 @@ rand_hex() { openssl rand -hex "$1"; }
 rand_b64() { openssl rand -base64 "$1" | tr -d '\n'; }
 rand_uuid() {
   if [[ -r /proc/sys/kernel/random/uuid ]]; then cat /proc/sys/kernel/random/uuid
-  else "$SB_BIN" generate uuid 2>/dev/null || python3 -c 'import uuid;print(uuid.uuid4())'; fi
+  else "$SB_BIN" generate uuid 2>/dev/null || od -x -N 16 /dev/urandom \
+       | awk 'NR==1{printf "%s%s-%s-%s-%s-%s%s%s\n",substr($2,3),substr($3,1,4),substr($3,5,4),substr($4,1,4),substr($4,5,4),substr($5,1,4),substr($5,5,4),substr($6,1,4)}'; fi
 }
 
-py_json() { python3 "$APP_DIR/nodes_tool.py" "$@"; }
+core_node() { "$CORE_BIN" node "$@"; }
+
+sha256_of() {  # sha256_of <file>
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  else openssl dgst -sha256 -r "$1" | awk '{print $1}'; fi
+}
 
 valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535)); }
 
@@ -144,7 +149,7 @@ port_busy() {
     netstat -lnt 2>/dev/null | grep -qE "[:.]$p[[:space:]]" && return 0
     netstat -lnu 2>/dev/null | grep -qE "[:.]$p[[:space:]]" && return 0
   fi
-  py_json port-used "$p" >/dev/null 2>&1
+  core_node port-used "$p" >/dev/null 2>&1
 }
 
 pick_port() {
@@ -264,6 +269,56 @@ install_sing_box() {
   ok "sing-box 安装完成: $("$SB_BIN" version | head -1)"
 }
 
+# ---------------------------------------------------------------- sbx-core 安装
+install_sbx_core() {
+  install -d -m 0755 "$BIN_DIR"
+  # 开发/测试：直接使用本地构建的二进制
+  if [[ -n "${SBX_CORE_BIN:-}" && -x "${SBX_CORE_BIN}" ]]; then
+    cat "$SBX_CORE_BIN" > "$CORE_BIN.tmp.$$" && chmod 0755 "$CORE_BIN.tmp.$$" \
+      && mv -f "$CORE_BIN.tmp.$$" "$CORE_BIN"
+    ok "使用本地 sbx-core: $("$CORE_BIN" version 2>/dev/null | head -1)"
+    return 0
+  fi
+  if [[ -x "$CORE_BIN" ]] && "$CORE_BIN" version >/dev/null 2>&1 \
+     && [[ "$("$CORE_BIN" version 2>/dev/null)" == *"v$APP_VERSION"* ]]; then
+    ok "sbx-core 已安装: $("$CORE_BIN" version | head -1)"
+    return 0
+  fi
+
+  local arch url sum_url tmp bin_ok=0
+  arch="$(sb_arch)"
+  tmp=$(mktemp -d)
+  # armv6 与 amd64/arm64 同仓发布（Go 纯 Go SQLite 全架构支持）
+  url="$RELEASE_BASE/v${APP_VERSION}/sbx-core-linux-${arch}"
+  sum_url="$url.sha256"
+  info "下载 sbx-core (${arch})..."
+  if curl -fsSL -m 300 -o "$tmp/core" "$(gh_url "$url")" \
+     && curl -fsSL -m 60 -o "$tmp/core.sha256" "$(gh_url "$sum_url")"; then
+    local expect got
+    expect=$(awk '{print $1}' "$tmp/core.sha256")
+    got=$(sha256_of "$tmp/core")
+    if [[ -n "$expect" && "$expect" == "$got" ]]; then
+      bin_ok=1
+    else
+      warn "SHA256 校验失败 (期望 $expect 实得 $got)"
+    fi
+  fi
+  if [[ "$bin_ok" != 1 ]]; then
+    rm -rf "$tmp"
+    die "下载 sbx-core 失败或校验不通过（可设置 SBX_GH_PROXY 使用镜像；现有安装未被改动）"
+  fi
+  chmod 0755 "$tmp/core"
+  # 原子替换：先备份旧版，验证可执行后再提交，失败回滚
+  [[ -x "$CORE_BIN" ]] && cp -f "$CORE_BIN" "$CORE_BIN.bak" 2>/dev/null || true
+  mv -f "$tmp/core" "$CORE_BIN" && chmod 0755 "$CORE_BIN"; rm -rf "$tmp"
+  if ! "$CORE_BIN" version >/dev/null 2>&1; then
+    [[ -f "$CORE_BIN.bak" ]] && { mv -f "$CORE_BIN.bak" "$CORE_BIN"; warn "新二进制不可用，已回滚"; }
+    die "sbx-core 无法运行（架构或 libc 不匹配）"
+  fi
+  rm -f "$CORE_BIN.bak"
+  ok "sbx-core 安装完成: $("$CORE_BIN" version | head -1)"
+}
+
 # ---------------------------------------------------------------- 目录与基础配置
 prepare_dirs() {
   install -d -m 0755 "$APP_DIR" "$WEB_DIR" "$SB_DIR"
@@ -290,16 +345,8 @@ EOF
 
 ensure_panel_conf() {
   if [[ -f "$PANEL_CONF" ]]; then
-    # 保留/补齐面板查看令牌。
-    python3 - "$PANEL_CONF" <<'PY'
-import json, os, sys, secrets
-p=sys.argv[1]
-try:
- d=json.load(open(p))
- if not d.get('token'): d['token']=secrets.token_hex(16)
- tmp=p+'.clean';json.dump(d,open(tmp,'w'),indent=2,ensure_ascii=False);os.replace(tmp,p);os.chmod(p,0o600)
-except Exception: pass
-PY
+    # 保留/补齐面板查看令牌（由 sbx-core 原子写回）。
+    "$CORE_BIN" config-ensure-token >/dev/null 2>&1 || true
     return 0
   fi
   local token port
@@ -324,8 +371,8 @@ EOF
   ok "面板配置已生成（端口 $port）"
 }
 
-panel_get() { python3 "$PANEL_PY" config-get "$1"; }
-panel_set() { python3 "$PANEL_PY" config-set "$1" "$2"; }
+panel_get() { "$CORE_BIN" config-get "$1"; }
+panel_set() { "$CORE_BIN" config-set "$1" "$2"; }
 
 # ---------------------------------------------------------------- 服务管理
 svc_do() {  # svc_do <start|stop|restart|enable|status> <name>
@@ -365,30 +412,31 @@ ensure_certs() {
   info "生成自签证书 (CN=$sni)"
   local out
   out=$("$SB_BIN" generate tls-keypair "$sni" -m 1200 2>/dev/null) || die "生成证书失败"
-  python3 - "$CERT_DIR" <<PY
-import sys
-d = sys.argv[1]
-s = """$out"""
-c0 = s.find('-----BEGIN CERTIFICATE')
-c1 = s.find('-----END CERTIFICATE-----') + len('-----END CERTIFICATE-----')
-k0 = s.find('-----BEGIN PRIVATE KEY')
-k1 = s.find('-----END PRIVATE KEY-----') + len('-----END PRIVATE KEY-----')
-assert c0 >= 0 and k0 >= 0, "keypair parse failed"
-open(d + '/cert.pem', 'w').write(s[c0:c1] + '\n')
-open(d + '/key.pem', 'w').write(s[k0:k1] + '\n')
-PY
+  # awk 拆分 PEM 块
+  printf '%s\n' "$out" | awk '
+    /-----BEGIN CERTIFICATE-----/ {inc=1}
+    inc {print > "'"$CERT_DIR"'/cert.pem.part"}
+    /-----END CERTIFICATE-----/ {inc=0}
+    /-----BEGIN PRIVATE KEY-----/ {ink=1}
+    ink {print > "'"$CERT_DIR"'/key.pem.part"}
+    /-----END PRIVATE KEY-----/ {ink=0}
+  '
+  [[ -s "$CERT_DIR/cert.pem.part" && -s "$CERT_DIR/key.pem.part" ]] \
+    || die "证书解析失败"
+  mv -f "$CERT_DIR/cert.pem.part" "$CERT_DIR/cert.pem"
+  mv -f "$CERT_DIR/key.pem.part" "$CERT_DIR/key.pem"
   chmod 600 "$CERT_DIR/key.pem"; chmod 644 "$CERT_DIR/cert.pem"
   ok "证书就绪"
 }
 
 # ---------------------------------------------------------------- 流量规则
 fw_apply() {
-  python3 "$PANEL_PY" apply || warn "计数规则应用失败，流量统计可能不准"
+  "$CORE_BIN" apply || warn "计数规则应用失败，流量统计可能不准"
 }
 fw_clear() {
   # 先停面板（停掉采集线程，避免其 repair() 自愈机制把刚删的表重建回来）
   svc_do stop sbx-panel >/dev/null 2>&1 || true
-  python3 "$PANEL_PY" clear >/dev/null 2>&1 || true
+  "$CORE_BIN" clear >/dev/null 2>&1 || true
   # 兜底：直删一次并确认，保证卸载后内核里不残留 sbx_traffic 表
   if command -v nft >/dev/null 2>&1; then
     nft delete table inet sbx_traffic >/dev/null 2>&1 || true
@@ -404,7 +452,7 @@ prompt_port() {
     read -r p || true
     p="${p:-$def}"
     if ! valid_port "$p"; then warn "端口需在 1-65535"; continue; fi
-    if py_json port-used "$p" >/dev/null 2>&1; then warn "端口 $p 已被其它节点使用"; continue; fi
+    if core_node port-used "$p" >/dev/null 2>&1; then warn "端口 $p 已被其它节点使用"; continue; fi
     if port_busy "$p"; then
       printf '%s端口 %s 已被系统其它进程监听，仍要使用? [y/N] %s' "$C_YEL" "$p" "$C_RESET" >&2
       read -r yn || true
@@ -437,14 +485,14 @@ commit_node() {
   if ! "$SB_BIN" check -c "$cand" >/dev/null 2>&1; then
     warn "sing-box 配置校验失败，已回滚"
     "$SB_BIN" check -c "$cand" 2>&1 | head -5 >&2
-    py_json rollback >/dev/null 2>&1 || true
+    core_node rollback >/dev/null 2>&1 || true
     return 1
   fi
   # 同时备份配置与节点数据源：任一环节失败都能整体回滚，避免两者错位
   cp -f "$SB_CONF" "$SB_CONF.bak" 2>/dev/null || true
   cp -f "$NODES_JSON" "$NODES_JSON.bak" 2>/dev/null || true
   mv -f "$cand" "$SB_CONF"
-  py_json commit >/dev/null
+  core_node commit >/dev/null
   if ! sb_restart; then
     warn "sing-box 启动失败，回滚配置与节点数据"
     cp -f "$SB_CONF.bak" "$SB_CONF" 2>/dev/null || true
@@ -467,7 +515,7 @@ add_vless() {
   priv=$(echo "$kp" | awk '/PrivateKey/{print $2}')
   pub=$(echo "$kp" | awk '/PublicKey/{print $2}')
   sid=$(rand_hex 8)
-  py_json add vless --port="$port" --name="$name" --uuid="$uuid" --sni="$sni" \
+  core_node add vless --port="$port" --name="$name" --uuid="$uuid" --sni="$sni" \
     --flow xtls-rprx-vision --private-key="$priv" --public-key="$pub" --short-id="$sid" >/dev/null
   commit_node && { ok "VLESS Reality 节点已添加"; show_links_for_last; }
 }
@@ -478,7 +526,7 @@ add_ss() {
   name=$(prompt_name "ss-$port")
   method="2022-blake3-aes-128-gcm"
   pw=$(rand_b64 16)
-  py_json add shadowsocks --port="$port" --name="$name" --method="$method" --password="$pw" >/dev/null
+  core_node add shadowsocks --port="$port" --name="$name" --method="$method" --password="$pw" >/dev/null
   commit_node && { ok "Shadowsocks 2022 节点已添加"; show_links_for_last; }
 }
 
@@ -489,7 +537,7 @@ add_trojan() {
   sni=$(prompt_sni www.bing.com)
   ensure_certs "$sni"
   pw=$(rand_hex 12)
-  py_json add trojan --port="$port" --name="$name" --password="$pw" --sni="$sni" >/dev/null
+  core_node add trojan --port="$port" --name="$name" --password="$pw" --sni="$sni" >/dev/null
   commit_node && { ok "Trojan 节点已添加"; show_links_for_last; }
 }
 
@@ -500,20 +548,20 @@ add_anytls() {
   sni=$(prompt_sni www.bing.com)
   ensure_certs "$sni"
   pw=$(rand_hex 12)
-  py_json add anytls --port="$port" --name="$name" --password="$pw" --sni="$sni" >/dev/null
+  core_node add anytls --port="$port" --name="$name" --password="$pw" --sni="$sni" >/dev/null
   commit_node && { ok "AnyTLS 节点已添加"; show_links_for_last; }
 }
 
 show_links_for_last() {
   local last host6
-  last=$(py_json last)
+  last=$(core_node last)
   [[ -z "$last" ]] && return 0
-  host6=$(py_json get-host6)
+  host6=$(core_node get-host6)
   hr
   if [[ -n "$host6" ]]; then
-    py_json links "$last" --host "$(py_json get-host)" --host6 "$host6"
+    core_node links "$last" --host "$(core_node get-host)" --host6 "$host6"
   else
-    py_json links "$last" --host "$(py_json get-host)"
+    core_node links "$last" --host "$(core_node get-host)"
   fi
 }
 
@@ -555,8 +603,8 @@ DefaultDependencies=no
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/bin/python3 $PANEL_PY apply
-ExecStop=/usr/bin/python3 $PANEL_PY clear
+ExecStart=$CORE_BIN apply
+ExecStop=$CORE_BIN clear
 
 [Install]
 WantedBy=multi-user.target
@@ -571,7 +619,7 @@ Wants=network-online.target sbx-firewall.service
 [Service]
 Type=simple
 Environment=SBX_CONF=$PANEL_CONF
-ExecStart=/usr/bin/python3 $PANEL_PY serve
+ExecStart=$CORE_BIN serve
 Restart=always
 RestartSec=3
 
@@ -600,15 +648,15 @@ EOF
 name="sbx-firewall"
 description="SBX traffic counters"
 depend() { before sing-box sbx-panel; }
-start() { /usr/bin/python3 $PANEL_PY apply; }
-stop()  { /usr/bin/python3 $PANEL_PY clear; }
+start() { $CORE_BIN apply; }
+stop()  { $CORE_BIN clear; }
 EOF
       cat > /etc/init.d/sbx-panel <<EOF
 #!/sbin/openrc-run
 name="sbx-panel"
 description="SBX traffic panel"
-command="/usr/bin/python3"
-command_args="$PANEL_PY serve"
+command="$CORE_BIN"
+command_args="serve"
 command_background=true
 pidfile="/run/\${RC_SVCNAME}.pid"
 export SBX_CONF="$PANEL_CONF"
@@ -635,7 +683,7 @@ start_all() {
 # ---------------------------------------------------------------- 面板信息
 panel_url() {
   local host port
-  host=$(py_json get-host); [[ -z "$host" ]] && host="$(public_ip)"
+  host=$(core_node get-host); [[ -z "$host" ]] && host="$(public_ip)"
   port=$(panel_get port)
   echo "http://$(host_for_uri "$host"):$port/"
 }
@@ -673,17 +721,17 @@ menu_add_node() {
 menu_remove_node() {
   banner
   printf '%s删除节点%s\n\n' "$C_B" "$C_RESET"
-  py_json list
+  core_node list
   echo
   printf '输入要删除的节点 ID (回车取消): '
   read -r id || true
   [[ -z "$id" ]] && return 0
-  py_json remove "$id" >/dev/null || { warn "删除失败"; pause; return 1; }
+  core_node remove "$id" >/dev/null || { warn "删除失败"; pause; return 1; }
   if commit_node; then
     ok "节点 $id 已删除"
     printf '%s该节点的历史流量数据保留在数据库中。要一并清除吗? [y/N] %s' "$C_DIM" "$C_RESET"
     read -r yn || true
-    [[ "${yn,,}" == "y" ]] && { python3 "$PANEL_PY" reset "node:$id"; }
+    [[ "${yn,,}" == "y" ]] && { "$CORE_BIN" reset "node:$id"; }
   fi
   pause
 }
@@ -691,14 +739,14 @@ menu_remove_node() {
 menu_edit_node() {
   banner
   printf '%s修改节点（端口 / SNI）%s\n\n' "$C_B" "$C_RESET"
-  py_json list
+  core_node list
   echo
   printf '输入要修改的节点 ID (回车取消): '
   read -r id || true
   [[ -z "$id" ]] && return 0
   # 取该节点信息
   local info type sni port
-  info=$(py_json info "$id")
+  info=$(core_node info "$id")
   [[ -z "$info" ]] && { warn "未找到节点 $id"; pause; return 1; }
   type=$(echo "$info" | cut -f1); sni=$(echo "$info" | cut -f2)
   port=$(echo "$info" | cut -f3)
@@ -713,7 +761,7 @@ menu_edit_node() {
   read -r np || true
   if [[ -n "$np" ]]; then
     valid_port "$np" || { warn "端口无效"; pause; return 1; }
-    if py_json port-used "$np" >/dev/null 2>&1; then
+    if core_node port-used "$np" >/dev/null 2>&1; then
       # 允许改成自己当前端口（等于没改）
       [[ "$np" != "$port" ]] && { warn "端口 $np 已被其它节点占用"; pause; return 1; }
     fi
@@ -738,17 +786,17 @@ menu_edit_node() {
   if [[ ${#args[@]} -le 1 ]]; then echo "未做任何修改"; pause; return 0; fi
 
   local out
-  out=$(py_json edit "${args[@]}" 2>&1) || { warn "$out"; pause; return 1; }
+  out=$("$CORE_BIN" node edit "${args[@]}" 2>&1) || { warn "$out"; pause; return 1; }
   if commit_node; then
-    ok "节点 $id 已更新：$(echo "$out" | python3 -c "import json,sys;print(', '.join(json.load(sys.stdin).get('changed',[])))" 2>/dev/null || echo '完成')"
+    ok "节点 $id 已更新：$(printf '%s' "$out" | tr ',' '\n' | grep -o '端口→[0-9]*\|SNI→[^"]*' | paste -sd' ' - || echo '完成')"
     # reality 改了 SNI 后 handshake 目标也变了，节点已在 sync 时重建；提示重新分享
     printf '%s提示：修改后分享链接已变化，请重新导出发给客户端。%s\n' "$C_DIM" "$C_RESET"
     hr
-    local h6; h6=$(py_json get-host6)
+    local h6; h6=$(core_node get-host6)
     if [[ -n "$h6" ]]; then
-      py_json links "$id" --host "$(py_json get-host)" --host6 "$h6"
+      core_node links "$id" --host "$(core_node get-host)" --host6 "$h6"
     else
-      py_json links "$id" --host "$(py_json get-host)"
+      core_node links "$id" --host "$(core_node get-host)"
     fi
   fi
   pause
@@ -757,24 +805,24 @@ menu_edit_node() {
 menu_show_links() {
   banner
   local host host6
-  host=$(py_json get-host); [[ -z "$host" ]] && host="$(public_ip)"
-  host6=$(py_json get-host6)
+  host=$(core_node get-host); [[ -z "$host" ]] && host="$(public_ip)"
+  host6=$(core_node get-host6)
   printf '%s节点分享链接%s  (IPv4: %s%s)\n' "$C_B" "$C_RESET" "$host" \
     "$([[ -n "$host6" ]] && echo "  IPv6: $host6")"
   hr
   if [[ -n "$host6" ]]; then
-    py_json links --host "$host" --host6 "$host6"
+    core_node links --host "$host" --host6 "$host6"
   else
-    py_json links --host "$host"
+    core_node links --host "$host"
     printf '%s本机未检测到公网 IPv6，仅提供 IPv4 链接。%s\n' "$C_DIM" "$C_RESET"
     printf '%s（如已开通 IPv6，可在「设置分享地址」里重新探测）%s\n' "$C_DIM" "$C_RESET"
   fi
   hr
   printf '%s订阅内容 (Base64，可保存为文件供客户端导入):%s\n' "$C_DIM" "$C_RESET"
   if [[ -n "$host6" ]]; then
-    py_json links --sub --host "$host" --host6 "$host6"
+    core_node links --sub --host "$host" --host6 "$host6"
   else
-    py_json links --sub --host "$host"
+    core_node links --sub --host "$host"
   fi
   echo
   pause
@@ -784,10 +832,10 @@ menu_traffic() {
   banner
   printf '%s流量统计%s\n' "$C_B" "$C_RESET"
   hr
-  python3 "$PANEL_PY" show
+  "$CORE_BIN" show
   hr
   printf '%s最近 14 天%s\n' "$C_B" "$C_RESET"
-  python3 "$PANEL_PY" daily 14
+  "$CORE_BIN" daily 14
   hr
   show_panel_info
   pause
@@ -817,10 +865,10 @@ menu_panel_settings() {
          panel_set listen "127.0.0.1"; ok "已限制为仅本机访问"
        fi
        svc_do restart sbx-panel ;;
-    4) hr; python3 "$PANEL_PY" selftest; hr ;;
+    4) hr; "$CORE_BIN" selftest; hr ;;
     5) printf '%s确认清空全部流量统计? 此操作不可恢复 [y/N] %s' "$C_YEL" "$C_RESET"
        read -r yn || true
-       [[ "${yn,,}" == "y" ]] && { python3 "$PANEL_PY" reset; svc_do restart sbx-panel; } || echo "已取消" ;;
+       [[ "${yn,,}" == "y" ]] && { "$CORE_BIN" reset; svc_do restart sbx-panel; } || echo "已取消" ;;
     0|"") return 0 ;;
     *) warn "无效选择" ;;
   esac
@@ -860,8 +908,8 @@ menu_service() {
 menu_host() {
   banner
   printf '%s分享地址%s\n\n' "$C_B" "$C_RESET"
-  printf '  当前 IPv4: %s\n' "$(py_json get-host || echo '(未设置)')"
-  local cur6; cur6=$(py_json get-host6)
+  printf '  当前 IPv4: %s\n' "$(core_node get-host || echo '(未设置)')"
+  local cur6; cur6=$(core_node get-host6)
   printf '  当前 IPv6: %s\n' "${cur6:-（无）}"
   echo
   info "重新探测中..."
@@ -872,21 +920,21 @@ menu_host() {
   printf '输入用于分享链接的域名或 IPv4 (回车用探测值 %s): ' "$v4"
   read -r h || true
   [[ -z "$h" ]] && h="$v4"
-  py_json set-host "$h" >/dev/null
+  core_node set-host "$h" >/dev/null
   ok "IPv4 分享地址已设为 $h"
 
   if [[ -n "$v6" ]]; then
     printf '是否用探测到的 IPv6 (%s) 作为分享地址? [Y/n] ' "$v6"
     read -r yn || true
     if [[ "${yn,,}" != "n" ]]; then
-      py_json set-host6 "$v6" >/dev/null
+      core_node set-host6 "$v6" >/dev/null
       ok "IPv6 分享地址已设为 $v6（分享链接将附 IPv6 版本）"
     else
-      py_json set-host6 "" >/dev/null
+      core_node set-host6 "" >/dev/null
       info "已关闭 IPv6 分享链接"
     fi
   else
-    py_json set-host6 "" >/dev/null
+    core_node set-host6 "" >/dev/null
     info "本机未检测到可用公网 IPv6，分享链接仅提供 IPv4"
   fi
   pause
@@ -907,6 +955,7 @@ uninstall_all() {
   svc_do stop sbx-panel || true
   svc_do stop sing-box || true
   svc_do stop sbx-firewall || true
+  sleep 0.5   # 等 oneshot ExecStop 完全落地，避免与清理产生竞态
   fw_clear
   case "$INIT_SYS" in
     systemd)
@@ -919,7 +968,7 @@ uninstall_all() {
         rm -f "/etc/init.d/$s"
       done ;;
   esac
-  rm -rf "$APP_DIR" "$SB_DIR" "$SB_BIN" "$CMD_PATH" "$BIN_DIR/libcronet.so"
+  rm -rf "$APP_DIR" "$SB_DIR" "$SB_BIN" "$CMD_PATH" "$CORE_BIN" "$BIN_DIR/libcronet.so"
   ok "已卸载"
   exit 0
 }
@@ -931,7 +980,7 @@ main_menu() {
   while :; do
     banner
     local nnum
-    nnum=$(py_json count)
+    nnum=$(core_node count)
     printf '  节点: %s%s%s 个    sing-box: %s    面板: %s    %sv%s%s\n' \
       "$C_B" "$nnum" "$C_RESET" \
       "$(sb_running && echo "${C_GREEN}●${C_RESET}" || echo "${C_RED}●${C_RESET}")" \
@@ -965,7 +1014,7 @@ menu_nodes() {
   while :; do
     banner
     printf '%s节点管理%s\n\n' "$C_B" "$C_RESET"
-    py_json list
+    core_node list
     echo
     echo "  1) 查看分享链接与订阅"
     echo "  2) 修改节点（端口 / SNI）"
@@ -1006,11 +1055,6 @@ menu_settings() {
 }
 
 # ---------------------------------------------------------------- 安装
-install_payload() {
-  # panel.py / nodes_tool.py / web 资源由发布版内嵌，写入 APP_DIR
-  write_payload
-}
-
 install_self() {
   install -d -m 0755 "$BIN_DIR"
   if [[ -f "${BASH_SOURCE[0]}" ]]; then
@@ -1059,12 +1103,12 @@ do_update() {
   if ! curl -fsSL -m 60 -o "$tmp" "$(gh_url "$RAW_URL")"; then
     rm -f "$tmp"; die "下载失败，可设置 SBX_GH_PROXY 使用镜像后重试"
   fi
-  # 基本完整性校验：语法 + 必须含内置资源标记
+  # 基本完整性校验：语法 + 版本标记
   if ! bash -n "$tmp" 2>/dev/null; then
     rm -f "$tmp"; die "下载的脚本语法校验失败，已放弃升级（未改动现有安装）"
   fi
-  if ! grep -q "_sbx_unpack\|write_payload" "$tmp"; then
-    rm -f "$tmp"; die "下载的脚本缺少内置资源，可能不是发布版，已放弃升级"
+  if ! grep -q '^APP_VERSION=' "$tmp"; then
+    rm -f "$tmp"; die "下载的脚本缺少版本标记，可能不是发布版，已放弃升级"
   fi
 
   new_ver=$(remote_version "$tmp")
@@ -1105,54 +1149,27 @@ do_update() {
   fi
 }
 
-# 仅重写内置资源 + 重启服务（升级时由新脚本调用；保留所有用户数据）
+# 更新 sbx-core 二进制 + 重启服务（升级时由新脚本调用；保留所有用户数据）
 apply_update() {
   require_root
   detect_platform
   [[ -f "$PANEL_CONF" ]] || die "未检测到已安装的 SBX，无法应用升级"
-  install -d -m 0755 "$APP_DIR" "$WEB_DIR"
-  info "更新面板与工具文件..."
+  install -d -m 0755 "$APP_DIR"
+  info "更新 sbx-core 后端..."
 
-  # 先备份当前资源，写入后立即校验，失败即整体回滚，
-  # 避免一次损坏的下载把 panel.py 写坏导致面板永久失效。
-  local bak="$APP_DIR/.bak-upgrade"
-  rm -rf "$bak"; install -d -m 0755 "$bak/web"
-  cp -f "$PANEL_PY" "$APP_DIR/nodes_tool.py" "$bak/" 2>/dev/null || true
-  local _f
-  for _f in index.html login.html app.js style.css; do
-    cp -f "$WEB_DIR/$_f" "$bak/web/" 2>/dev/null || true
-  done
-
-  write_payload                       # 覆盖 panel.py / nodes_tool.py / web，不动 nodes.json / panel.json / db
-
-  # 校验：Python 语法 + web 资源非空，全部通过才继续
-  local bad=""
-  python3 -m py_compile "$PANEL_PY" "$APP_DIR/nodes_tool.py" 2>/dev/null || bad=1
-  for _f in index.html login.html app.js style.css; do
-    [[ -s "$WEB_DIR/$_f" ]] || { bad=1; break; }
-  done
-  if [[ -n "$bad" ]]; then
-    warn "内置资源校验失败，回滚到升级前版本（现有安装未改动）"
-    cp -f "$bak/panel.py" "$PANEL_PY" 2>/dev/null || true
-    cp -f "$bak/nodes_tool.py" "$APP_DIR/nodes_tool.py" 2>/dev/null || true
-    for _f in index.html login.html app.js style.css; do
-      cp -f "$bak/web/$_f" "$WEB_DIR/$_f" 2>/dev/null || true
-    done
-    rm -rf "$bak"
-    die "升级未成功，已恢复原版本"
-  fi
-  rm -rf "$bak"
+  install_sbx_core                    # 原子替换 + SHA256 校验 + 失败回滚
+  "$CORE_BIN" version >/dev/null 2>&1 || die "升级后 sbx-core 不可用，已中止（原二进制保留）"
 
   install_self                        # 刷新 /usr/local/bin/sbx 封装
   setup_services                      # 服务单元可能有更新
   # 节点 schema 或计数规则若有变化，重建一次（幂等，配置校验失败会保留旧配置）
   if [[ -s "$NODES_JSON" ]]; then
-    py_json sync >/dev/null 2>&1 || true
+    core_node sync >/dev/null 2>&1 || true
     if [[ -f "$SB_CONF.candidate" ]]; then
       if "$SB_BIN" check -c "$SB_CONF.candidate" >/dev/null 2>&1; then
-        mv -f "$SB_CONF.candidate" "$SB_CONF"; py_json commit >/dev/null 2>&1 || true
+        mv -f "$SB_CONF.candidate" "$SB_CONF"; core_node commit >/dev/null 2>&1 || true
       else
-        rm -f "$SB_CONF.candidate"; py_json rollback >/dev/null 2>&1 || true
+        rm -f "$SB_CONF.candidate"; core_node rollback >/dev/null 2>&1 || true
       fi
     fi
   fi
@@ -1170,7 +1187,7 @@ do_install() {
   info "系统: $OS_FAMILY / 初始化: $INIT_SYS / 架构: $(sb_arch)"
   install_deps
   prepare_dirs
-  install_payload
+  install_sbx_core
   install_sing_box
   ensure_sb_config
   ensure_panel_conf
@@ -1179,14 +1196,14 @@ do_install() {
 
   local host host6
   host="$(public_ip)"
-  py_json set-host "$host" >/dev/null 2>&1 || true
+  core_node set-host "$host" >/dev/null 2>&1 || true
   info "探测 IPv6 支持..."
   host6="$(public_ip6)"
   if [[ -n "$host6" ]]; then
-    py_json set-host6 "$host6" >/dev/null 2>&1 || true
+    core_node set-host6 "$host6" >/dev/null 2>&1 || true
     ok "检测到公网 IPv6：$host6（分享链接将同时提供 IPv6 版本）"
   else
-    py_json set-host6 "" >/dev/null 2>&1 || true
+    core_node set-host6 "" >/dev/null 2>&1 || true
     info "未检测到可用的公网 IPv6，分享链接仅提供 IPv4 版本"
   fi
 
@@ -1194,7 +1211,7 @@ do_install() {
   fw_apply
 
   local nnum
-  nnum=$(py_json count)
+  nnum=$(core_node count)
 
   banner
   ok "安装完成"
@@ -1203,7 +1220,7 @@ do_install() {
     printf '%s还没有任何节点。%s在菜单里选「1) 添加节点」即可创建。\n' "$C_B" "$C_RESET"
   else
     printf '%s节点分享链接%s\n' "$C_B" "$C_RESET"
-    py_json links --host "$host" || true
+    core_node links --host "$host" || true
   fi
   show_panel_info
   printf '\n%s提示%s\n' "$C_B" "$C_RESET"
@@ -1227,18 +1244,18 @@ do_install() {
 main() {
   init_colors
   case "${1:-}" in
-    --apply-firewall) require_root; python3 "$PANEL_PY" apply; exit $? ;;
-    --clear-firewall) require_root; python3 "$PANEL_PY" clear; exit $? ;;
+    --apply-firewall) require_root; "$CORE_BIN" apply; exit $? ;;
+    --clear-firewall) require_root; "$CORE_BIN" clear; exit $? ;;
     --panel-url) panel_url; exit 0 ;;
-    --show) python3 "$PANEL_PY" show; exit 0 ;;
-    --links) py_json links --host "$(py_json get-host)"; exit 0 ;;
+    --show) "$CORE_BIN" show; exit 0 ;;
+    --links) core_node links --host "$(core_node get-host)"; exit 0 ;;
     --update|update|upgrade) do_update "${2:-}"; exit $? ;;
     --apply-update) apply_update; exit $? ;;   # 内部使用：升级时由新脚本调用
     --uninstall) require_root; detect_platform; uninstall_all ;;
     --version) echo "$APP_NAME v$APP_VERSION"; exit 0 ;;
     -h|--help)
       cat <<EOF
-$APP_NAME v$APP_VERSION — sing-box 节点 + 流量面板
+$APP_NAME v$APP_VERSION — sing-box 节点 + 流量面板（Go 后端，单二进制）
 
 安装:   bash <(curl -fsSL $RAW_URL)
 菜单:   sbx
@@ -1267,23 +1284,5 @@ EOF
     do_install
   fi
 }
-
-# ---------------------------------------------------------------- 内嵌资源
-# 发布版由 build.py 在此处注入 write_payload()（内嵌 panel.py / nodes_tool.py / web）。
-# 开发调试时设置 SBX_PAYLOAD_DIR 指向源码目录即可。
-if ! declare -f write_payload >/dev/null 2>&1; then
-write_payload() {
-  local src="${SBX_PAYLOAD_DIR:-}"
-  [[ -n "$src" && -d "$src" ]] || die "安装包缺少内嵌资源（请使用 build.py 生成的发布版）"
-  install -d -m 0755 "$WEB_DIR"
-  # 用 cat 而非 install，兼容某些不支持 st_mtime 校验的挂载文件系统
-  cat "$src/src/panel.py"      > "$PANEL_PY";            chmod 0755 "$PANEL_PY"
-  cat "$src/src/nodes_tool.py" > "$APP_DIR/nodes_tool.py"; chmod 0755 "$APP_DIR/nodes_tool.py"
-  local f
-  for f in index.html login.html app.js style.css; do
-    cat "$src/web/$f" > "$WEB_DIR/$f"; chmod 0644 "$WEB_DIR/$f"
-  done
-}
-fi
 
 main "$@"

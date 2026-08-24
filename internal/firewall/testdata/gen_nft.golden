@@ -1,0 +1,29 @@
+#!/usr/sbin/nft -f
+# 由 sbx 自动生成，请勿手工编辑
+table inet sbx_traffic
+delete table inet sbx_traffic
+table inet sbx_traffic {
+    counter sbx_epoch_42 { }
+    counter sbx_sys_i { }
+    counter sbx_sys_o { }
+    counter sbx_n1_i { }
+    counter sbx_n1_o { }
+    counter sbx_n2_i { }
+    counter sbx_n2_o { }
+    chain sbx_in {
+        type filter hook input priority 300; policy accept;
+        iifname "lo" return
+        counter name sbx_sys_i
+        tcp dport { 443 } counter name sbx_n1_i
+        tcp dport { 8388 } counter name sbx_n2_i
+        udp dport { 8388 } counter name sbx_n2_i
+    }
+    chain sbx_out {
+        type filter hook output priority 300; policy accept;
+        oifname "lo" return
+        counter name sbx_sys_o
+        tcp sport { 443 } counter name sbx_n1_o
+        tcp sport { 8388 } counter name sbx_n2_o
+        udp sport { 8388 } counter name sbx_n2_o
+    }
+}

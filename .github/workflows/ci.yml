@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: gofmt check
+        run: |
+          out="$(gofmt -l .)"
+          if [[ -n "$out" ]]; then
+            echo "::error::gofmt 未通过: $out"; exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test (race)
+        run: go test -race ./...
+
+      - name: Python reference suite（旧实现回归，src/ 仅作参考保留）
+        run: python3 tests/run_all.py
+
+      - name: 金标夹具再生校验（Go 行为 vs Python reference 漂移检测）
+        run: |
+          python3 tests/gen_goldens.py
+          git diff --exit-code -- internal/*/testdata || {
+            echo "::error::金标夹具漂移：Go 实现与 Python reference 输出不一致";
+            git diff --stat -- internal/*/testdata;
+            exit 1;
+          }

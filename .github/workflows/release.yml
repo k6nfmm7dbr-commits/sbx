@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: 测试门禁
+        run: |
+          go vet ./...
+          go test -race ./...
+
+      - name: 构建全架构二进制
+        run: ./scripts/build-release.sh dist
+
+      - name: 发布
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/sbx-core-linux-amd64
+            dist/sbx-core-linux-arm64
+            dist/sbx-core-linux-armv7
+            dist/sbx-core-linux-armv6
+            dist/sbx-core-linux-386
+            dist/sbx-core-linux-s390x
+            dist/sbx-core-linux-riscv64
+            dist/SHA256SUMS
+          generate_release_notes: true

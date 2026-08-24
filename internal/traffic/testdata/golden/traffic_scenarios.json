@@ -1,0 +1,516 @@
+{
+ "t0_ms": 1700000000000,
+ "scenarios": [
+  {
+   "name": "basic",
+   "interval": 2,
+   "times_ms": [
+    1700000000000,
+    1700000002000,
+    1700000004000,
+    1700000006000
+   ],
+   "counters": [
+    {
+     "sbx_epoch_1": [
+      0,
+      0
+     ],
+     "sbx_n1_i": [
+      100,
+      10
+     ],
+     "sbx_n1_o": [
+      50,
+      5
+     ],
+     "sbx_sys_i": [
+      500,
+      50
+     ]
+    },
+    {
+     "sbx_epoch_1": [
+      0,
+      0
+     ],
+     "sbx_n1_i": [
+      150,
+      15
+     ],
+     "sbx_n1_o": [
+      75,
+      8
+     ],
+     "sbx_sys_i": [
+      600,
+      60
+     ]
+    },
+    {
+     "sbx_epoch_1": [
+      0,
+      0
+     ],
+     "sbx_n1_i": [
+      20,
+      2
+     ],
+     "sbx_n1_o": [
+      90,
+      9
+     ],
+     "sbx_sys_i": [
+      650,
+      55
+     ]
+    },
+    {
+     "sbx_epoch_1": [
+      0,
+      0
+     ],
+     "sbx_n1_i": [
+      70,
+      7
+     ],
+     "sbx_n1_o": [
+      95,
+      10
+     ],
+     "sbx_sys_i": [
+      700,
+      62
+     ]
+    }
+   ],
+   "expected_db": {
+    "daily": [
+     {
+      "day": "2023-11-14",
+      "scope": "node:1",
+      "rx": 220,
+      "tx": 95,
+      "rx_pkts": 22,
+      "tx_pkts": 10
+     },
+     {
+      "day": "2023-11-14",
+      "scope": "system",
+      "rx": 700,
+      "tx": 0,
+      "rx_pkts": 67,
+      "tx_pkts": 0
+     }
+    ],
+    "totals": [
+     {
+      "scope": "node:1",
+      "rx": 220,
+      "tx": 95,
+      "rx_pkts": 22,
+      "tx_pkts": 10
+     },
+     {
+      "scope": "system",
+      "rx": 700,
+      "tx": 0,
+      "rx_pkts": 67,
+      "tx_pkts": 0
+     }
+    ],
+    "samples": [
+     {
+      "ts": 1700000002,
+      "scope": "node:1",
+      "rx": 50,
+      "tx": 25,
+      "duration_ms": 2000,
+      "valid": 1
+     },
+     {
+      "ts": 1700000006,
+      "scope": "node:1",
+      "rx": 50,
+      "tx": 5,
+      "duration_ms": 2000,
+      "valid": 1
+     }
+    ],
+    "counter_state": [
+     {
+      "name": "sbx_epoch_1",
+      "last_bytes": 0,
+      "last_pkts": 0,
+      "updated_at": 1700000006000
+     },
+     {
+      "name": "sbx_n1_i",
+      "last_bytes": 70,
+      "last_pkts": 7,
+      "updated_at": 1700000006000
+     },
+     {
+      "name": "sbx_sys_i",
+      "last_bytes": 700,
+      "last_pkts": 62,
+      "updated_at": 1700000006000
+     },
+     {
+      "name": "sbx_n1_o",
+      "last_bytes": 95,
+      "last_pkts": 10,
+      "updated_at": 1700000006000
+     }
+    ],
+    "meta": [
+     {
+      "k": "epoch",
+      "v": "1"
+     }
+    ]
+   }
+  },
+  {
+   "name": "epoch_switch",
+   "interval": 2,
+   "times_ms": [
+    1700000000000,
+    1700000002000,
+    1700000004000
+   ],
+   "counters": [
+    {
+     "sbx_epoch_1": [
+      0,
+      0
+     ],
+     "sbx_n1_i": [
+      100,
+      10
+     ]
+    },
+    {
+     "sbx_epoch_2": [
+      0,
+      0
+     ],
+     "sbx_n1_i": [
+      5,
+      1
+     ]
+    },
+    {
+     "sbx_epoch_2": [
+      0,
+      0
+     ],
+     "sbx_n1_i": [
+      11,
+      2
+     ]
+    }
+   ],
+   "expected_db": {
+    "daily": [
+     {
+      "day": "2023-11-14",
+      "scope": "node:1",
+      "rx": 111,
+      "tx": 0,
+      "rx_pkts": 12,
+      "tx_pkts": 0
+     }
+    ],
+    "totals": [
+     {
+      "scope": "node:1",
+      "rx": 111,
+      "tx": 0,
+      "rx_pkts": 12,
+      "tx_pkts": 0
+     }
+    ],
+    "samples": [],
+    "counter_state": [
+     {
+      "name": "sbx_epoch_2",
+      "last_bytes": 0,
+      "last_pkts": 0,
+      "updated_at": 1700000004000
+     },
+     {
+      "name": "sbx_n1_i",
+      "last_bytes": 11,
+      "last_pkts": 2,
+      "updated_at": 1700000004000
+     }
+    ],
+    "meta": [
+     {
+      "k": "epoch",
+      "v": "2"
+     }
+    ]
+   }
+  },
+  {
+   "name": "duration_edges",
+   "interval": 2,
+   "times_ms": [
+    1700000000000,
+    1700000000300,
+    1700000008300,
+    1700000013800,
+    1700000014300
+   ],
+   "counters": [
+    {
+     "sbx_epoch_1": [
+      0,
+      0
+     ],
+     "sbx_n1_i": [
+      100,
+      10
+     ],
+     "sbx_n1_o": [
+      60,
+      6
+     ]
+    },
+    {
+     "sbx_epoch_1": [
+      0,
+      0
+     ],
+     "sbx_n1_i": [
+      110,
+      11
+     ],
+     "sbx_n1_o": [
+      70,
+      7
+     ]
+    },
+    {
+     "sbx_epoch_1": [
+      0,
+      0
+     ],
+     "sbx_n1_i": [
+      130,
+      13
+     ],
+     "sbx_n1_o": [
+      90,
+      9
+     ]
+    },
+    {
+     "sbx_epoch_1": [
+      0,
+      0
+     ],
+     "sbx_n1_i": [
+      140,
+      14
+     ],
+     "sbx_n1_o": [
+      100,
+      10
+     ]
+    },
+    {
+     "sbx_epoch_1": [
+      0,
+      0
+     ],
+     "sbx_n1_i": [
+      150,
+      15
+     ],
+     "sbx_n1_o": [
+      110,
+      11
+     ]
+    }
+   ],
+   "expected_db": {
+    "daily": [
+     {
+      "day": "2023-11-14",
+      "scope": "node:1",
+      "rx": 150,
+      "tx": 110,
+      "rx_pkts": 15,
+      "tx_pkts": 11
+     }
+    ],
+    "totals": [
+     {
+      "scope": "node:1",
+      "rx": 150,
+      "tx": 110,
+      "rx_pkts": 15,
+      "tx_pkts": 11
+     }
+    ],
+    "samples": [
+     {
+      "ts": 1700000014,
+      "scope": "node:1",
+      "rx": 10,
+      "tx": 10,
+      "duration_ms": 500,
+      "valid": 1
+     },
+     {
+      "ts": 1700000013,
+      "scope": "node:1",
+      "rx": 10,
+      "tx": 10,
+      "duration_ms": 5500,
+      "valid": 1
+     }
+    ],
+    "counter_state": [
+     {
+      "name": "sbx_epoch_1",
+      "last_bytes": 0,
+      "last_pkts": 0,
+      "updated_at": 1700000014300
+     },
+     {
+      "name": "sbx_n1_o",
+      "last_bytes": 110,
+      "last_pkts": 11,
+      "updated_at": 1700000014300
+     },
+     {
+      "name": "sbx_n1_i",
+      "last_bytes": 150,
+      "last_pkts": 15,
+      "updated_at": 1700000014300
+     }
+    ],
+    "meta": [
+     {
+      "k": "epoch",
+      "v": "1"
+     }
+    ]
+   }
+  },
+  {
+   "name": "sample_second_monotonic",
+   "interval": 2,
+   "times_ms": [
+    1700000000000,
+    1700000002000,
+    1700000001500
+   ],
+   "counters": [
+    {
+     "sbx_epoch_1": [
+      0,
+      0
+     ],
+     "sbx_n1_i": [
+      100,
+      10
+     ],
+     "sbx_n1_o": [
+      50,
+      5
+     ]
+    },
+    {
+     "sbx_epoch_1": [
+      0,
+      0
+     ],
+     "sbx_n1_i": [
+      150,
+      15
+     ],
+     "sbx_n1_o": [
+      75,
+      8
+     ]
+    },
+    {
+     "sbx_epoch_1": [
+      0,
+      0
+     ],
+     "sbx_n1_i": [
+      200,
+      20
+     ],
+     "sbx_n1_o": [
+      100,
+      10
+     ]
+    }
+   ],
+   "expected_db": {
+    "daily": [
+     {
+      "day": "2023-11-14",
+      "scope": "node:1",
+      "rx": 200,
+      "tx": 100,
+      "rx_pkts": 20,
+      "tx_pkts": 10
+     }
+    ],
+    "totals": [
+     {
+      "scope": "node:1",
+      "rx": 200,
+      "tx": 100,
+      "rx_pkts": 20,
+      "tx_pkts": 10
+     }
+    ],
+    "samples": [
+     {
+      "ts": 1700000002,
+      "scope": "node:1",
+      "rx": 50,
+      "tx": 25,
+      "duration_ms": 2000,
+      "valid": 1
+     }
+    ],
+    "counter_state": [
+     {
+      "name": "sbx_epoch_1",
+      "last_bytes": 0,
+      "last_pkts": 0,
+      "updated_at": 1700000001500
+     },
+     {
+      "name": "sbx_n1_o",
+      "last_bytes": 100,
+      "last_pkts": 10,
+      "updated_at": 1700000001500
+     },
+     {
+      "name": "sbx_n1_i",
+      "last_bytes": 200,
+      "last_pkts": 20,
+      "updated_at": 1700000001500
+     }
+    ],
+    "meta": [
+     {
+      "k": "epoch",
+      "v": "1"
+     }
+    ]
+   }
+  }
+ ]
+}

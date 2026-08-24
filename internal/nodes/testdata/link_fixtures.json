@@ -1,0 +1,114 @@
+{
+ "cases": [
+  {
+   "name": "vless_full",
+   "node": {
+    "id": 1,
+    "type": "vless",
+    "port": 443,
+    "uuid": "uuuuuuuuuuuuuuuu",
+    "sni": "www.microsoft.com",
+    "public_key": "pbk_X+/=",
+    "short_id": "sid01",
+    "flow": "xtls-rprx-vision",
+    "name": "测试 VLESS"
+   },
+   "host": "1.2.3.4",
+   "suffix": "",
+   "expected": "vless://uuuuuuuuuuuuuuuu@1.2.3.4:443?encryption=none&security=reality&type=tcp&sni=www.microsoft.com&fp=chrome&pbk=pbk_X%2B%2F%3D&sid=sid01&flow=xtls-rprx-vision#%E6%B5%8B%E8%AF%95%20VLESS"
+  },
+  {
+   "name": "vless_noflow_noname",
+   "node": {
+    "id": 1,
+    "type": "vless",
+    "port": 443,
+    "uuid": "uuuuuuuuuuuuuuuu",
+    "sni": "www.microsoft.com",
+    "public_key": "pbk_X+/=",
+    "short_id": "sid01",
+    "flow": "",
+    "name": ""
+   },
+   "host": "example.com",
+   "suffix": "",
+   "expected": "vless://uuuuuuuuuuuuuuuu@example.com:443?encryption=none&security=reality&type=tcp&sni=www.microsoft.com&fp=chrome&pbk=pbk_X%2B%2F%3D&sid=sid01#vless"
+  },
+  {
+   "name": "ss_special_chars",
+   "node": {
+    "id": 2,
+    "type": "shadowsocks",
+    "port": 8388,
+    "method": "2022-blake3-aes-128-gcm",
+    "password": "a+bc=/d",
+    "name": "SS 节点"
+   },
+   "host": "1.2.3.4",
+   "suffix": "",
+   "expected": "ss://MjAyMi1ibGFrZTMtYWVzLTEyOC1nY206YStiYz0vZA@1.2.3.4:8388#SS%20%E8%8A%82%E7%82%B9"
+  },
+  {
+   "name": "trojan_special",
+   "node": {
+    "id": 3,
+    "type": "trojan",
+    "port": 8443,
+    "password": "p@ss w:rd/+",
+    "sni": "www.bing.com"
+   },
+   "host": "[2001:db8::1]",
+   "suffix": "",
+   "expected": "trojan://p%40ss%20w%3Ard/%2B@[2001:db8::1]:8443?security=tls&sni=www.bing.com&allowInsecure=1&type=tcp#trojan"
+  },
+  {
+   "name": "anytls_plain",
+   "node": {
+    "id": 4,
+    "type": "anytls",
+    "port": 443,
+    "password": "pw~.-_",
+    "sni": "example.com"
+   },
+   "host": "1.2.3.4",
+   "suffix": "",
+   "expected": "anytls://pw~.-_@1.2.3.4:443?sni=example.com&insecure=1#anytls"
+  },
+  {
+   "name": "ipv6_bracket",
+   "node": {
+    "id": 1,
+    "type": "vless",
+    "port": 443,
+    "uuid": "uuuuuuuuuuuuuuuu",
+    "sni": "www.microsoft.com",
+    "public_key": "pbk_X+/=",
+    "short_id": "sid01",
+    "flow": "xtls-rprx-vision",
+    "name": "测试 VLESS"
+   },
+   "host": "2001:db8::1",
+   "suffix": "",
+   "expected": "vless://uuuuuuuuuuuuuuuu@[2001:db8::1]:443?encryption=none&security=reality&type=tcp&sni=www.microsoft.com&fp=chrome&pbk=pbk_X%2B%2F%3D&sid=sid01&flow=xtls-rprx-vision#%E6%B5%8B%E8%AF%95%20VLESS"
+  },
+  {
+   "name": "label_suffix",
+   "node": {
+    "id": 1,
+    "type": "vless",
+    "port": 443,
+    "uuid": "uuuuuuuuuuuuuuuu",
+    "sni": "www.microsoft.com",
+    "public_key": "pbk_X+/=",
+    "short_id": "sid01",
+    "flow": "xtls-rprx-vision",
+    "name": "测试 VLESS"
+   },
+   "host": "1.2.3.4",
+   "suffix": "-IPv6",
+   "expected": "vless://uuuuuuuuuuuuuuuu@1.2.3.4:443?encryption=none&security=reality&type=tcp&sni=www.microsoft.com&fp=chrome&pbk=pbk_X%2B%2F%3D&sid=sid01&flow=xtls-rprx-vision#%E6%B5%8B%E8%AF%95%20VLESS-IPv6"
+  }
+ ],
+ "sub_with_v6_body": "vless://uuuuuuuuuuuuuuuu@1.2.3.4:443?encryption=none&security=reality&type=tcp&sni=www.microsoft.com&fp=chrome&pbk=pbk_X%2B%2F%3D&sid=sid01&flow=xtls-rprx-vision#%E6%B5%8B%E8%AF%95%20VLESS\nvless://uuuuuuuuuuuuuuuu@[2001:db8::1]:443?encryption=none&security=reality&type=tcp&sni=www.microsoft.com&fp=chrome&pbk=pbk_X%2B%2F%3D&sid=sid01&flow=xtls-rprx-vision#%E6%B5%8B%E8%AF%95%20VLESS-IPv6\nss://MjAyMi1ibGFrZTMtYWVzLTEyOC1nY206YStiYz0vZA@1.2.3.4:8388#SS%20%E8%8A%82%E7%82%B9\nss://MjAyMi1ibGFrZTMtYWVzLTEyOC1nY206YStiYz0vZA@[2001:db8::1]:8388#SS%20%E8%8A%82%E7%82%B9-IPv6",
+ "sub_no_v6_body": "vless://uuuuuuuuuuuuuuuu@1.2.3.4:443?encryption=none&security=reality&type=tcp&sni=www.microsoft.com&fp=chrome&pbk=pbk_X%2B%2F%3D&sid=sid01&flow=xtls-rprx-vision#%E6%B5%8B%E8%AF%95%20VLESS"
+}

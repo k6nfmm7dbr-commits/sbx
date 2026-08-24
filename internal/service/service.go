@@ -1,0 +1,85 @@
+// Package service 编排 sbx-core 的运行态：serve 守护进程与管理子命令，
+// 对齐旧 `python3 panel.py <cmd>` 的全部行为。
+package service
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/k6nfmm7dbr-commits/sbx/internal/api"
+	"github.com/k6nfmm7dbr-commits/sbx/internal/config"
+	"github.com/k6nfmm7dbr-commits/sbx/internal/database"
+	"github.com/k6nfmm7dbr-commits/sbx/internal/traffic"
+)
+
+// Serve 启动采集器与面板 HTTP 服务，阻塞直至 SIGINT/SIGTERM。
+// 退出顺序：停止采集器（等待在途事务提交）→ 排空 HTTP → 关闭数据库。
+func Serve() int {
+	cfg := config.Load()
+
+	db, err := database.Open(cfg.DB)
+	if err != nil {
+		slog.Error("数据库打开失败", "err", err)
+		return 1
+	}
+	defer db.Close()
+
+	collector := traffic.NewCollector(cfg, db)
+
+	addr := net.JoinHostPort(cfg.Listen, fmt.Sprint(cfg.Port))
+	if cfg.Token == "" && cfg.Listen != "127.0.0.1" && cfg.Listen != "::1" {
+		slog.Warn("警告: 面板监听在非本机地址且未设置 token, 任何人都能读取统计数据")
+	}
+
+	_, hs := api.New(cfg, db, collector)
+
+	ln, lerr := net.Listen("tcp", addr)
+	if lerr != nil {
+		slog.Error("无法监听 " + addr + " — " + lerr.Error())
+		slog.Error("端口可能已被占用，请在面板设置中更换端口，或先停止旧进程")
+		return 1
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	collCtx, collCancel := context.WithCancel(context.Background())
+	go collector.Run(collCtx)
+
+	slog.Info("面板已启动 http://" + addr + "  后端=" + collector.BackendName() +
+		"  采集间隔=" + fmt.Sprint(cfg.Interval) + "s")
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- hs.Serve(ln) }()
+
+	select {
+	case <-ctx.Done():
+	case err := <-serveErr:
+		if err != nil && err != http.ErrServerClosed {
+			slog.Error("HTTP 服务异常退出", "err", err)
+			collCancel()
+			return 1
+		}
+	}
+
+	// 收尾顺序（不可暴力中断）：先停采集并等它在途事务落库，
+	// 再排空 HTTP，最后关闭数据库。
+	collCancel()
+	select {
+	case <-collector.Done():
+	case <-time.After(15 * time.Second):
+		slog.Warn("等待采集器退出超时，继续收尾")
+	}
+	hsCtx, hsCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer hsCancel()
+	if err := hs.Shutdown(hsCtx); err != nil {
+		slog.Warn("HTTP 关闭超时", "err", err)
+	}
+	return 0
+}

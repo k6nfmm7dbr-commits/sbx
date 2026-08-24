@@ -1,0 +1,148 @@
+{
+ "now_fixed": 1700000000,
+ "nodes_file": [
+  [
+   "id",
+   "type",
+   "port",
+   "name"
+  ],
+  [
+   1,
+   "vless",
+   443,
+   "测试节点"
+  ],
+  [
+   2,
+   "shadowsocks",
+   8388,
+   "ss-2"
+  ]
+ ],
+ "summary": {
+  "now": 1700000000,
+  "day": "2023-11-14",
+  "tz": "UTC",
+  "interval": 2,
+  "backend": "nft",
+  "healthy": false,
+  "error": "",
+  "last_sample": 0,
+  "nodes": [
+   {
+    "id": 1,
+    "name": "测试节点",
+    "type": "vless",
+    "port": 443,
+    "today": {
+     "rx": 1000,
+     "tx": 2000,
+     "rx_pkts": 10,
+     "tx_pkts": 20
+    },
+    "total": {
+     "rx": 9999,
+     "tx": 8888,
+     "rx_pkts": 99,
+     "tx_pkts": 88
+    },
+    "rate": {
+     "rx": 500.0,
+     "tx": 1000.0
+    },
+    "conns_tcp": 0,
+    "conns_udp": null
+   },
+   {
+    "id": 2,
+    "name": "ss-2",
+    "type": "shadowsocks",
+    "port": 8388,
+    "today": {
+     "rx": 300,
+     "tx": 400,
+     "rx_pkts": 3,
+     "tx_pkts": 4
+    },
+    "total": {
+     "rx": 777,
+     "tx": 666,
+     "rx_pkts": 7,
+     "tx_pkts": 6
+    },
+    "rate": {
+     "rx": 150.0,
+     "tx": 200.0
+    },
+    "conns_tcp": 0,
+    "conns_udp": 0
+   }
+  ],
+  "today": {
+   "rx": 1300,
+   "tx": 2400,
+   "rx_pkts": 13,
+   "tx_pkts": 24
+  },
+  "total": {
+   "rx": 10776,
+   "tx": 9554,
+   "rx_pkts": 106,
+   "tx_pkts": 94
+  },
+  "system_today": {
+   "rx": 50,
+   "tx": 60,
+   "rx_pkts": 5,
+   "tx_pkts": 6
+  },
+  "system_total": {
+   "rx": 55,
+   "tx": 44,
+   "rx_pkts": 5,
+   "tx_pkts": 4
+  },
+  "rate_total": {
+   "rx": 650.0,
+   "tx": 1200.0
+  },
+  "rate_known": true,
+  "conns_total": 0,
+  "conns_udp_total": 0
+ },
+ "live": {
+  "now": 1700000000,
+  "healthy": false,
+  "error": "",
+  "last_sample": 0,
+  "interval": 2,
+  "rate_known": true,
+  "rate_total": {
+   "rx": 650.0,
+   "tx": 1200.0
+  },
+  "conns_total": 0,
+  "conns_udp_total": 0,
+  "nodes": [
+   {
+    "id": 1,
+    "rate": {
+     "rx": 500.0,
+     "tx": 1000.0
+    },
+    "conns_tcp": 0,
+    "conns_udp": null
+   },
+   {
+    "id": 2,
+    "rate": {
+     "rx": 150.0,
+     "tx": 200.0
+    },
+    "conns_tcp": 0,
+    "conns_udp": 0
+   }
+  ]
+ }
+}
