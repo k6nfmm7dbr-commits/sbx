@@ -290,12 +290,12 @@ install_sbx_core() {
   tmp=$(mktemp -d)
   # armv6 与 amd64/arm64 同仓发布（Go 纯 Go SQLite 全架构支持）
   url="$RELEASE_BASE/v${APP_VERSION}/sbx-core-linux-${arch}"
-  sum_url="$url.sha256"
+  sum_url="$RELEASE_BASE/v${APP_VERSION}/SHA256SUMS"
   info "下载 sbx-core (${arch})..."
   if curl -fsSL -m 300 -o "$tmp/core" "$(gh_url "$url")" \
-     && curl -fsSL -m 60 -o "$tmp/core.sha256" "$(gh_url "$sum_url")"; then
+     && curl -fsSL -m 60 -o "$tmp/SHA256SUMS" "$(gh_url "$sum_url")"; then
     local expect got
-    expect=$(awk '{print $1}' "$tmp/core.sha256")
+    expect=$(awk -v f="sbx-core-linux-${arch}" '$2==f{print $1}' "$tmp/SHA256SUMS")
     got=$(sha256_of "$tmp/core")
     if [[ -n "$expect" && "$expect" == "$got" ]]; then
       bin_ok=1
