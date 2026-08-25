@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # e2e_remote.sh — 在真机上端到端验收 Go 版 SBX（在真机本地执行）
 set -u
-cd /root/sbx-build
+cd /root/sbx-build || exit 1
 
 ROOT="/root/sbx-e2e"
 CORE_BIN_SRC="/root/sbx-build/dist/sbx-core-linux-amd64"
@@ -32,7 +32,7 @@ ck "安装脚本退出码 0" $?
 grep -q "安装完成" /tmp/e2e-install.log; ck "输出含「安装完成」" $?
 [[ -x "$CORE" ]]; ck "sbx-core 已安装" $?
 [[ -x "$ROOT/usr/local/bin/sing-box" ]]; ck "sing-box 已安装" $?
-"$CORE" version | grep -q "v3.0.4"; ck "core 版本 3.0.4 ($("$CORE" version))" $?
+"$CORE" version | grep -q "v3.0.5"; ck "core 版本 3.0.5 ($("$CORE" version))" $?
 python3 -c "import json;d=json.load(open('$PANEL_CONF'));assert d['token'] and 1<=int(d['port'])<=65535"
 ck "panel.json 合法(token+port)" $?
 

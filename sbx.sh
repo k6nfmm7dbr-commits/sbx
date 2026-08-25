@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 APP_NAME="SBX"
-APP_VERSION="3.0.4"
+APP_VERSION="3.0.5"
 RAW_URL="${SBX_RAW_URL:-https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh}"
 
 # SBX_ROOT 仅用于测试/沙箱安装（把整套目录挪到前缀下），正常安装留空
@@ -127,8 +127,10 @@ install_deps() {
 }
 
 # ---------------------------------------------------------------- 通用工具
-rand_hex() { openssl rand -hex "$1"; }
-rand_b64() { openssl rand -base64 "$1" | tr -d '\n'; }
+rand_hex() {  # crypto/rand 优先，fallback openssl
+  if "$CORE_BIN" secret hex "$1" 2>/dev/null; then return 0; fi
+  openssl rand -hex "$1"
+}
 rand_uuid() {
   if [[ -r /proc/sys/kernel/random/uuid ]]; then cat /proc/sys/kernel/random/uuid
   else "$SB_BIN" generate uuid 2>/dev/null || od -x -N 16 /dev/urandom \
@@ -164,7 +166,7 @@ verify_core_checksum() {  # <binary_file> <SHA256SUMS_file> <binary_name>
 # <<< checksum-helpers
 
 # core_version_of <binary> —— 解析 sbx-core version 输出中的纯版本号（机器可读）。
-# 输出形如 "sbx-core v3.0.4"，提取 v 后的版本号做严格比较（不用模糊 substring）。
+# 输出形如 "sbx-core v3.0.5"，提取 v 后的版本号做严格比较（不用模糊 substring）。
 core_version_of() {
   "$1" version 2>/dev/null | head -1 | sed -nE 's/^sbx-core v?([0-9]+\.[0-9]+\.[0-9]+)$/\1/p'
 }
@@ -179,8 +181,8 @@ port_busy() {
     ss -Hlnt "sport = :$p" 2>/dev/null | grep -q . && return 0
     ss -Hlnu "sport = :$p" 2>/dev/null | grep -q . && return 0
   elif command -v netstat >/dev/null 2>&1; then
-    netstat -lnt 2>/dev/null | grep -qE "[:.]$p[[:space:]]" && return 0
-    netstat -lnu 2>/dev/null | grep -qE "[:.]$p[[:space:]]" && return 0
+    netstat -lnt 2>/dev/null | grep -qE "[:.]${p}[[:space:]]" && return 0
+    netstat -lnu 2>/dev/null | grep -qE "[:.]${p}[[:space:]]" && return 0
   fi
   core_node port-used "$p" >/dev/null 2>&1
 }
@@ -246,12 +248,27 @@ sb_arch() {
 
 gh_url() { [[ -n "$GH_PROXY" ]] && echo "${GH_PROXY%/}/$1" || echo "$1"; }
 
-sb_latest_version() {
-  local v
-  v=$(curl -fsSL -m 20 "https://api.github.com/repos/SagerNet/sing-box/releases/latest" 2>/dev/null \
-      | grep -m1 '"tag_name"' | sed -E 's/.*"v?([^"]+)".*/\1/') || true
-  [[ -n "$v" ]] && { echo "$v"; return 0; }
-  echo "1.13.19"   # API 不可用时的保底版本
+# 注：sing-box 版本改为 pin（见下方 SB_VERSION_DEFAULT + sb_expected_sha），
+# 不再动态拉取 latest——动态版本无法配合 sha256 供应链校验。
+
+# sing-box 供应链校验：官方 Release 不提供逐文件 checksum，本项目 pin 版本 + sha256。
+# 升级 sing-box 版本时必须同步更新此表（下载官方包后 sha256sum）。
+SB_VERSION_DEFAULT="1.13.19"
+sb_expected_sha() {  # sb_expected_sha <filename> → 打印期望 sha256（无则输出空）
+  awk -v n="$1" '$2==n{print $1}' <<'SBHASH'
+ef88a9e577d474210867bd708933d042e9b70106529df2656182c9db90106aa1  sing-box-1.13.19-linux-amd64.tar.gz
+7fe3597a95a3c5ad67477b1d7653b9ce097e0be7c676758eba1fcf558f353d57  sing-box-1.13.19-linux-arm64.tar.gz
+df6e0e72fff47ca6d9d8710fa4b751d70ab3319f82a10d64f875fcda562c7ccf  sing-box-1.13.19-linux-armv7.tar.gz
+b1815365caf2ce4c168e2e3415be51dbd69739034aa75cf422e42b44a11a7710  sing-box-1.13.19-linux-armv6.tar.gz
+0a41973546eb3b1de6e2a83fb2963c42e9a2d3e3d1dff1fa0a49c3552d82ed11  sing-box-1.13.19-linux-386.tar.gz
+23843202066901798b1df4a136a9c275f82e2ac3f27f24e82604206bcfd717b0  sing-box-1.13.19-linux-s390x.tar.gz
+229454140f3595836407fecc2d4993f55225d9cbfcd9bace7ca57b82933c98ac  sing-box-1.13.19-linux-riscv64.tar.gz
+150456f94fcf936fc2519de28d856422fb671a1ff181cd909b78f20e208fdcb8  sing-box-1.13.19-linux-amd64-musl.tar.gz
+5146181884310ea2381e085ef504005c81bd09f80721542127efb0a73f12cd2f  sing-box-1.13.19-linux-arm64-musl.tar.gz
+1fb4134b2deaa22f15cacd2156220cc6d3ba32d12fed9b0f23ad5666529b6b64  sing-box-1.13.19-linux-armv7-musl.tar.gz
+103c37a2346ae97ea84c72a14569e85aff0473f8c9c1aa44c53bfbd2e9b5193f  sing-box-1.13.19-linux-386-musl.tar.gz
+a8ee0d0e65613033c4d18c8a0809a7d837d4c285d36daf6c6631edc70a49c191  sing-box-1.13.19-linux-riscv64-musl.tar.gz
+SBHASH
 }
 
 install_sing_box() {
@@ -265,20 +282,22 @@ install_sing_box() {
     ok "使用本地 sing-box: $("$SB_BIN" version | head -1)"
     return 0
   fi
-  local ver arch suffix tmp url
-  ver="${SB_VERSION_PIN:-$(sb_latest_version)}"
+  local ver arch suffix tmp url name expected
+  ver="${SB_VERSION_PIN:-$SB_VERSION_DEFAULT}"
   arch="$(sb_arch)"
   # Alpine 用 musl 构建，其余用默认（静态）构建
   suffix=""
   [[ "$OS_FAMILY" == "alpine" ]] && { case "$arch" in amd64|arm64|armv7|386|riscv64) suffix="-musl";; esac; }
+  name="sing-box-${ver}-linux-${arch}${suffix}.tar.gz"
 
   tmp=$(mktemp -d)
-  url="https://github.com/SagerNet/sing-box/releases/download/v${ver}/sing-box-${ver}-linux-${arch}${suffix}.tar.gz"
+  url="https://github.com/SagerNet/sing-box/releases/download/v${ver}/${name}"
   info "下载 sing-box v${ver} (${arch}${suffix})"
   if ! curl -fsSL -m 300 -o "$tmp/sb.tar.gz" "$(gh_url "$url")"; then
     # musl 包不存在时退回默认包
     if [[ -n "$suffix" ]]; then
-      url="https://github.com/SagerNet/sing-box/releases/download/v${ver}/sing-box-${ver}-linux-${arch}.tar.gz"
+      name="sing-box-${ver}-linux-${arch}.tar.gz"
+      url="https://github.com/SagerNet/sing-box/releases/download/v${ver}/${name}"
       warn "musl 包不可用，改用默认构建"
       curl -fsSL -m 300 -o "$tmp/sb.tar.gz" "$(gh_url "$url")" \
         || { rm -rf "$tmp"; die "下载 sing-box 失败，可设置 SBX_GH_PROXY 使用镜像"; }
@@ -286,6 +305,15 @@ install_sing_box() {
       rm -rf "$tmp"; die "下载 sing-box 失败，可设置 SBX_GH_PROXY 使用镜像"
     fi
   fi
+  # 供应链校验：sha256 必须与项目 pin 的期望一致（官方无逐文件 checksum）。
+  expected=$(sb_expected_sha "$name")
+  if [[ -z "$expected" ]]; then
+    rm -rf "$tmp"
+    die "sing-box ${ver} 无校验哈希，拒绝安装（供应链保护）；请使用默认版本或反馈维护者补充"
+  fi
+  [[ "$(sha256_of "$tmp/sb.tar.gz")" == "$expected" ]] \
+    || { rm -rf "$tmp"; die "sing-box 校验失败，已中止安装"; }
+
   tar xzf "$tmp/sb.tar.gz" -C "$tmp" || { rm -rf "$tmp"; die "解压失败"; }
   local found
   found=$(find "$tmp" -type f -name sing-box | head -1)
@@ -328,8 +356,25 @@ install_sbx_core() {
   dl="$BIN_DIR/.sbx-core.dl.$$"
   cleanup() { rm -rf "$tmp" "$dl" 2>/dev/null || true; }
 
+  # 解析 dist 分支当前 commit sha，用 immutable revision 下载 binary 与 SHA256SUMS，
+  # 避免两次下载之间 dist force-push 导致版本错位。解析失败回退 RAW_BASE
+  # （仍有 SHA256 校验 fail-closed 兜底，错位只会失败、不会装错）。
+  local base dist_sha
+  dist_sha=""
+  if command -v git >/dev/null 2>&1; then
+    dist_sha=$(git ls-remote "https://github.com/k6nfmm7dbr-commits/sbx.git" refs/heads/dist 2>/dev/null | awk '{print $1}')
+  else
+    dist_sha=$(curl -fsSL -m 15 "https://api.github.com/repos/k6nfmm7dbr-commits/sbx/commits/dist" 2>/dev/null \
+      | grep -m1 '"sha"' | sed -E 's/.*"sha"[[:space:]]*:[[:space:]]*"([0-9a-f]+)".*/\1/')
+  fi
+  if [[ -n "$dist_sha" ]]; then
+    base="https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/$dist_sha"
+  else
+    base="$RAW_BASE"
+  fi
+
   # 先下载 SHA256SUMS（小文件），与本地二进制做内容比较
-  curl -fsSL -m 60 -o "$tmp/SHA256SUMS" "$(gh_url "$RAW_BASE/SHA256SUMS")" \
+  curl -fsSL -m 60 -o "$tmp/SHA256SUMS" "$(gh_url "$base/SHA256SUMS")" \
     || { cleanup; die "下载 SHA256SUMS 失败；现有安装未被改动"; }
   if [[ -x "$CORE_BIN" ]]; then
     local local_sum expect_sum
@@ -344,7 +389,7 @@ install_sbx_core() {
 
   # 内容不一致或本地缺失 → 下载完整二进制并校验替换
   info "下载 sbx-core (${arch})..."
-  curl -fsSL -m 300 -o "$dl" "$(gh_url "$RAW_BASE/${name}")" \
+  curl -fsSL -m 300 -o "$dl" "$(gh_url "$base/${name}")" \
     || { cleanup; die "下载 sbx-core 失败（可设置 SBX_GH_PROXY 使用镜像）；现有安装未被改动"; }
   verify_core_checksum "$dl" "$tmp/SHA256SUMS" "$name" \
     || { cleanup; die "sbx-core 校验失败；现有安装未被改动"; }
@@ -444,7 +489,7 @@ ensure_panel_conf() {
   "ipt_script": "$APP_DIR/iptables.sh",
   "web_root": "$WEB_DIR",
   "backend": "auto",
-  "listen": "0.0.0.0",
+  "listen": "127.0.0.1",
   "port": $port,
   "token": "$token",
   "interval": 2,
@@ -584,6 +629,21 @@ prompt_ss2022_method() {
   done
 }
 
+# ---- 节点 mutation 全局锁（跨进程，flock）----
+# 覆盖「生成 candidate → 校验 → 备份 → 提交 → 重启 → fw_apply」整个事务，
+# 防止两个 SSH 同时 node add/edit/remove/sync 产生 lost update / 重复 ID /
+# candidate 串写。锁文件默认 /run/lock（tmpfs，重启清空），测试可经 SBX_LOCK 覆盖。
+SBX_LOCK="${SBX_LOCK:-/run/lock/sbx.lock}"
+
+# sbx_lock <func> [args...]：在排他锁内执行函数；获取失败报错并返回非 0。
+sbx_lock() {
+  mkdir -p "$(dirname "$SBX_LOCK")" 2>/dev/null || true
+  (
+    flock 9 || { err "检测到另一个 sbx 节点操作正在进行，请稍后重试"; exit 75; }
+    "$@"
+  ) 9>"$SBX_LOCK"
+}
+
 # 通用提交流程：校验 → 备份 → 提交 config → 提交 nodes → 重启确认 → 才删备份
 # v3.0.3 修复（P0）：
 #   1) 备份在整个操作真正成功之前绝不删除——旧实现先删 .bak 再 restart，
@@ -652,13 +712,14 @@ commit_node() {
   fi
   # 整个操作真正成功以后才允许删除备份
   rm -f "$SB_CONF.bak" "$NODES_JSON.bak" 2>/dev/null || true
-  # 节点本身已创建成功；防火墙规则失败不能伪装成功，也不能回滚节点
+  # 节点本身已创建成功；防火墙规则失败不能伪装成功，也不能回滚节点。
+  # 返回码三态：0=完全成功，2=节点成功但流量规则失败（partial），1=失败。
   if fw_apply; then
     panel_running && svc_do restart sbx-panel || true
-  else
-    warn "节点已创建，但流量统计规则应用失败；可稍后手动执行 sbx 菜单 → 重建计数规则"
+    return 0
   fi
-  return 0
+  warn "节点已创建并可用，但流量统计规则应用失败，该节点流量统计暂不可用；可稍后在菜单重试"
+  return 2
 }
 # <<< commit-node-flow
 
@@ -672,9 +733,18 @@ add_vless() {
   priv=$(echo "$kp" | awk '/PrivateKey/{print $2}')
   pub=$(echo "$kp" | awk '/PublicKey/{print $2}')
   sid=$(rand_hex 8)
-  core_node add vless --port="$port" --name="$name" --uuid="$uuid" --sni="$sni" \
-    --flow xtls-rprx-vision --private-key="$priv" --public-key="$pub" --short-id="$sid" >/dev/null
-  commit_node && { ok "VLESS Reality 节点已添加"; show_links_for_last; }
+  sbx_lock do_add_vless "$port" "$name" "$sni" "$uuid" "$priv" "$pub" "$sid"
+  local rc=$?
+  case $rc in
+    0) ok "VLESS Reality 节点已添加"; show_links_for_last ;;
+    2) warn "节点已创建，但流量统计规则应用失败"; show_links_for_last ;;
+    *) warn "节点添加失败" ;;
+  esac
+}
+do_add_vless() {
+  core_node add vless --port="$1" --name="$2" --uuid="$4" --sni="$3" \
+    --flow xtls-rprx-vision --private-key="$5" --public-key="$6" --short-id="$7" >/dev/null || return 1
+  commit_node
 }
 
 add_ss() {
@@ -683,8 +753,17 @@ add_ss() {
   name=$(prompt_name "ss-$port")
   method=$(prompt_ss2022_method)
   pw=$(core_node ss2022-key --method="$method") || { warn "生成 Shadowsocks 2022 密钥失败"; return 1; }
-  core_node add shadowsocks --port="$port" --name="$name" --method="$method" --password="$pw" >/dev/null
-  commit_node && { ok "Shadowsocks 2022 节点已添加"; show_links_for_last; }
+  sbx_lock do_add_ss "$port" "$name" "$method" "$pw"
+  local rc=$?
+  case $rc in
+    0) ok "Shadowsocks 2022 节点已添加"; show_links_for_last ;;
+    2) warn "节点已创建，但流量统计规则应用失败"; show_links_for_last ;;
+    *) warn "节点添加失败" ;;
+  esac
+}
+do_add_ss() {
+  core_node add shadowsocks --port="$1" --name="$2" --method="$3" --password="$4" >/dev/null || return 1
+  commit_node
 }
 
 add_trojan() {
@@ -694,8 +773,17 @@ add_trojan() {
   sni=$(prompt_sni www.bing.com)
   ensure_certs "$sni"
   pw=$(rand_hex 12)
-  core_node add trojan --port="$port" --name="$name" --password="$pw" --sni="$sni" >/dev/null
-  commit_node && { ok "Trojan 节点已添加"; show_links_for_last; }
+  sbx_lock do_add_trojan "$port" "$name" "$sni" "$pw"
+  local rc=$?
+  case $rc in
+    0) ok "Trojan 节点已添加"; show_links_for_last ;;
+    2) warn "节点已创建，但流量统计规则应用失败"; show_links_for_last ;;
+    *) warn "节点添加失败" ;;
+  esac
+}
+do_add_trojan() {
+  core_node add trojan --port="$1" --name="$2" --password="$4" --sni="$3" >/dev/null || return 1
+  commit_node
 }
 
 add_anytls() {
@@ -705,8 +793,17 @@ add_anytls() {
   sni=$(prompt_sni www.bing.com)
   ensure_certs "$sni"
   pw=$(rand_hex 12)
-  core_node add anytls --port="$port" --name="$name" --password="$pw" --sni="$sni" >/dev/null
-  commit_node && { ok "AnyTLS 节点已添加"; show_links_for_last; }
+  sbx_lock do_add_anytls "$port" "$name" "$sni" "$pw"
+  local rc=$?
+  case $rc in
+    0) ok "AnyTLS 节点已添加"; show_links_for_last ;;
+    2) warn "节点已创建，但流量统计规则应用失败"; show_links_for_last ;;
+    *) warn "节点添加失败" ;;
+  esac
+}
+do_add_anytls() {
+  core_node add anytls --port="$1" --name="$2" --password="$4" --sni="$3" >/dev/null || return 1
+  commit_node
 }
 
 show_links_for_last() {
@@ -725,8 +822,6 @@ show_links_for_last() {
 # ---------------------------------------------------------------- 服务单元
 setup_services() {
   [[ -n "${SBX_NO_SERVICE:-}" ]] && { warn "已跳过服务注册（SBX_NO_SERVICE）"; return 0; }
-  local panel_port
-  panel_port=$(panel_get port)
 
   case "$INIT_SYS" in
     systemd)
@@ -779,6 +874,20 @@ Environment=SBX_CONF=$PANEL_CONF
 ExecStart=$CORE_BIN serve
 Restart=always
 RestartSec=3
+# v3.0.5 最小权限沙箱（经真机验证）。
+# 面板进程仍需 CAP_NET_ADMIN：sbx-core serve 内嵌 Collector，需执行 nft/iptables 采集；
+# 还需读 /proc（连接数）、读写 /etc/sbx 与 /run/sbx（SQLite/状态文件）、绑定面板端口。
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+ReadWritePaths=/etc/sbx /run/sbx
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target
@@ -884,14 +993,23 @@ menu_remove_node() {
   printf '输入要删除的节点 ID (回车取消): '
   read -r id || true
   [[ -z "$id" ]] && return 0
-  core_node remove "$id" >/dev/null || { warn "删除失败"; pause; return 1; }
-  if commit_node; then
-    ok "节点 $id 已删除"
+  sbx_lock do_remove_node "$id"
+  local rc=$?
+  case $rc in
+    0) ok "节点 $id 已删除" ;;
+    2) warn "节点已删除，但流量统计规则应用失败" ;;
+    *) warn "删除失败" ;;
+  esac
+  if [[ $rc -ne 1 ]]; then
     printf '%s该节点的历史流量数据保留在数据库中。要一并清除吗? [y/N] %s' "$C_DIM" "$C_RESET"
     read -r yn || true
     [[ "${yn,,}" == "y" ]] && { "$CORE_BIN" reset "node:$id"; }
   fi
   pause
+}
+do_remove_node() {
+  core_node remove "$1" >/dev/null || return 1
+  commit_node
 }
 
 menu_edit_node() {
@@ -959,11 +1077,11 @@ menu_edit_node() {
 
   if [[ ${#args[@]} -le 1 ]]; then echo "未做任何修改"; pause; return 0; fi
 
-  local out
-  out=$("$CORE_BIN" node edit "${args[@]}" 2>&1) || { warn "$out"; pause; return 1; }
-  if commit_node; then
+  local out rc
+  out=$(sbx_lock do_edit_node "${args[@]}" 2>/dev/null)
+  rc=$?
+  if [[ $rc -eq 0 ]]; then
     ok "节点 $id 已更新：$(printf '%s' "$out" | tr ',' '\n' | grep -o '端口→[0-9]*\|SNI→[^"]*' | paste -sd' ' - || echo '完成')"
-    # reality 改了 SNI 后 handshake 目标也变了，节点已在 sync 时重建；提示重新分享
     printf '%s提示：修改后分享链接已变化，请重新导出发给客户端。%s\n' "$C_DIM" "$C_RESET"
     hr
     local h6; h6=$(core_node get-host6)
@@ -972,8 +1090,20 @@ menu_edit_node() {
     else
       core_node links "$id" --host "$(core_node get-host)"
     fi
+  elif [[ $rc -eq 2 ]]; then
+    warn "节点已更新，但流量统计规则应用失败"
+  else
+    warn "$out"
   fi
   pause
+}
+do_edit_node() {
+  local out
+  out=$("$CORE_BIN" node edit "$@" 2>&1) || { echo "$out" >&2; return 1; }
+  commit_node
+  local rc=$?
+  echo "$out"
+  return $rc
 }
 
 menu_show_links() {
@@ -1254,8 +1384,9 @@ remote_version() {  # 从下载的脚本里提取 APP_VERSION
 
 ver_ge() {  # ver_ge A B  → A >= B ?（点分版本比较）
   [[ "$1" == "$2" ]] && return 0
-  local IFS=.
-  local a=($1) b=($2) i
+  local a b i
+  IFS=. read -ra a <<< "$1"
+  IFS=. read -ra b <<< "$2"
   for ((i=0; i<${#a[@]} || i<${#b[@]}; i++)); do
     local x=${a[i]:-0} y=${b[i]:-0}
     ((10#$x > 10#$y)) && return 0

@@ -13,7 +13,7 @@ set -euo pipefail
 
 DIST="${1:-dist}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$DIST"
+cd "$DIST" || exit 1
 
 fail() { echo "[artifact-check] FAIL: $*" >&2; exit 1; }
 
@@ -33,7 +33,7 @@ for a in "${ARCHS[@]}"; do
 done
 
 # SHA256SUMS 不应包含未知条目（防串包/漏删）
-while read -r sum name; do
+while read -r _ name; do
   case "$name" in
     sbx-core-linux-amd64|sbx-core-linux-arm64|sbx-core-linux-armv7|\
     sbx-core-linux-armv6|sbx-core-linux-386|sbx-core-linux-s390x|sbx-core-linux-riscv64) ;;

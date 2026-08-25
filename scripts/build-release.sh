@@ -2,7 +2,7 @@
 # build-release.sh — 交叉编译全部架构的 sbx-core 并生成 SHA256SUMS
 # 用法: ./scripts/build-release.sh [输出目录，默认 dist]
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 
 OUT="${1:-dist}"
 VERSION="$(go run ./cmd/sbx-core version 2>/dev/null | sed 's/^sbx-core v//')"
@@ -31,7 +31,7 @@ build_one 386 386
 build_one s390x s390x
 build_one riscv64 riscv64
 
-cd "$OUT"
+cd "$OUT" || exit 1
 sha256sum sbx-core-linux-* > SHA256SUMS
 echo "---- 产物 ----"
 ls -la

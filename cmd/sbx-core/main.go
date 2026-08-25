@@ -77,6 +77,32 @@ func main() {
 	case "node":
 		cli := &nodes.CLI{Store: nodes.NewStore(), Stdout: os.Stdout, Stderr: os.Stderr}
 		os.Exit(cli.Run(args[1:]))
+	case "secret":
+		// sbx-core secret <hex|base64> <n>：crypto/rand 生成随机 secret，
+		// 供 shell 生成 panel token / Trojan / AnyTLS 密码（统一随机源）。
+		if len(args) < 3 {
+			usageFatal()
+		}
+		n, err := strconv.Atoi(args[2])
+		if err != nil || n <= 0 {
+			usageFatal()
+		}
+		switch args[1] {
+		case "hex":
+			s, gerr := nodes.GenerateHex(n)
+			if gerr != nil {
+				fail(gerr)
+			}
+			fmt.Println(s)
+		case "base64":
+			s, gerr := nodes.GenerateBase64(n)
+			if gerr != nil {
+				fail(gerr)
+			}
+			fmt.Println(s)
+		default:
+			usageFatal()
+		}
 	case "version", "--version", "-v":
 		fmt.Printf("sbx-core v%s\n", version.Version)
 	case "help", "-h", "--help":
@@ -124,6 +150,7 @@ func printUsage() {
   sbx-core config-set <key> <value>       写配置项
   sbx-core config-ensure-token            保证访问令牌存在
   sbx-core node <sub-command> [...]       节点管理（add/edit/remove/...）
+  sbx-core secret <hex|base64> <n>         生成随机 secret（crypto/rand）
   sbx-core version                        版本信息
 `)
 }
