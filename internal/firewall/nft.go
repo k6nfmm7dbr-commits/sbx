@@ -31,12 +31,17 @@ func (n *Nft) Read(ctx context.Context) (Snapshot, error) {
 	rc, out, errMsg := runCmdFn(ctx, "nft", "-j", "list", "counters", "table", "inet", NFTTable)
 	if rc != 0 {
 		msg := strings.TrimSpace(errMsg)
-		if strings.Contains(msg, "No such file or directory") ||
-			strings.Contains(msg, "does not exist") || rc == 1 {
+		// 只有明确的「目标不存在」才算 ErrLookup（可自愈）。禁止把任意 rc=1
+		// （如 permission denied / syntax error）误判为规则不存在——否则
+		// Collector 会误以为缺规则而反复 Repair。
+		if IsMissingMsg(msg) {
 			if msg == "" {
 				msg = "nft table missing"
 			}
 			return nil, &ErrLookup{Msg: msg}
+		}
+		if msg == "" {
+			msg = fmt.Sprintf("nft 退出码 %d", rc)
 		}
 		return nil, fmt.Errorf("nft 读取失败: %s", msg)
 	}

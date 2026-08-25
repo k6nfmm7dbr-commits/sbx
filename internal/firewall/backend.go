@@ -94,31 +94,29 @@ type Backend interface {
 	Repair(ctx context.Context) error
 }
 
-// DetectBackend 对齐 detect_backend：
+// DetectBackend 对齐 detect_backend（纯探测，不读持久化状态）：
 // 配置强制 nft/ipt；auto 时优先探测 nft（`nft list tables` 成功），
 // 再看 iptables；两者都缺失仍返回 nft（由后续 Read 报错自愈）。
+// 注意：会改变系统状态的路径请用 EffectiveBackend（单一事实源），
+// 不要用这个纯探测结果——否则 auto 下可能与 Apply 实际后端分叉。
 func DetectBackend(forced string) string {
-	b := strings.ToLower(strings.TrimSpace(forced))
-	switch b {
-	case "nft", "nftables":
-		return "nft"
-	case "ipt", "iptables":
-		return "iptables"
-	}
-	if whichFn("nft") {
-		if rc, _, _ := runCmdFn(context.Background(), "nft", "list", "tables"); rc == 0 {
-			return "nft"
-		}
-	}
-	if whichFn("iptables") {
-		return "iptables"
-	}
-	return "nft"
+	return probeBackendForced(forced)
 }
 
-// New 按检测结果构造后端。
+// probeBackendForced：forced=nft/iptables 直接返回；auto 走 probeBackend。
+func probeBackendForced(forced string) string {
+	switch normalizeBackend(forced) {
+	case "nft":
+		return "nft"
+	case "iptables":
+		return "iptables"
+	}
+	return probeBackend()
+}
+
+// New 按 EffectiveBackend 构造后端（Collector 通过这里读取与 Apply 一致的后端）。
 func New(forced string, nftConf, iptScript string) Backend {
-	if DetectBackend(forced) == "nft" {
+	if EffectiveBackend(forced) == "nft" {
 		return NewNft(nftConf)
 	}
 	return NewIptables(iptScript)

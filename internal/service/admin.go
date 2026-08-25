@@ -90,20 +90,31 @@ func Reset(scope string) error {
 		return err
 	}
 	defer closer()
+
+	// 三条 DELETE 必须在同一事务：任一失败整体回滚，不留半清空状态。
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	if scope != "" {
 		for _, q := range []string{
 			"DELETE FROM daily WHERE scope=?", "DELETE FROM totals WHERE scope=?",
 			"DELETE FROM samples WHERE scope=?"} {
-			if _, err := db.Exec(q, scope); err != nil {
+			if _, err := tx.Exec(q, scope); err != nil {
 				return err
 			}
 		}
 	} else {
 		for _, t := range []string{"daily", "totals", "samples"} {
-			if _, err := db.Exec("DELETE FROM " + t); err != nil {
+			if _, err := tx.Exec("DELETE FROM " + t); err != nil {
 				return err
 			}
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
 	}
 	suffix := ""
 	if scope != "" {
@@ -173,24 +184,41 @@ func Apply() int {
 		slog.Error("规则生成失败", "err", err)
 		return 1
 	}
-	backend := firewall.DetectBackend(cfg.Backend)
+	// 后端选择单一事实源：auto 下优先读持久化状态，无状态则探测；
+	// 真正应用成功后写回状态，Collector/Repair 据此读取同一后端。
+	backend := firewall.EffectiveBackend(cfg.Backend)
+	auto := firewall.IsAutoBackend(cfg.Backend)
 	if backend == "nft" {
 		rc, _, errMsg := firewall.RunCmd(context.Background(), "nft", "-f", cfg.NftConf)
-		if rc != 0 {
-			slog.Warn("nft 应用失败, 尝试 iptables:", "err", errMsg)
-			backend = "iptables"
-		} else {
+		if rc == 0 {
+			_ = firewall.WriteEffectiveBackend("nft")
 			fmt.Println("nftables 计数规则已生效")
+			return 0
 		}
-	}
-	if backend == "iptables" {
-		rc, _, errMsg := firewall.RunCmd(context.Background(), "sh", cfg.IptScript, "apply")
-		if rc != 0 {
-			slog.Warn("iptables 应用失败:", "err", errMsg)
+		if !auto {
+			// forced nft：失败即失败，绝不偷偷 fallback
+			slog.Error("nft 应用失败(backend=nft 强制), 已中止", "err", errMsg)
 			return 1
 		}
+		// auto：nft 失败回退 iptables
+		slog.Warn("nft 应用失败, 回退 iptables", "err", errMsg)
+		rc, _, errMsg = firewall.RunCmd(context.Background(), "sh", cfg.IptScript, "apply")
+		if rc != 0 {
+			slog.Error("iptables 应用失败", "err", errMsg)
+			return 1
+		}
+		_ = firewall.WriteEffectiveBackend("iptables")
 		fmt.Println("iptables 计数规则已生效")
+		return 0
 	}
+	// backend == iptables
+	rc, _, errMsg := firewall.RunCmd(context.Background(), "sh", cfg.IptScript, "apply")
+	if rc != 0 {
+		slog.Error("iptables 应用失败", "err", errMsg)
+		return 1
+	}
+	_ = firewall.WriteEffectiveBackend("iptables")
+	fmt.Println("iptables 计数规则已生效")
 	return 0
 }
 
@@ -247,10 +275,19 @@ func Clear() int {
 		return 1
 	}
 	if firewall.Which("nft") {
-		firewall.RunCmd(context.Background(), "nft", "delete", "table", "inet", firewall.NFTTable)
+		// 表本就不存在 = 成功；其它失败（权限/语法）必须如实报错。
+		rc, _, errMsg := firewall.RunCmd(context.Background(), "nft", "delete", "table", "inet", firewall.NFTTable)
+		if rc != 0 && !firewall.IsMissingMsg(errMsg) {
+			slog.Error("nft 计数表删除失败", "err", errMsg)
+			return 1
+		}
 	}
 	if _, err := os.Stat(cfg.IptScript); err == nil {
-		firewall.RunCmd(context.Background(), "sh", cfg.IptScript, "clear")
+		rc, _, errMsg := firewall.RunCmd(context.Background(), "sh", cfg.IptScript, "clear")
+		if rc != 0 {
+			slog.Error("iptables 计数链清除失败", "err", errMsg)
+			return 1
+		}
 	}
 	fmt.Println("计数规则已移除（历史统计数据保留）")
 	return 0
