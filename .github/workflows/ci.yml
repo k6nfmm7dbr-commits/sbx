@@ -100,8 +100,9 @@ jobs:
           git checkout --orphan dist-new
           # 只清空索引、不动工作区（git rm -rf . 会把刚构建的 dist/ 产物一起删掉）
           git rm -r --cached --quiet . 2>/dev/null || true
-          # dist/ 被 .gitignore 忽略，add 时显式 -f
-          git add -f dist/
+          # 产物必须位于分支根（安装器请求 raw .../dist/<file>，不带子目录）
+          cp dist/sbx-core-linux-* dist/SHA256SUMS .
+          git add -f sbx-core-linux-* SHA256SUMS
           git add scripts/dist-manifest.txt
           VER="$(grep -m1 '^const Version' internal/version/version.go | sed 's/.*"\(.*\)".*/\1/')"
           git commit -qm "dist: rebuild from ${GITHUB_SHA::7} (v$VER)"
