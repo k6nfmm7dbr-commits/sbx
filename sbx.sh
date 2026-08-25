@@ -1296,9 +1296,15 @@ apply_update() {
   install_self                        # 刷新 /usr/local/bin/sbx 封装
   setup_services                      # 服务单元可能有更新
   # 节点 schema 或计数规则若有变化，重建一次（幂等，配置校验失败会保留旧配置）
+  local sync_err=""
   if [[ -s "$NODES_JSON" ]]; then
-    core_node sync >/dev/null 2>&1 || true
-    if [[ -f "$SB_CONF.candidate" ]]; then
+    # sync 真实失败（nodes.json 损坏/不可写/candidate 生成失败）绝不能吞掉：
+    # 继续执行会造成 config/nodes 不一致，必须报告并跳过本次配置迁移
+    if ! core_node sync >/dev/null; then
+      err "node sync 失败: nodes.json 可能损坏或 candidate 无法生成"
+      info "已跳过本次升级的配置迁移；请修复 $NODES_JSON 后重新运行升级"
+      sync_err="node sync 失败"
+    elif [[ -f "$SB_CONF.candidate" ]]; then
       if "$SB_BIN" check -c "$SB_CONF.candidate" >/dev/null 2>&1; then
         # SB_CONF 含节点凭据：存在即必须备份成功，失败则中止迁移（正式配置不动）
         if [[ -f "$SB_CONF" ]] && ! cp -f "$SB_CONF" "$SB_CONF.upd-bak"; then
@@ -1326,12 +1332,25 @@ apply_update() {
       fi
     fi
   fi
-  svc_do restart sing-box || true
-  svc_do restart sbx-panel || svc_do start sbx-panel || true
-  if fw_apply; then
-    ok "已重启 sing-box 与面板"
+  svc_do restart sing-box || svc_do start sing-box || true
+  local sb_ok=1 panel_ok=1
+  svc_do status sing-box || sb_ok=0
+  # 面板 restart 失败允许 start 兜底；两者都失败才算失败
+  if ! svc_do restart sbx-panel; then
+    svc_do start sbx-panel || true
+  fi
+  svc_do status sbx-panel || panel_ok=0
+  if [[ "$sb_ok" == 1 && "$panel_ok" == 1 ]]; then
+    if fw_apply; then
+      ok "已重启 sing-box 与面板"
+    else
+      warn "已重启 sing-box 与面板，但计数规则应用失败（流量统计可能不准）"
+    fi
   else
-    warn "已重启 sing-box 与面板，但计数规则应用失败（流量统计可能不准）"
+    [[ "$sb_ok" != 1 ]] && err "sing-box 重启失败，节点服务当前不可用！请查看日志: sbx 菜单 → 系统设置 → 查看日志"
+    [[ "$panel_ok" != 1 ]] && err "面板服务重启失败，流量面板暂不可用！请查看日志: journalctl -u sbx-panel -n 60"
+    [[ -n "$sync_err" ]] && err "$sync_err"
+    return 1
   fi
   return 0
 }

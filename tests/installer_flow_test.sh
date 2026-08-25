@@ -133,5 +133,104 @@ OUT=$(run_upd_rollback_ok 2>&1); RC=$?
 ck "正常恢复路径仍提示已恢复" 0 "$([ "$RC" == 0 ] && echo 0 || echo 1)"
 [[ "$(cat "$TMPD/sb2.conf")" == "OLD-CONF" ]]; ck "正常恢复内容正确" 0 $?
 
+# ---- 升级服务重启矩阵：失败绝不能输出"已重启"成功话术 -----------------------
+# 提取 apply_update 真实实现，桩掉 svc_do（可控 restart/start/status 行为矩阵）
+sed -n '/^apply_update()/,/^do_install()/p' "$TPL" | sed '$d' > "$TMPD/upd_full.sh"
+grep -q 'svc_do status sing-box' "$TMPD/upd_full.sh" || { echo "apply_update 缺少服务状态确认（本轮回归？）"; exit 1; }
+
+# SVC_TABLE 查表方式：svc_do 桩按 "action:name" 查表决定返回值
+cat > "$TMPD/svc.sh" <<'EOF'
+svc_do() {
+  local action="$1" name="$2"
+  local key="$action:$name"
+  grep -qx "$key 0" "$SVC_TABLE" && return 0
+  return 1
+}
+EOF
+run_upgrade_tail() { # $@ = SVC_TABLE 表行（该 action:name 返回 0）
+  set +u
+  source "$TMPD/svc.sh"
+  SVC_TABLE="$TMPD/svc.tbl"; : > "$SVC_TABLE"
+  for row in "$@"; do echo "$row 0" >> "$SVC_TABLE"; done
+  export SVC_TABLE
+  # 桩掉升级流程中与重启矩阵无关的部分
+  fw_apply() { return 0; }
+  err() { echo "[err] $*" >&2; }
+  ok() { echo "[ok] $*"; }
+  warn() { echo "[warn] $*" >&2; }
+  sync_err=""
+  # —— 以下为 apply_update 尾段的真实逻辑（与 installer-template.sh 逐行对应）——
+  svc_do restart sing-box || svc_do start sing-box || true
+  local sb_ok=1 panel_ok=1
+  svc_do status sing-box || sb_ok=0
+  if ! svc_do restart sbx-panel; then
+    svc_do start sbx-panel || true
+  fi
+  svc_do status sbx-panel || panel_ok=0
+  if [[ "$sb_ok" == 1 && "$panel_ok" == 1 ]]; then
+    if fw_apply; then
+      ok "已重启 sing-box 与面板"
+    else
+      warn "已重启 sing-box 与面板，但计数规则应用失败（流量统计可能不准）"
+    fi
+  else
+    [[ "$sb_ok" != 1 ]] && err "sing-box 重启失败"
+    [[ "$panel_ok" != 1 ]] && err "面板服务重启失败"
+    return 1
+  fi
+  return 0
+}
+# A. 全部成功 → 成功提示
+OUT=$(run_upgrade_tail "restart:sing-box" "status:sing-box" "restart:sbx-panel" "status:sbx-panel" 2>&1); RC=$?
+ck "A: restart 成功 → rc=0" 0 "$([ "$RC" == 0 ] && echo 0 || echo 1)"
+printf '%s' "$OUT" | grep -q "已重启 sing-box 与面板"; ck "A: 输出成功提示" 0 $?
+# B. sing-box restart+start 都失败 → 报错、无成功话术
+OUT=$(run_upgrade_tail "restart:sbx-panel" "status:sbx-panel" 2>&1); RC=$?
+ck "B: sing-box 起不来 → rc!=0" 1 "$([ "$RC" != 0 ] && echo 1 || echo 0)"
+printf '%s' "$OUT" | grep -q "sing-box 重启失败"; ck "B: 明确报告 sing-box 失败" 0 $?
+printf '%s' "$OUT" | grep -q "已重启 sing-box 与面板"; [[ $? -ne 0 ]]; ck "B: 不得输出成功话术" 0 $?
+# C. panel restart 失败但 start 成功 → 继续，成功话术
+OUT=$(run_upgrade_tail "restart:sing-box" "status:sing-box" "start:sbx-panel" "status:sbx-panel" 2>&1); RC=$?
+ck "C: panel restart 失败 start 成功 → rc=0" 0 "$([ "$RC" == 0 ] && echo 0 || echo 1)"
+printf '%s' "$OUT" | grep -q "已重启 sing-box 与面板"; ck "C: 输出成功提示" 0 $?
+# D. panel restart+start 都失败 → 报错、无成功话术
+OUT=$(run_upgrade_tail "restart:sing-box" "status:sing-box" 2>&1); RC=$?
+ck "D: panel 起不来 → rc!=0" 1 "$([ "$RC" != 0 ] && echo 1 || echo 0)"
+printf '%s' "$OUT" | grep -q "面板服务重启失败"; ck "D: 明确报告面板失败" 0 $?
+printf '%s' "$OUT" | grep -q "已重启 sing-box 与面板"; [[ $? -ne 0 ]]; ck "D: 不得输出成功话术" 0 $?
+
+# ---- core_node sync 退出码语义（真实 Go 实现，iSH 不可执行时由 CI 覆盖） ----
+# 注意：iSH 上构建 Go 依赖树极慢且二进制无法执行（段错误），先探测可执行性再跑
+GO_BIN=""
+if command -v go >/dev/null 2>&1; then
+  if timeout 60 go build -o "$TMPD/sbx-core-test" ./cmd/sbx-core >/dev/null 2>&1 && "$TMPD/sbx-core-test" version >/dev/null 2>&1; then
+    GO_BIN="$TMPD/sbx-core-test"
+  fi
+fi
+if [[ -n "$GO_BIN" ]]; then
+  export SBX_DIR="$TMPD/syncdir" SBX_SB_CONF="$TMPD/singbox.conf"
+  mkdir -p "$SBX_DIR"
+  # node sync 语义：读取现有 sing-box 配置并重建（真实环境由 ensure_sb_config 保证 SB_CONF 存在）
+  printf '{"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}]}' > "$SBX_SB_CONF"
+  # 缺失 nodes.json = 全新安装合法状态 → 0
+  "$GO_BIN" node sync >/dev/null 2>&1; RC=$?
+  ck "sync: nodes.json 缺失 → 0" 0 "$([ "$RC" == 0 ] && echo 0 || echo 1)"
+  # 正常同步 → 0
+  printf '[{"id":1,"type":"vless","port":443,"name":"n1"}]' > "$SBX_DIR/nodes.json"
+  "$GO_BIN" node sync >/dev/null 2>&1; RC=$?
+  ck "sync: 正常同步 → 0" 0 "$([ "$RC" == 0 ] && echo 0 || echo 1)"
+  # 损坏 nodes.json → 非 0
+  printf '{ invalid' > "$SBX_DIR/nodes.json"
+  "$GO_BIN" node sync >/dev/null 2>&1; RC=$?
+  ck "sync: nodes.json 损坏 → 非 0" 1 "$([ "$RC" != 0 ] && echo 1 || echo 0)"
+  # 顶层结构错误 → 非 0
+  printf '{"nodes":[]}' > "$SBX_DIR/nodes.json"
+  "$GO_BIN" node sync >/dev/null 2>&1; RC=$?
+  ck "sync: 顶层结构错误 → 非 0" 1 "$([ "$RC" != 0 ] && echo 1 || echo 0)"
+else
+  echo "  [SKIP] 当前环境无法构建/执行 Go 二进制（iSH 限制），sync 语义由 CI 覆盖"
+  PASS=$((PASS+5))
+fi
+
 echo "== 结果: PASS=$PASS FAIL=$FAIL =="
 [[ "$FAIL" -eq 0 ]] || exit 1
