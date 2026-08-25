@@ -1227,13 +1227,6 @@ menu_show_links() {
     printf '%s（如已开通 IPv6，可在「设置分享地址」里重新探测）%s\n' "$C_DIM" "$C_RESET"
   fi
   hr
-  printf '%s订阅内容 (Base64，可保存为文件供客户端导入):%s\n' "$C_DIM" "$C_RESET"
-  if [[ -n "$host6" ]]; then
-    core_node links --sub --host "$host" --host6 "$host6"
-  else
-    core_node links --sub --host "$host"
-  fi
-  echo
   pause
 }
 
@@ -1425,7 +1418,7 @@ menu_nodes() {
     printf '%s节点管理%s\n\n' "$C_B" "$C_RESET"
     core_node list
     echo
-    echo "  1) 查看分享链接与订阅"
+    echo "  1) 查看分享链接"
     echo "  2) 修改节点（端口 / SNI）"
     echo "  3) 删除节点"
     echo "  0) 返回"

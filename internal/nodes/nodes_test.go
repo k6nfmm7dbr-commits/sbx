@@ -1,7 +1,6 @@
 package nodes
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -48,9 +47,7 @@ func TestLinksGolden(t *testing.T) {
 		t.Fatalf("读取链接金标失败（先运行 tests/gen_goldens.py）: %v", err)
 	}
 	var doc struct {
-		Cases     []linkCase `json:"cases"`
-		SubWithV6 string     `json:"sub_with_v6_body"`
-		SubNoV6   string     `json:"sub_no_v6_body"`
+		Cases []linkCase `json:"cases"`
 	}
 	if err := json.Unmarshal(data, &doc); err != nil {
 		t.Fatal(err)
@@ -64,22 +61,6 @@ func TestLinksGolden(t *testing.T) {
 		if got != tc.Expected {
 			t.Errorf("%s:\n  got  %s\n  want %s", tc.Name, got, tc.Expected)
 		}
-	}
-
-	vless := doc.Cases[0].Node
-	ss := doc.Cases[2].Node
-	sub := store.Subscription([]Node{vless, ss}, "1.2.3.4", "2001:db8::1")
-	body, err := base64.StdEncoding.DecodeString(sub)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(body) != doc.SubWithV6 {
-		t.Errorf("订阅(含v6)不一致:\n%s\n---\n%s", body, doc.SubWithV6)
-	}
-	sub2 := store.Subscription([]Node{vless}, "1.2.3.4", "")
-	body2, _ := base64.StdEncoding.DecodeString(sub2)
-	if string(body2) != doc.SubNoV6 {
-		t.Errorf("订阅(无v6)不一致:\n%s\n---\n%s", body2, doc.SubNoV6)
 	}
 }
 

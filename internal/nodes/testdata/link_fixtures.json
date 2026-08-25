@@ -108,7 +108,5 @@
    "suffix": "-IPv6",
    "expected": "vless://uuuuuuuuuuuuuuuu@1.2.3.4:443?encryption=none&security=reality&type=tcp&sni=www.microsoft.com&fp=chrome&pbk=pbk_X%2B%2F%3D&sid=sid01&flow=xtls-rprx-vision#%E6%B5%8B%E8%AF%95%20VLESS-IPv6"
   }
- ],
- "sub_with_v6_body": "vless://uuuuuuuuuuuuuuuu@1.2.3.4:443?encryption=none&security=reality&type=tcp&sni=www.microsoft.com&fp=chrome&pbk=pbk_X%2B%2F%3D&sid=sid01&flow=xtls-rprx-vision#%E6%B5%8B%E8%AF%95%20VLESS\nvless://uuuuuuuuuuuuuuuu@[2001:db8::1]:443?encryption=none&security=reality&type=tcp&sni=www.microsoft.com&fp=chrome&pbk=pbk_X%2B%2F%3D&sid=sid01&flow=xtls-rprx-vision#%E6%B5%8B%E8%AF%95%20VLESS-IPv6\nss://MjAyMi1ibGFrZTMtYWVzLTEyOC1nY206YStiYz0vZA@1.2.3.4:8388#SS%20%E8%8A%82%E7%82%B9\nss://MjAyMi1ibGFrZTMtYWVzLTEyOC1nY206YStiYz0vZA@[2001:db8::1]:8388#SS%20%E8%8A%82%E7%82%B9-IPv6",
- "sub_no_v6_body": "vless://uuuuuuuuuuuuuuuu@1.2.3.4:443?encryption=none&security=reality&type=tcp&sni=www.microsoft.com&fp=chrome&pbk=pbk_X%2B%2F%3D&sid=sid01&flow=xtls-rprx-vision#%E6%B5%8B%E8%AF%95%20VLESS"
+ ]
 }

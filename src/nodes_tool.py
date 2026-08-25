@@ -211,17 +211,6 @@ def node_link(node, host=None, label_suffix=""):
     return ""
 
 
-def subscription(nodes, host=None, host6=None):
-    """生成订阅。若提供 host6（IPv6），每个节点额外附一条 IPv6 版本链接。"""
-    links = []
-    for n in nodes:
-        links.append(node_link(n, host))
-        if host6:
-            links.append(node_link(n, host6, label_suffix="-IPv6"))
-    body = "\n".join(l for l in links if l)
-    return base64.b64encode(body.encode()).decode()
-
-
 # ------------------------------------------------------------------ 命令
 def cmd_add(args):
     nodes = load_nodes()
@@ -378,9 +367,6 @@ def cmd_links(args):
         if not nodes:
             raise SystemExit("未找到节点 id=%s" % args.id)
     host6 = args.host6 if args.host6 is not None else share_host6()
-    if args.sub:
-        print(subscription(nodes, args.host, host6 or None))
-        return 0
     for n in nodes:
         print("### %s (%s, 端口 %s)" % (n.get("name"), n["type"], n["port"]))
         print(node_link(n, args.host))
@@ -471,7 +457,6 @@ def main():
     k.add_argument("id", nargs="?")
     k.add_argument("--host")
     k.add_argument("--host6", nargs="?", const="", default=None)
-    k.add_argument("--sub", action="store_true")
     k.set_defaults(func=cmd_links)
 
     p = sub.add_parser("port-used"); p.add_argument("port"); p.set_defaults(func=cmd_port_used)

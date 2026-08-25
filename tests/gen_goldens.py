@@ -17,7 +17,6 @@ gen_goldens.py — 用旧 Python 实现（reference）生成 Go 测试的金标�
 Go 行为与 reference 漂移。
 """
 
-import base64
 import copy
 import io
 import json
@@ -252,12 +251,8 @@ def link_fixtures():
     add("ipv6_bracket", vless, "2001:db8::1")          # host 未带括号应自动加
     add("label_suffix", vless, "1.2.3.4", suffix="-IPv6")
 
-    sub = nodes_tool.subscription([vless, ss], host="1.2.3.4", host6="2001:db8::1")
-    sub_nov6 = nodes_tool.subscription([vless], host="1.2.3.4", host6=None)
     return {
         "cases": cases,
-        "sub_with_v6_body": base64.b64decode(sub).decode(),
-        "sub_no_v6_body": base64.b64decode(sub_nov6).decode(),
     }
 
 

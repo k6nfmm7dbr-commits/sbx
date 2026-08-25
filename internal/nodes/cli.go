@@ -521,7 +521,7 @@ func (c *CLI) cmdInfo(args []string) int {
 
 // ---- links ---------------------------------------------------------------
 
-var linksKnown = map[string]bool{"host": true, "host6": true, "sub": true}
+var linksKnown = map[string]bool{"host": true, "host6": true}
 
 func (c *CLI) cmdLinks(args []string) int {
 	p, err := parseArgs(args, linksKnown)
@@ -552,10 +552,6 @@ func (c *CLI) cmdLinks(args []string) int {
 		host6Val = c.Store.ShareHost6()
 	}
 
-	if p.has("sub") {
-		fmt.Fprintln(c.Stdout, c.Store.Subscription(list, host, host6Val))
-		return exitOK
-	}
 	for _, n := range list {
 		fmt.Fprintf(c.Stdout, "### %s (%s, 端口 %s)\n",
 			Str(n, "name"), DisplayType(n), Str(n, "port"))

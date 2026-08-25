@@ -11,12 +11,11 @@ SBX 回归测试（无需 nft/iptables/sing-box，全部在进程内模拟内核
   * nft / iptables 后端格式解析
   * 采集器单调差分：首见、增量、归零、规则集换代
   * nft / iptables 规则生成
-  * 七种协议的分享链接与订阅
+  * 七种协议的分享链接
   * nodes_tool 增删改 + 节点 ID 单调不回收 + 端口占用判断
   * build_summary / build_live 结构一致
 """
 
-import base64
 import json
 import os
 import shutil
@@ -269,12 +268,6 @@ def test_links():
 
     anytls = {"id": 7, "type": "anytls", "port": 443, "password": "pw", "sni": "example.com"}
     check("anytls 链接", nodes_tool.node_link(anytls, "1.2.3.4").startswith("anytls://"))
-
-    # 订阅：host6 提供时每个节点多一条 IPv6
-    sub = nodes_tool.subscription([vless], host="1.2.3.4", host6="2001:db8::1")
-    decoded = base64.b64decode(sub).decode()
-    check("订阅含 IPv4 与 IPv6", decoded.count("vless://") == 2)
-    check("IPv6 标签", "-IPv6" in decoded)
 
 
 # ------------------------------------------------------------------ nodes_tool

@@ -100,33 +100,18 @@ func (s *Store) LinkFor(n Node, host, labelSuffix string) string {
 			"?" + EncodeQuery(q) + "#" + name
 
 	case "snell":
-		// Snell 无官方 URI 标准，采用 Surge 通用 snell:// 形式；
-		// v5/v6 版本在名称后缀体现（客户端仍需按其版本选择）。
-		label := name
-		if v, _ := toInt(n["version"]); v == 6 {
-			label = name + " (Snell v6)"
-		} else {
-			label = name + " (Snell v5)"
+		// Surge 配置格式（非 URI）：
+		//   名称 = snell, host, port, psk=xxx, version=N, reuse=true, tfo=true, ecn=true
+		ver := Str(n, "version")
+		if ver == "" {
+			ver = "5"
 		}
-		return "snell://" + PyQuote(Str(n, "psk"), "/") + "@" + h + ":" + port + "#" + label
+		label := baseName + labelSuffix
+		return label + " = snell, " + host + ", " + port +
+			", psk=" + Str(n, "psk") + ", version=" + ver +
+			", reuse=true, tfo=true, ecn=true"
 	}
 	return ""
 }
 
-// Subscription 生成 Base64 订阅；host6 非空时每个节点附一条 IPv6 版链接。
-func (s *Store) Subscription(list []Node, host, host6 string) string {
-	var links []string
-	for _, n := range list {
-		links = append(links, s.LinkFor(n, host, ""))
-		if host6 != "" {
-			links = append(links, s.LinkFor(n, host6, "-IPv6"))
-		}
-	}
-	var body []string
-	for _, l := range links {
-		if l != "" {
-			body = append(body, l)
-		}
-	}
-	return base64.StdEncoding.EncodeToString([]byte(strings.Join(body, "\n")))
-}
+// Subscription 已移除（不再提供 Base64 订阅）。

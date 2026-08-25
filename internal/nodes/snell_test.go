@@ -109,19 +109,23 @@ func TestSnellDisplayType(t *testing.T) {
 
 func TestSnellLinkFor(t *testing.T) {
 	s := &Store{AppDir: t.TempDir()}
-	v5 := Node{"id": json.Number("1"), "type": "snell", "port": json.Number("12345"),
-		"version": json.Number("5"), "psk": "psk123", "name": "my-snell"}
-	link := s.LinkFor(v5, "1.2.3.4", "")
-	if !strings.HasPrefix(link, "snell://psk123@1.2.3.4:12345#") {
-		t.Errorf("Snell v5 分享链接异常: %q", link)
+	v5 := Node{"id": json.Number("1"), "type": "snell", "port": json.Number("16888"),
+		"version": json.Number("5"), "psk": "cWndcrlUgCnvsInq", "name": "aws jp"}
+	link := s.LinkFor(v5, "18.178.190.117", "")
+	want := "aws jp = snell, 18.178.190.117, 16888, psk=cWndcrlUgCnvsInq, version=5, reuse=true, tfo=true, ecn=true"
+	if link != want {
+		t.Errorf("Snell v5 Surge 格式异常:\n got  %q\n want %q", link, want)
 	}
-	if !strings.Contains(link, "Snell v5") {
-		t.Errorf("Snell v5 分享链接应标注版本: %q", link)
+	v6 := Node{"id": json.Number("1"), "type": "snell", "port": json.Number("16888"),
+		"version": json.Number("6"), "psk": "cWndcrlUgCnvsInq", "name": "aws jp"}
+	if link := s.LinkFor(v6, "18.178.190.117", ""); !strings.Contains(link, "version=6") {
+		t.Errorf("Snell v6 应标注 version=6: %q", link)
 	}
-	v6 := Node{"id": json.Number("1"), "type": "snell", "port": json.Number("12345"),
-		"version": json.Number("6"), "psk": "psk123", "name": "my-snell"}
-	if link := s.LinkFor(v6, "1.2.3.4", ""); !strings.Contains(link, "Snell v6") {
-		t.Errorf("Snell v6 分享链接应标注版本: %q", link)
+	// 无 name 时回退类型名
+	anon := Node{"id": json.Number("1"), "type": "snell", "port": json.Number("16888"),
+		"version": json.Number("5"), "psk": "x"}
+	if link := s.LinkFor(anon, "1.2.3.4", ""); !strings.HasPrefix(link, "snell = snell, ") {
+		t.Errorf("无 name 应回退 snell: %q", link)
 	}
 }
 
