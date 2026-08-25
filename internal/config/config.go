@@ -43,7 +43,7 @@ func defaultConf() map[string]any {
 		"ipt_script": filepath.Join(dir, "iptables.sh"),
 		"web_root":   filepath.Join(dir, "web"),
 		"backend":    "auto",
-		"listen":     "0.0.0.0",
+		"listen":     "127.0.0.1",
 		"port":       json.Number("8080"),
 		"token":      "",
 		"interval":   json.Number("2"),
@@ -55,47 +55,31 @@ func defaultConf() map[string]any {
 type Config struct {
 	raw map[string]any
 
-	DB        string
-	NodesFile string
-	NftConf   string
-	IptScript string
-	WebRoot   string // 兼容保留：Go 版前端内嵌于二进制，此键不再被读取
-	Backend   string
-	Listen    string
-	Port      int
-	Token     string
-	Interval  int
-	TZ        string
+	DB           string
+	NodesFile    string
+	NftConf      string
+	IptScript    string
+	WebRoot      string // 兼容保留：Go 版前端内嵌于二进制，此键不再被读取
+	Backend      string
+	Listen       string
+	Port         int
+	Token        string
+	Interval     int
+	TZ           string
+	SecureCookie bool
 }
 
 // Load 读取配置。文件不存在或损坏时使用默认值并记日志（与 Python 行为一致）。
 //
 // 注意：Load 是宽松读取，仅限纯只读场景（config-get / show / daily 等）。
 // serve / config-set / config-ensure-token / apply / rules / clear 等会
-// 启动网络服务、修改配置或系统状态的路径必须使用 LoadStrict（fail-closed），
-// 防止 panel.json 意外损坏时带着默认值（0.0.0.0 + 空 token）无认证启动。
+// 启动网络服务、修改配置或系统状态的路径必须使用 LoadStrict（fail-closed）。
 func Load() *Config {
-	path := ConfPath()
-	c := &Config{raw: defaultConf()}
-	data, err := os.ReadFile(path)
-	switch {
-	case os.IsNotExist(err):
-		slog.Info("配置不存在, 使用默认值", "path", path)
-	case err != nil:
-		slog.Warn("配置读取失败, 使用默认值", "path", path, "err", err)
-	default:
-		var file map[string]any
-		dec := json.NewDecoder(strings.NewReader(string(data)))
-		dec.UseNumber()
-		if jerr := dec.Decode(&file); jerr != nil {
-			slog.Warn("配置解析失败", "err", jerr)
-		} else {
-			for k, v := range file {
-				c.raw[k] = v
-			}
-		}
+	c, _ := load(ConfPath(), false)
+	// 宽松：语义非法仅记日志（只读场景不强中断）。
+	if err := c.Validate(); err != nil {
+		slog.Warn("配置语义校验失败(仅告警)", "err", err)
 	}
-	c.normalize()
 	return c
 }
 
@@ -103,42 +87,91 @@ func Load() *Config {
 //   - 文件不存在：返回默认值（合法的全新安装状态）；
 //   - 文件存在但 ReadFile 失败：返回错误；
 //   - 文件存在但 JSON 损坏（含尾部多余数据）：返回错误；
-//   - 文件存在且合法：正常合并读取。
-//
-// 典型事故场景：原配置含 token，文件意外损坏后宽松读取回退到
-// listen=0.0.0.0 + token="" 的默认值并无认证公网启动——strict 模式下
-// 这类路径必须拒绝启动、拒绝覆盖，把明确错误交给调用方。
+//   - 文件存在且合法：正常合并读取并做语义校验。
 func LoadStrict() (*Config, error) {
-	path := ConfPath()
+	c, err := load(ConfPath(), true)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.Validate(); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// load 是 Load/LoadStrict 共享的读取实现；只在「损坏是否允许 fallback」策略层分开。
+func load(path string, strict bool) (*Config, error) {
 	c := &Config{raw: defaultConf()}
 	data, err := os.ReadFile(path)
 	switch {
 	case os.IsNotExist(err):
 		slog.Info("配置不存在, 使用默认值", "path", path)
-		c.normalize()
-		return c, nil
 	case err != nil:
-		return nil, fmt.Errorf("配置文件读取失败, 拒绝使用默认值继续 (%s): %w", path, err)
-	}
-	var file map[string]any
-	dec := json.NewDecoder(strings.NewReader(string(data)))
-	dec.UseNumber()
-	if jerr := dec.Decode(&file); jerr != nil {
-		return nil, fmt.Errorf("配置文件损坏, 拒绝使用默认值继续(请修复 %s 或恢复备份): %w", path, jerr)
-	}
-	// 尾部只允许空白与 EOF：`} garbage`、多个 JSON 值同样视为损坏。
-	var extra any
-	if jerr := dec.Decode(&extra); jerr != io.EOF {
-		if jerr == nil {
-			return nil, fmt.Errorf("配置文件损坏(%s): 存在多个 JSON 值", path)
+		if strict {
+			return nil, fmt.Errorf("配置文件读取失败, 拒绝使用默认值继续 (%s): %w", path, err)
 		}
-		return nil, fmt.Errorf("配置文件损坏(%s): 尾部存在非法数据: %w", path, jerr)
-	}
-	for k, v := range file {
-		c.raw[k] = v
+		slog.Warn("配置读取失败, 使用默认值", "path", path, "err", err)
+	default:
+		file, derr := decodeConfig(data)
+		if derr != nil {
+			if strict {
+				return nil, fmt.Errorf("配置文件损坏, 拒绝使用默认值继续(请修复 %s 或恢复备份): %w", path, derr)
+			}
+			slog.Warn("配置解析失败", "err", derr)
+		} else {
+			for k, v := range file {
+				c.raw[k] = v
+			}
+		}
 	}
 	c.normalize()
 	return c, nil
+}
+
+// decodeConfig 解析单个 JSON 对象；尾部只允许空白与 EOF（`} garbage`、
+// 多个 JSON 值视为损坏）。
+func decodeConfig(data []byte) (map[string]any, error) {
+	var file map[string]any
+	dec := json.NewDecoder(strings.NewReader(string(data)))
+	dec.UseNumber()
+	if err := dec.Decode(&file); err != nil {
+		return nil, err
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("存在多个 JSON 值")
+		}
+		return nil, fmt.Errorf("尾部存在非法数据: %w", err)
+	}
+	return file, nil
+}
+
+// Validate 语义校验：拒绝明确会导致服务异常/不安全的配置。
+// listen 与 timezone 不做强校验——空 listen 属「未配置」（服务层已按公网拒绝
+// 空 token），timezone 由 traffic.Location 宽容兜底（UTC+8 等也合法）。
+func (c *Config) Validate() error {
+	if c.Port < 1 || c.Port > 65535 {
+		return fmt.Errorf("port 必须在 1-65535: %d", c.Port)
+	}
+	switch c.Backend {
+	case "auto", "nft", "iptables":
+	default:
+		return fmt.Errorf("backend 非法: %q", c.Backend)
+	}
+	if c.Interval < 1 {
+		return fmt.Errorf("interval 必须 > 0")
+	}
+	if c.Interval > 86400 {
+		return fmt.Errorf("interval 过大: %d", c.Interval)
+	}
+	if c.DB == "" || c.NodesFile == "" {
+		return fmt.Errorf("db/nodes 路径不能为空")
+	}
+	if c.NftConf == "" || c.IptScript == "" {
+		return fmt.Errorf("防火墙脚本路径不能为空")
+	}
+	return nil
 }
 
 func (c *Config) normalize() {
@@ -148,6 +181,13 @@ func (c *Config) normalize() {
 	c.IptScript = c.Str("ipt_script")
 	c.WebRoot = c.Str("web_root")
 	c.Backend = strings.ToLower(c.Str("backend"))
+	// 归一化常见缩写，与 firewall 的 normalizeBackend 口径一致。
+	switch c.Backend {
+	case "nftables":
+		c.Backend = "nft"
+	case "ipt":
+		c.Backend = "iptables"
+	}
 	c.Listen = c.Str("listen")
 	c.Port = int(c.Int("port"))
 	c.Token = strings.TrimSpace(c.Str("token"))
@@ -156,6 +196,22 @@ func (c *Config) normalize() {
 		c.Interval = 1
 	}
 	c.TZ = c.Str("tz")
+	c.SecureCookie = c.Bool("secure_cookie")
+}
+
+// Bool 读取布尔值；仅接受明确的 true（字符串 "true"/"1"/"yes"，或 JSON true）。
+func (c *Config) Bool(key string) bool {
+	switch t := c.raw[key].(type) {
+	case bool:
+		return t
+	case string:
+		v := strings.ToLower(strings.TrimSpace(t))
+		return v == "true" || v == "1" || v == "yes"
+	case json.Number:
+		return t.String() == "1"
+	default:
+		return false
+	}
 }
 
 // Get 返回原始值（供 CLI config-get 打印）。

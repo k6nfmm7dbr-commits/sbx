@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -31,6 +32,11 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request, code int, ctype st
 	w.Header().Set("Content-Type", ctype)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Frame-Options", "DENY")
+	// 前端已无内联脚本；style.css 里 select 的下拉箭头用 data:image/svg+xml，
+	// 因此 img-src 需额外放行 data:。
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:")
 	w.WriteHeader(code)
 	if r.Method != http.MethodHead && len(body) > 0 {
 		_, _ = w.Write(body)
@@ -55,8 +61,12 @@ func (s *Server) sendJSON(w http.ResponseWriter, r *http.Request, code int, v an
 
 func (s *Server) token() string { return s.cfg.Token }
 
-// authorized 复刻旧 _authorized：Bearer 头 > ?token= > Cookie sbx_token；
-// 服务端未配置 token 时完全开放；比较使用常量时间算法。
+// authorized 复刻旧 _authorized：Bearer 头 > Cookie sbx_token。
+// 服务端未配置 token 时完全开放。
+//
+// 安全要求（v3.0.5）：不再接受 query string `?token=` 形式——token 会泄漏进
+// 浏览器历史 / access log / reverse proxy log / referrer。仅保留
+// Authorization: Bearer 与 HttpOnly Cookie 两种渠道。
 func (s *Server) authorized(r *http.Request) bool {
 	token := s.token()
 	if token == "" {
@@ -68,12 +78,9 @@ func (s *Server) authorized(r *http.Request) bool {
 		given = auth[len("Bearer "):]
 	}
 	if given == "" {
-		given = qsGet(r, "token")
-	}
-	if given == "" {
 		given = cookieToken(r)
 	}
-	return constTimeEqual(given, token)
+	return tokenEqual(given, token)
 }
 
 // cookieToken 提取 Cookie 中的 sbx_token 并做百分号解码（不把 + 当空格），
@@ -97,19 +104,12 @@ func cookieToken(r *http.Request) string {
 	return ""
 }
 
-func constTimeEqual(a, b string) bool {
-	if len(a) != len(b) {
-		// 长度不同也要消耗比较时间，避免长度侧信道
-		var sum byte
-		for i := range a {
-			sum |= a[i] ^ 0
-		}
-		_ = sum
+// tokenEqual 等长度 secret 内容比较（常量时间）。
+// 长度本身不是保密信息，长度不等时直接返回 false；等长度内容用
+// crypto/subtle.ConstantTimeCompare 避免因首个不同字符的位置产生 timing 差异。
+func tokenEqual(given, token string) bool {
+	if len(given) != len(token) {
 		return false
 	}
-	var v byte
-	for i := 0; i < len(a); i++ {
-		v |= a[i] ^ b[i]
-	}
-	return v == 0
+	return subtle.ConstantTimeCompare([]byte(given), []byte(token)) == 1
 }

@@ -4,7 +4,9 @@ package api
 
 import (
 	"log/slog"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,7 +20,9 @@ import (
 func New(cfg *config.Config, db *database.DB, src traffic.LiveSource) (*Server, *http.Server) {
 	s := &Server{cfg: cfg, db: db, src: src}
 	hs := &http.Server{
-		Addr:              cfg.Listen + ":" + itoa(cfg.Port),
+		// IPv6 监听地址必须用 net.JoinHostPort 拼接（"::" → "[::]:8080"），
+		// 不能用 cfg.Listen + ":" + port 得到非法 ":::8080"。
+		Addr:              net.JoinHostPort(cfg.Listen, strconv.Itoa(cfg.Port)),
 		Handler:           s.recoverMiddleware(s),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
@@ -90,6 +94,9 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, route string)
 
 	case "/app.js":
 		s.serveAsset(w, r, "app.js", "application/javascript; charset=utf-8")
+
+	case "/login.js":
+		s.serveAsset(w, r, "login.js", "application/javascript; charset=utf-8")
 
 	case "/style.css":
 		s.serveAsset(w, r, "style.css", "text/css; charset=utf-8")

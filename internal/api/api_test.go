@@ -113,13 +113,13 @@ func TestAuthMatrix(t *testing.T) {
 		t.Errorf("401 内容异常: %s", bj)
 	}
 
-	// 三种携带方式全部放行
+	// 仅 Bearer 与 Cookie 放行；query string token 已移除（防泄漏进日志/历史）
 	hdr := map[string]string{"Authorization": "Bearer " + testToken}
 	if r := doReq(t, ts, http.MethodGet, "/api/summary", hdr); r.StatusCode != 200 {
 		t.Errorf("Bearer 应放行, got %d", r.StatusCode)
 	}
-	if r := doReq(t, ts, http.MethodGet, "/api/summary?token="+testToken, nil); r.StatusCode != 200 {
-		t.Errorf("?token= 应放行, got %d", r.StatusCode)
+	if r := doReq(t, ts, http.MethodGet, "/api/summary?token="+testToken, nil); r.StatusCode != 401 {
+		t.Errorf("?token= 应拒绝(已移除 query token 认证), got %d", r.StatusCode)
 	}
 	if r := doReq(t, ts, http.MethodGet, "/api/summary",
 		map[string]string{"Cookie": "sbx_token=" + testToken}); r.StatusCode != 200 {
@@ -266,7 +266,7 @@ func TestAPIEndpoints(t *testing.T) {
 		t.Errorf("live 节点 conns 异常: %+v", node0)
 	}
 
-	// /api/nodes 保留未知字段
+	// /api/nodes 必须脱敏：只含 id/name/type/port，绝不含 secret 字段。
 	resp = doReq(t, ts, http.MethodGet, "/api/nodes", nil)
 	var nd struct {
 		Nodes []map[string]any `json:"nodes"`
@@ -274,8 +274,19 @@ func TestAPIEndpoints(t *testing.T) {
 	if err := json.Unmarshal([]byte(body(t, resp)), &nd); err != nil {
 		t.Fatal(err)
 	}
-	if len(nd.Nodes) != 2 || nd.Nodes[0]["custom_key"] != "keepme" {
-		t.Errorf("/api/nodes 未保留未知字段: %+v", nd.Nodes)
+	if len(nd.Nodes) != 2 {
+		t.Fatalf("/api/nodes 节点数异常: %+v", nd.Nodes)
+	}
+	for _, n := range nd.Nodes {
+		for _, secret := range []string{"password", "uuid", "private_key",
+			"public_key", "short_id", "cert", "key", "custom_key"} {
+			if _, ok := n[secret]; ok {
+				t.Errorf("/api/nodes 泄漏 secret 字段 %q: %+v", secret, n)
+			}
+		}
+	}
+	if _, ok := nd.Nodes[0]["name"]; !ok {
+		t.Errorf("/api/nodes 缺少展示字段 name: %+v", nd.Nodes[0])
 	}
 
 	// daily 参数处理
@@ -283,8 +294,8 @@ func TestAPIEndpoints(t *testing.T) {
 		!strings.Contains(body(t, r), `"days":[`) {
 		t.Error("/api/daily 异常")
 	}
-	if r := doReq(t, ts, http.MethodGet, "/api/daily?days=abc", nil); r.StatusCode != 500 {
-		t.Error("days 非法应 500")
+	if r := doReq(t, ts, http.MethodGet, "/api/daily?days=abc", nil); r.StatusCode != 400 {
+		t.Error("days 非法应 400")
 	}
 	if r := doReq(t, ts, http.MethodGet, "/api/daily?days=100000&scope=node%3A1", nil); r.StatusCode != 200 {
 		t.Error("scope+超大 days 应钳制到 365 并成功")
@@ -303,6 +314,75 @@ func TestAPIEndpoints(t *testing.T) {
 		t.Error("尾斜杠应归一化")
 	}
 	_ = db
+}
+
+// ---- 认证常量时间比较 + login body 限制（v3.0.5） -------------------------
+
+func TestTokenEqual(t *testing.T) {
+	tok := "0123456789abcdef0123456789abcdef"
+	cases := []struct {
+		name  string
+		given string
+		want  bool
+	}{
+		{"正确", tok, true},
+		{"首字节错", "x123456789abcdef0123456789abcdef", false},
+		{"中间错", "0123456789abcdefX123456789abcdef", false},
+		{"末字节错", "0123456789abcdef0123456789abcdeX", false},
+		{"短", "0123456789abcdef", false},
+		{"长", tok + "extra", false},
+		{"空", "", false},
+	}
+	for _, c := range cases {
+		if got := tokenEqual(c.given, tok); got != c.want {
+			t.Errorf("%s: tokenEqual=%v want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestLoginBodyTooLarge(t *testing.T) {
+	ts, _, _ := newTestServer(t, testToken, &fakeSource{backend: "nft"}, "")
+	big := strings.Repeat("x", maxLoginBody+1)
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/login", strings.NewReader("token="+big))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := noRedirectClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("超大登录体应 413, got %d", resp.StatusCode)
+	}
+}
+
+func TestSecurityHeaders(t *testing.T) {
+	ts, _, _ := newTestServer(t, "", &fakeSource{backend: "nft"}, "")
+	resp := doReq(t, ts, http.MethodGet, "/healthz", nil)
+	for hdr, want := range map[string]string{
+		"X-Frame-Options":           "DENY",
+		"X-Content-Type-Options":    "nosniff",
+		"Referrer-Policy":           "no-referrer",
+		"Content-Security-Policy":   "default-src 'self'; img-src 'self' data:",
+	} {
+		if got := resp.Header.Get(hdr); got != want {
+			t.Errorf("响应头 %s=%q want %q", hdr, got, want)
+		}
+	}
+}
+
+func TestIPv6AddrJoin(t *testing.T) {
+	// api.New 用 net.JoinHostPort 拼接 Addr，IPv6 不应产生非法 ":::8080"
+	for _, listen := range []string{"127.0.0.1", "0.0.0.0", "::1", "::"} {
+		cfg := &config.Config{Listen: listen, Port: 8080, Backend: "nft"}
+		s, hs := New(cfg, nil, &fakeSource{backend: "nft"})
+		_ = s
+		if hs.Addr == "" {
+			t.Fatalf("listen=%q Addr 为空", listen)
+		}
+		if listen == "::" && hs.Addr == ":::8080" {
+			t.Errorf("IPv6 :: Addr 非法: %q", hs.Addr)
+		}
+	}
 }
 
 func TestExportCSV(t *testing.T) {

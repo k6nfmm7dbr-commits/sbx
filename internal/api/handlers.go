@@ -51,7 +51,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request, route string)
 		if daysRaw != "" {
 			n, err := strconv.Atoi(daysRaw)
 			if err != nil {
-				s.sendJSON(w, r, http.StatusInternalServerError,
+				// 用户参数错误是 400，不是 500（内部错误）。
+				s.sendJSON(w, r, http.StatusBadRequest,
 					map[string]string{"error": "invalid literal for int(): " + strconv.Quote(daysRaw)})
 				return
 			}
@@ -75,12 +76,9 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request, route string)
 		s.sendJSON(w, r, http.StatusOK, map[string]any{"days": rows})
 
 	case "/api/nodes":
+		// 只返回脱敏后的 PublicNodeDTO，绝不下发 password/uuid/private_key 等。
 		list := nodes.LoadPanelNodes(s.cfg.NodesFile)
-		arr := make([]any, len(list))
-		for i, n := range list {
-			arr[i] = map[string]any(n)
-		}
-		s.sendJSON(w, r, http.StatusOK, map[string]any{"nodes": arr})
+		s.sendJSON(w, r, http.StatusOK, map[string]any{"nodes": nodes.PublicNodes(list)})
 
 	case "/api/export":
 		s.handleExport(w, r)
@@ -142,4 +140,4 @@ func queryExportRows(db *sql.DB) ([]exportRow, error) {
 	return out, rows.Err()
 }
 
-func itoa(n int) string { return strconv.Itoa(n) }
+

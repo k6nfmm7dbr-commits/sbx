@@ -24,6 +24,11 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, route string
 		s.redirect(w, "/login?error=1")
 		return
 	}
+	// 超限必须 413 拒绝，不得截断后继续解析（否则可能构造部分令牌绕过）。
+	if len(body) > maxLoginBody {
+		s.sendText(w, r, http.StatusRequestEntityTooLarge, "request body too large")
+		return
+	}
 	vals, perr := url.ParseQuery(string(body))
 	given := ""
 	if perr == nil {
@@ -35,15 +40,21 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, route string
 		}
 	}
 	token := s.token()
-	if token != "" && constTimeEqual(given, token) {
-		http.SetCookie(w, &http.Cookie{
+	if token != "" && tokenEqual(given, token) {
+		cookie := &http.Cookie{
 			Name:     "sbx_token",
 			Value:    nodes.PyQuote(token, "/"),
 			Path:     "/",
 			MaxAge:   604800,
 			HttpOnly: true,
 			SameSite: http.SameSiteStrictMode,
-		})
+		}
+		// 仅当用户显式配置 secure_cookie（前端套了 HTTPS 反代）时才加 Secure，
+		// 不能无条件 Secure=true，否则纯 HTTP 直连登录会失效。
+		if s.cfg.SecureCookie {
+			cookie.Secure = true
+		}
+		http.SetCookie(w, cookie)
 		w.Header().Set("Location", "/")
 		w.WriteHeader(http.StatusFound)
 		return

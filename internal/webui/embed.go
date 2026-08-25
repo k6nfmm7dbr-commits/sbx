@@ -8,7 +8,7 @@ import (
 	"io/fs"
 )
 
-//go:embed static/index.html static/login.html static/app.js static/style.css
+//go:embed static/index.html static/login.html static/app.js static/login.js static/style.css
 var embedded embed.FS
 
 // FS 返回以 "web/" 为根的前端文件系统。
