@@ -43,7 +43,7 @@ func defaultConf() map[string]any {
 		"ipt_script": filepath.Join(dir, "iptables.sh"),
 		"web_root":   filepath.Join(dir, "web"),
 		"backend":    "auto",
-		"listen":     "127.0.0.1",
+		"listen":     "0.0.0.0",
 		"port":       json.Number("8080"),
 		"token":      "",
 		"interval":   json.Number("2"),

@@ -32,7 +32,7 @@ func TestLoadStrictMissingFileAllowsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("文件不存在应允许 defaults, 得到错误: %v", err)
 	}
-	if c.Listen != "127.0.0.1" || c.Token != "" {
+	if c.Listen != "0.0.0.0" || c.Token != "" {
 		t.Fatalf("defaults 不正确: listen=%q token=%q", c.Listen, c.Token)
 	}
 	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {

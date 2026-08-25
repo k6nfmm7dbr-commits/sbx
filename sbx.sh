@@ -493,7 +493,7 @@ ensure_panel_conf() {
   "ipt_script": "$APP_DIR/iptables.sh",
   "web_root": "$WEB_DIR",
   "backend": "auto",
-  "listen": "127.0.0.1",
+  "listen": "0.0.0.0",
   "port": $port,
   "token": "$token",
   "interval": 2,
