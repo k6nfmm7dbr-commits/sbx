@@ -75,15 +75,38 @@ type Status struct {
 }
 
 // Snapshot 返回当前状态快照（无锁竞争开销极小）。
+// Conns map 做 defensive copy：不暴露内部 map 引用，避免未来调用方误写
+// 引发 data race 或状态污染。
 func (c *Collector) Snapshot() Status {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return Status{
 		Error:    c.lastError,
 		LastOK:   c.lastOKTs,
-		Conns:    c.lastConns,
+		Conns:    cloneConns(c.lastConns),
 		HasConns: c.hasConns,
 	}
+}
+
+// cloneConns 深拷贝连接数 map（Conns 含 *int 指针字段，须复制指向值）。
+func cloneConns(m map[string]connection.Conns) map[string]connection.Conns {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]connection.Conns, len(m))
+	for k, v := range m {
+		var cc connection.Conns
+		if v.TCP != nil {
+			t := *v.TCP
+			cc.TCP = &t
+		}
+		if v.UDP != nil {
+			u := *v.UDP
+			cc.UDP = &u
+		}
+		out[k] = cc
+	}
+	return out
 }
 
 // ---- 元数据 / 基线 -------------------------------------------------------
@@ -365,21 +388,35 @@ func (c *Collector) Tick(ctx context.Context) error {
 		return err
 	}
 
-	// 连接数缓存：由采集线程每轮算一次，HTTP 请求不再逐次读 /proc
+	// 连接数缓存：由采集线程每轮算一次，HTTP 请求不再逐次读 /proc。
+	// nodes.json 损坏或 /proc 部分读取失败时保留上一份可信快照，
+	// 绝不把「损坏→空列表」或「partial 读取」当作完整连接数覆盖成 0。
+	connsUpdated := false
 	connsMap := map[string]connection.Conns{}
-	nodeList := nodes.LoadPanelNodes(c.cfg.NodesFile)
-	if cs, cerr := connection.CountForNodes(nodeList); cerr == nil {
-		connsMap = cs
+	nodeList, nerr := nodes.LoadPanelNodesStrict(c.cfg.NodesFile)
+	if nerr != nil {
+		slog.Warn("节点文件损坏, 连接数保留上次快照", "err", nerr)
 	} else {
-		slog.Debug("连接数统计失败", "err", cerr)
+		res, cerr := connection.CountForNodes(nodeList)
+		switch {
+		case cerr != nil:
+			slog.Debug("连接数统计失败", "err", cerr)
+		case res.Partial:
+			slog.Debug("连接数统计不完整(/proc 部分读取失败), 保留上次快照")
+		default:
+			connsMap = res.Conns
+			connsUpdated = true
+		}
 	}
 
 	c.mu.Lock()
 	c.lastSampleTs = ts
 	c.lastOKTs = wallTs
 	c.lastError = ""
-	c.lastConns = connsMap
-	c.hasConns = true
+	if connsUpdated {
+		c.lastConns = connsMap
+		c.hasConns = true
+	}
 	c.mu.Unlock()
 
 	if freshRuleset {

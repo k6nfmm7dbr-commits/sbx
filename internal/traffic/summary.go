@@ -34,7 +34,11 @@ func resolveConns(st Status, list []nodes.Node) (map[string]connection.Conns, er
 	if st.Conns != nil {
 		return st.Conns, nil
 	}
-	return connection.CountForNodes(list)
+	res, err := connection.CountForNodes(list)
+	if err != nil {
+		return nil, err
+	}
+	return res.Conns, nil
 }
 
 func rateTotal(rates map[string]Rate) Rate {

@@ -79,20 +79,24 @@ func TestCountForNodes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	conns := got.Conns
 
-	n1 := got["1"]
+	n1 := conns["1"]
 	if n1.TCP == nil || *n1.TCP != 2 { // tcp + tcp6 各一条 ESTABLISHED
 		t.Errorf("node1 TCP=%v", n1.TCP)
 	}
 	if n1.UDP != nil {
 		t.Error("vless 不应有 UDP 计数")
 	}
-	n2 := got["2"]
+	n2 := conns["2"]
 	if n2.TCP == nil || *n2.TCP != 0 {
 		t.Errorf("node2 TCP 应为 0, got %v", n2.TCP)
 	}
 	if n2.UDP == nil || *n2.UDP != 1 { // 仅已 connect 的 DNS 会话计入
 		t.Errorf("node2 UDP 应为 1, got %v", derefInt(n2.UDP))
+	}
+	if got.Partial {
+		t.Error("完整 fixture 不应标记 partial")
 	}
 }
 

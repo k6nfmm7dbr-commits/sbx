@@ -66,7 +66,9 @@ type DB struct {
 // Open 打开（必要时创建）数据库并执行迁移。
 func Open(path string) (*DB, error) {
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
-		_ = os.MkdirAll(dir, 0o755)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("创建数据目录失败: %w", err)
+		}
 	}
 	db := sql.OpenDB(&pragmaConnector{dsn: "file:" + path})
 	db.SetMaxOpenConns(1)
@@ -90,35 +92,49 @@ func Open(path string) (*DB, error) {
 func (d *DB) Path() string { return d.path }
 
 func (d *DB) migrate() error {
+	// 迁移全部放入单个事务：CREATE / ALTER / UPDATE 任一失败即整体回滚，
+	// 绝不留半迁移 schema。MaxOpenConns=1 下事务独占连接，因此 PRAGMA
+	// 查询也必须走 tx（不能走 d.Query，否则会与事务争用同一连接而死锁）。
+	tx, err := d.Begin()
+	if err != nil {
+		return fmt.Errorf("开启迁移事务失败: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	for _, stmt := range splitStatements(Schema) {
-		if _, err := d.Exec(stmt); err != nil {
+		if _, err := tx.Exec(stmt); err != nil {
 			return fmt.Errorf("建表失败: %w", err)
 		}
 	}
 	// 无损迁移旧库：旧 samples 没有 duration_ms / valid 列。
-	cols, err := d.sampleColumns()
+	cols, err := sampleColumns(tx)
 	if err != nil {
 		return err
 	}
 	if _, ok := cols["duration_ms"]; !ok {
-		if _, err := d.Exec("ALTER TABLE samples ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0"); err != nil {
+		if _, err := tx.Exec("ALTER TABLE samples ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0"); err != nil {
 			return err
 		}
 	}
 	if _, ok := cols["valid"]; !ok {
-		if _, err := d.Exec("ALTER TABLE samples ADD COLUMN valid INTEGER NOT NULL DEFAULT 1"); err != nil {
+		if _, err := tx.Exec("ALTER TABLE samples ADD COLUMN valid INTEGER NOT NULL DEFAULT 1"); err != nil {
 			return err
 		}
 	}
 	// 升级前的旧样本没有真实耗时，不能用于实时速率计算；daily/totals 不受影响。
-	if _, err := d.Exec("UPDATE samples SET valid=0 WHERE duration_ms<=0"); err != nil {
+	if _, err := tx.Exec("UPDATE samples SET valid=0 WHERE duration_ms<=0"); err != nil {
 		return err
 	}
-	return nil
+	return tx.Commit()
 }
 
-func (d *DB) sampleColumns() (map[string]bool, error) {
-	rows, err := d.Query("PRAGMA table_info(samples)")
+// querier 抽象 *sql.DB 与 *sql.Tx 共有的查询能力，供 sampleColumns 复用。
+type querier interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+}
+
+func sampleColumns(q querier) (map[string]bool, error) {
+	rows, err := q.Query("PRAGMA table_info(samples)")
 	if err != nil {
 		return nil, err
 	}

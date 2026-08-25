@@ -66,19 +66,27 @@ func RemConnected(rem string) bool {
 	return stripped != "" || !(port == "0" || port == "0000")
 }
 
-// CountByPort 读多个 /proc 文件，聚合每个本地端口的命中数 {port: count}。
-func CountByPort(files []string, keep Keep, readFile func(string) (string, error)) map[int]int {
+// CountByPort 读多个 /proc 文件，聚合每个本地端口的命中数。
+// 返回 (hits, partial)：partial 表示至少一个文件「存在但读取失败」
+// （如权限/临时 I/O 故障）。文件不存在（os.ErrNotExist）不算失败——
+// 纯 IPv4 机器没有 /proc/net/tcp6 属正常。
+func CountByPort(files []string, keep Keep, readFile func(string) (string, error)) (map[int]int, bool) {
 	hits := map[int]int{}
+	partial := false
 	for _, path := range files {
 		text, err := readFile(path)
 		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			partial = true
 			continue
 		}
 		for _, p := range ParseLocalPorts(text, keep) {
 			hits[p]++
 		}
 	}
-	return hits
+	return hits, partial
 }
 
 func readOSFile(path string) (string, error) {
@@ -99,22 +107,28 @@ func sumHits(hits map[int]int, lo, hi int64) int {
 	return total
 }
 
+// CountResult 连接数统计结果。
+type CountResult struct {
+	Conns   map[string]Conns
+	Partial bool // 存在 /proc 文件读取失败，结果可能不完整
+}
+
 // CountForNodes 返回 {node_id_string: Conns}：
 // tcp 仅 TCP 类协议统计 ESTABLISHED 数，udp 仅 UDP 类协议统计已建立会话数，
 // 其余为 nil。节点端口非法时返回错误（对齐旧实现抛异常路径）。
-func CountForNodes(list []nodes.Node) (map[string]Conns, error) {
+func CountForNodes(list []nodes.Node) (CountResult, error) {
 	return countForNodes(list, readOSFile)
 }
 
-func countForNodes(list []nodes.Node, readFile func(string) (string, error)) (map[string]Conns, error) {
-	tcpHits := CountByPort(tcpProcFiles, func(st, rem string) bool { return st == tcpEstablished }, readFile)
-	udpHits := CountByPort(udpProcFiles, func(_, rem string) bool { return RemConnected(rem) }, readFile)
+func countForNodes(list []nodes.Node, readFile func(string) (string, error)) (CountResult, error) {
+	tcpHits, tcpPartial := CountByPort(tcpProcFiles, func(st, rem string) bool { return st == tcpEstablished }, readFile)
+	udpHits, udpPartial := CountByPort(udpProcFiles, func(_, rem string) bool { return RemConnected(rem) }, readFile)
 
 	result := make(map[string]Conns, len(list))
 	for _, n := range list {
 		ranges := nodes.ParsePorts(n)
 		if len(ranges) == 0 {
-			return nil, fmt.Errorf("节点端口非法")
+			return CountResult{}, fmt.Errorf("节点端口非法")
 		}
 		protos := nodes.Protocols(n)
 		var pair Conns
@@ -142,5 +156,5 @@ func countForNodes(list []nodes.Node, readFile func(string) (string, error)) (ma
 		}
 		result[nodes.IDString(n)] = pair
 	}
-	return result, nil
+	return CountResult{Conns: result, Partial: tcpPartial || udpPartial}, nil
 }
