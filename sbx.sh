@@ -364,8 +364,12 @@ install_sbx_core() {
   if command -v git >/dev/null 2>&1; then
     dist_sha=$(git ls-remote "https://github.com/k6nfmm7dbr-commits/sbx.git" refs/heads/dist 2>/dev/null | awk '{print $1}')
   else
-    dist_sha=$(curl -fsSL -m 15 "https://api.github.com/repos/k6nfmm7dbr-commits/sbx/commits/dist" 2>/dev/null \
-      | grep -m1 '"sha"' | sed -E 's/.*"sha"[[:space:]]*:[[:space:]]*"([0-9a-f]+)".*/\1/')
+    # 用轻量 /git/ref API（仅返回 sha，不带 diff），curl 完整下载到变量，
+    # 再用 here-string 提取——避免 grep -m1 提前退出使上游进程 SIGPIPE
+    # （`set -o pipefail` 下被误判失败）。
+    local refs_json
+    refs_json=$(curl -fsSL -m 15 "https://api.github.com/repos/k6nfmm7dbr-commits/sbx/git/ref/heads/dist" 2>/dev/null) || refs_json=""
+    dist_sha=$(grep -m1 '"sha"' <<< "$refs_json" | sed -E 's/.*"sha"[[:space:]]*:[[:space:]]*"([0-9a-f]+)".*/\1/')
   fi
   if [[ -n "$dist_sha" ]]; then
     base="https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/$dist_sha"
