@@ -553,6 +553,23 @@ prompt_sni() {
   echo "$s"
 }
 
+# 选择 Shadowsocks 2022 加密算法：1=128(默认) 2=256；非法输入重新选择。
+prompt_ss2022_method() {
+  local choice
+  printf '%sShadowsocks 2022 加密算法%s\n' "$C_B" "$C_RESET" >&2
+  printf '  1. 2022-blake3-aes-128-gcm（默认）\n' >&2
+  printf '  2. 2022-blake3-aes-256-gcm\n' >&2
+  while true; do
+    printf '请选择 [1-2，默认 1]: ' >&2
+    read -r choice || true
+    case "${choice:-1}" in
+      1|"") echo "2022-blake3-aes-128-gcm"; return 0 ;;
+      2) echo "2022-blake3-aes-256-gcm"; return 0 ;;
+      *) warn "无效选择，请输入 1 或 2"; ;;
+    esac
+  done
+}
+
 # 通用提交流程：校验 → 备份 → 提交 config → 提交 nodes → 重启确认 → 才删备份
 # v3.0.3 修复（P0）：
 #   1) 备份在整个操作真正成功之前绝不删除——旧实现先删 .bak 再 restart，
@@ -648,10 +665,10 @@ add_vless() {
 
 add_ss() {
   local port name method pw
-  port=$(prompt_port "Shadowsocks" "$(pick_port)")
+  port=$(prompt_port "Shadowsocks 2022" "$(pick_port)")
   name=$(prompt_name "ss-$port")
-  method="2022-blake3-aes-128-gcm"
-  pw=$(rand_b64 16)
+  method=$(prompt_ss2022_method)
+  pw=$(core_node ss2022-key --method="$method") || { warn "生成 Shadowsocks 2022 密钥失败"; return 1; }
   core_node add shadowsocks --port="$port" --name="$name" --method="$method" --password="$pw" >/dev/null
   commit_node && { ok "Shadowsocks 2022 节点已添加"; show_links_for_last; }
 }
@@ -908,6 +925,22 @@ menu_edit_node() {
         [[ "$ns" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || { warn "域名格式无效"; pause; return 1; }
         args+=("--sni=$ns")
       fi ;;
+    shadowsocks)
+      # 显示当前加密算法，允许切换（切换会由 Go 侧重新生成对应长度 key）
+      local cur_method new_method
+      cur_method=$(echo "$info" | cut -f4)
+      [[ -n "$cur_method" ]] && printf '当前加密算法: %s\n' "$cur_method"
+      printf '修改加密算法? 回车不改 [1=2022-blake3-aes-128-gcm 2=2022-blake3-aes-256-gcm]: '
+      read -r mc || true
+      case "${mc}" in
+        1|2)
+          new_method="2022-blake3-aes-$([[ "$mc" == 1 ]] && echo 128 || echo 256)-gcm"
+          if [[ "$new_method" != "$cur_method" ]]; then
+            args+=("--method=$new_method")
+          fi ;;
+        "") : ;;
+        *) warn "无效选择，跳过算法修改"; ;;
+      esac ;;
   esac
 
   if [[ ${#args[@]} -le 1 ]]; then echo "未做任何修改"; pause; return 0; fi
