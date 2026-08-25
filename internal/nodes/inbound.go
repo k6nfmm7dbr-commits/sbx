@@ -16,8 +16,8 @@ var managedTagRe = regexp.MustCompile(`^sbx-n[0-9]+$`)
 
 func isManagedTag(tag string) bool { return managedTagRe.MatchString(tag) }
 
-// Types 与旧 TYPES 一致。
-var Types = []string{"vless", "shadowsocks", "trojan", "anytls"}
+// Types 与旧 TYPES 一致（含 Snell）。
+var Types = []string{"vless", "shadowsocks", "trojan", "anytls", "snell"}
 
 // ValidType 报告类型是否受支持。
 func ValidType(t string) bool {
@@ -79,6 +79,26 @@ func BuildInbound(n Node) (map[string]any, error) {
 	case "anytls":
 		base["users"] = []any{map[string]any{"name": "u", "password": Str(n, "password")}}
 		base["tls"] = tlsSelfsigned(n)
+	case "snell":
+		v, _ := toInt(n["version"])
+		base["version"] = v
+		base["psk"] = Str(n, "psk")
+		switch v {
+		case 5:
+			// Snell v5：obfs_mode（默认 none），绝不生成 mode
+			om := Str(n, "obfs_mode")
+			if om == "" {
+				om = "none"
+			}
+			base["obfs_mode"] = om
+		case 6:
+			// Snell v6：mode（默认 default），绝不生成 obfs_mode
+			m := Str(n, "mode")
+			if m == "" {
+				m = "default"
+			}
+			base["mode"] = m
+		}
 	default:
 		return nil, fmt.Errorf("不支持的节点类型: %s", t)
 	}

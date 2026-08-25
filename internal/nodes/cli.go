@@ -139,6 +139,7 @@ func (c *CLI) outJSON(v any) int {
 var addKnown = map[string]bool{
 	"port": true, "name": true, "uuid": true, "password": true, "method": true,
 	"sni": true, "flow": true, "private-key": true, "public-key": true, "short-id": true,
+	"version": true, "psk": true, "obfs-mode": true, "mode": true,
 }
 
 func (c *CLI) cmdAdd(args []string) int {
@@ -184,10 +185,25 @@ func (c *CLI) cmdAdd(args []string) int {
 		node["name"] = fmt.Sprintf("%s-%d", typ, nid)
 	}
 	for _, key := range []string{"uuid", "password", "method", "sni", "flow",
-		"private_key", "public_key", "short_id"} {
+		"private_key", "public_key", "short_id", "psk", "obfs_mode", "mode"} {
 		flag := strings.ReplaceAll(key, "_", "-")
 		if v := p.flags[flag]; v != "" {
 			node[key] = v
+		}
+	}
+	if typ == "snell" {
+		// Snell 版本字段（json.Number）；非法版本拒绝
+		verStr := p.flags["version"]
+		if verStr == "" {
+			return c.fail("Snell 需要 --version=5|6")
+		}
+		ver, verr := strconv.ParseInt(verStr, 10, 64)
+		if verr != nil || (ver != 5 && ver != 6) {
+			return c.fail("Snell version 必须是 5 或 6")
+		}
+		node["version"] = json.Number(strconv.FormatInt(ver, 10))
+		if Str(node, "psk") == "" {
+			return c.fail("Snell 需要 --psk")
 		}
 	}
 	if typ == "trojan" || typ == "anytls" {
@@ -283,7 +299,7 @@ func (c *CLI) cmdRemove(args []string) int {
 // SniTypes 是允许修改 SNI 的类型（reality + 自签证书类）。
 var sniTypes = map[string]bool{"vless": true, "trojan": true, "anytls": true}
 
-var editKnown = map[string]bool{"port": true, "sni": true, "method": true}
+var editKnown = map[string]bool{"port": true, "sni": true, "method": true, "psk": true}
 
 func (c *CLI) cmdEdit(args []string) int {
 	p, err := parseArgs(args, editKnown)
@@ -353,8 +369,20 @@ func (c *CLI) cmdEdit(args []string) int {
 		}
 		// method 相同：保留原 password，无需重生成
 	}
+	if psk, has := p.flags["psk"]; has && psk != "" {
+		t := Str(target, "type")
+		if t != "snell" {
+			return c.fail(fmt.Sprintf("%s 类型节点没有 PSK 可改", t))
+		}
+		// v6 PSK 需满足 12~255 bytes（sing-box 以 []byte(psk) 计）
+		if len([]byte(psk)) < 12 || len([]byte(psk)) > 255 {
+			return c.fail("Snell PSK 必须为 12~255 字节")
+		}
+		target["psk"] = psk
+		changed = append(changed, "PSK 已更新")
+	}
 	if len(changed) == 0 {
-		return c.fail("未指定要修改的内容（--port / --sni）")
+		return c.fail("未指定要修改的内容（--port / --sni / --method / --psk）")
 	}
 
 	cand, nodesCand, rc := c.writeCandidates(list)
@@ -451,7 +479,7 @@ func (c *CLI) cmdList(args []string) int {
 	fmt.Fprintf(c.Stdout, "%-4s %-16s %-14s %-8s\n", "ID", "名称", "类型", "端口")
 	for _, n := range list {
 		fmt.Fprintf(c.Stdout, "%-4s %-16s %-14s %-8s\n",
-			IDString(n), TruncateRunes(Str(n, "name"), 16), Str(n, "type"), Str(n, "port"))
+			IDString(n), TruncateRunes(Str(n, "name"), 16), DisplayType(n), Str(n, "port"))
 	}
 	return exitOK
 }
@@ -478,8 +506,11 @@ func (c *CLI) cmdInfo(args []string) int {
 	for _, n := range LoadToolNodes(c.Store.NodesPath()) {
 		if IDString(n) == args[0] || Str(n, "id") == args[0] {
 			fmt.Fprintf(c.Stdout, "%s\t%s\t%s", Str(n, "type"), Str(n, "sni"), Str(n, "port"))
+			// 第 4 字段：shadowsocks=method；snell=version；其余为空
 			if m := Str(n, "method"); m != "" {
 				fmt.Fprintf(c.Stdout, "\t%s", m)
+			} else if Str(n, "type") == "snell" {
+				fmt.Fprintf(c.Stdout, "\t%s", Str(n, "version"))
 			}
 			fmt.Fprintln(c.Stdout)
 			return exitOK
@@ -527,7 +558,7 @@ func (c *CLI) cmdLinks(args []string) int {
 	}
 	for _, n := range list {
 		fmt.Fprintf(c.Stdout, "### %s (%s, 端口 %s)\n",
-			Str(n, "name"), Str(n, "type"), Str(n, "port"))
+			Str(n, "name"), DisplayType(n), Str(n, "port"))
 		fmt.Fprintln(c.Stdout, c.Store.LinkFor(n, host, ""))
 		if host6Val != "" {
 			fmt.Fprintln(c.Stdout, "# IPv6:")

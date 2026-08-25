@@ -45,7 +45,9 @@ v3.0.5
 
 ## 节点
 
-支持 VLESS Reality、Shadowsocks 2022、Trojan、AnyTLS。菜单两级结构与 v2.8.0 完全一致：
+支持 VLESS Reality、Shadowsocks 2022、Trojan、AnyTLS、Snell v5 / Snell v6。
+Snell 需要 sing-box >= 1.14.0（创建 Snell 时若内核过旧会自动按现有机制升级）。
+菜单两级结构与 v2.8.0 完全一致：
 主菜单（添加节点 / 节点管理 / 流量统计 / 系统设置 / 检查更新 / 卸载）；支持 IPv4/IPv6 分享链接与 Base64 订阅。
 节点按 `nodes.json` 添加顺序显示；ID 单调递增永不复用（历史流量不会串节点）。
 

@@ -98,6 +98,17 @@ func (s *Store) LinkFor(n Node, host, labelSuffix string) string {
 		}
 		return "anytls://" + PyQuote(Str(n, "password"), "/") + "@" + h + ":" + port +
 			"?" + EncodeQuery(q) + "#" + name
+
+	case "snell":
+		// Snell 无官方 URI 标准，采用 Surge 通用 snell:// 形式；
+		// v5/v6 版本在名称后缀体现（客户端仍需按其版本选择）。
+		label := name
+		if v, _ := toInt(n["version"]); v == 6 {
+			label = name + " (Snell v6)"
+		} else {
+			label = name + " (Snell v5)"
+		}
+		return "snell://" + PyQuote(Str(n, "psk"), "/") + "@" + h + ":" + port + "#" + label
 	}
 	return ""
 }

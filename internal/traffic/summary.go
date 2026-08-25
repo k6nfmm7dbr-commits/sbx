@@ -150,7 +150,7 @@ func BuildSummary(cfg *config.Config, db *sql.DB, src LiveSource) (*Summary, err
 		sn := SummaryNode{
 			ID:       n["id"],
 			Name:     nodes.DisplayName(n),
-			Type:     nodes.Str(n, "type"),
+			Type:     nodes.DisplayType(n),
 			Port:     n["port"],
 			Today:    countersOf(t),
 			Total:    countersOf(a),

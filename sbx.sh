@@ -253,30 +253,32 @@ gh_url() { [[ -n "$GH_PROXY" ]] && echo "${GH_PROXY%/}/$1" || echo "$1"; }
 
 # sing-box 供应链校验：官方 Release 不提供逐文件 checksum，本项目 pin 版本 + sha256。
 # 升级 sing-box 版本时必须同步更新此表（下载官方包后 sha256sum）。
-SB_VERSION_DEFAULT="1.13.19"
+SB_VERSION_DEFAULT="1.14.0-rc.1"
 sb_expected_sha() {  # sb_expected_sha <filename> → 打印期望 sha256（无则输出空）
   awk -v n="$1" '$2==n{print $1}' <<'SBHASH'
-ef88a9e577d474210867bd708933d042e9b70106529df2656182c9db90106aa1  sing-box-1.13.19-linux-amd64.tar.gz
-7fe3597a95a3c5ad67477b1d7653b9ce097e0be7c676758eba1fcf558f353d57  sing-box-1.13.19-linux-arm64.tar.gz
-df6e0e72fff47ca6d9d8710fa4b751d70ab3319f82a10d64f875fcda562c7ccf  sing-box-1.13.19-linux-armv7.tar.gz
-b1815365caf2ce4c168e2e3415be51dbd69739034aa75cf422e42b44a11a7710  sing-box-1.13.19-linux-armv6.tar.gz
-0a41973546eb3b1de6e2a83fb2963c42e9a2d3e3d1dff1fa0a49c3552d82ed11  sing-box-1.13.19-linux-386.tar.gz
-23843202066901798b1df4a136a9c275f82e2ac3f27f24e82604206bcfd717b0  sing-box-1.13.19-linux-s390x.tar.gz
-229454140f3595836407fecc2d4993f55225d9cbfcd9bace7ca57b82933c98ac  sing-box-1.13.19-linux-riscv64.tar.gz
-150456f94fcf936fc2519de28d856422fb671a1ff181cd909b78f20e208fdcb8  sing-box-1.13.19-linux-amd64-musl.tar.gz
-5146181884310ea2381e085ef504005c81bd09f80721542127efb0a73f12cd2f  sing-box-1.13.19-linux-arm64-musl.tar.gz
-1fb4134b2deaa22f15cacd2156220cc6d3ba32d12fed9b0f23ad5666529b6b64  sing-box-1.13.19-linux-armv7-musl.tar.gz
-103c37a2346ae97ea84c72a14569e85aff0473f8c9c1aa44c53bfbd2e9b5193f  sing-box-1.13.19-linux-386-musl.tar.gz
-a8ee0d0e65613033c4d18c8a0809a7d837d4c285d36daf6c6631edc70a49c191  sing-box-1.13.19-linux-riscv64-musl.tar.gz
+342f6e3b4ab79abe470d1516b35dced9bc8dfe62dc43a459a53d97960108afeb  sing-box-1.14.0-rc.1-linux-amd64.tar.gz
+98a5bd1f7bf5063f908461eb47ccb68d6df08571c62051f467c395a270a5e3c9  sing-box-1.14.0-rc.1-linux-arm64.tar.gz
+a48e8b92e31dbc8fbec25e46feebefde4362024971ca645a222b0d98bcac4145  sing-box-1.14.0-rc.1-linux-armv7.tar.gz
+d2083ea91f7637152b82639acc297a069675500b9f299560223196ceb19633a2  sing-box-1.14.0-rc.1-linux-armv6.tar.gz
+7d551d6e766b886b9f439fdf1a4ebb1873cfb77ae2f9b03a66ab5e86c109ca5f  sing-box-1.14.0-rc.1-linux-386.tar.gz
+aa99c75aa286d0c4e8808bd003f144a864aea5dd99a083314dddbacc50ae2772  sing-box-1.14.0-rc.1-linux-s390x.tar.gz
+f227c4b2e85c6a8be5216a77476e55feffd9e01543c2a5b89d2d95061a924dd9  sing-box-1.14.0-rc.1-linux-riscv64.tar.gz
+e057d850417b0f86b0da0c169adc552b7fd8b40012884435e9e7aaecf03aa9a8  sing-box-1.14.0-rc.1-linux-amd64-musl.tar.gz
+3b0eda64906e7274a42b6829462ae910b1ccb3c89c0a2f01c65179c50e27b3d5  sing-box-1.14.0-rc.1-linux-arm64-musl.tar.gz
+50c2e81fb0ac3281d8e9bb5224b45d9e2be5372d0a81c2cf7375a9891296de77  sing-box-1.14.0-rc.1-linux-armv7-musl.tar.gz
+a9e642d8b2ea19626002193b8faf900e3365e9c1dcf81840534f89ef58c39221  sing-box-1.14.0-rc.1-linux-386-musl.tar.gz
+55925652c1d6fdd50fc3baac40072becc22e12ac3f08fbef6219f3dcaabb6bec  sing-box-1.14.0-rc.1-linux-riscv64-musl.tar.gz
 SBHASH
 }
 
 install_sing_box() {
-  if [[ -x "$SB_BIN" ]] && "$SB_BIN" version >/dev/null 2>&1; then
+  local force="${1:-}"
+  # 正常安装：已安装即跳过；force（如 Snell 需要升级内核）则强制重装
+  if [[ -z "$force" ]] && [[ -x "$SB_BIN" ]] && "$SB_BIN" version >/dev/null 2>&1; then
     ok "sing-box 已安装: $("$SB_BIN" version | head -1)"
     return 0
   fi
-  if [[ -n "${SBX_SB_BIN:-}" && -x "${SBX_SB_BIN}" ]]; then
+  if [[ -z "$force" ]] && [[ -n "${SBX_SB_BIN:-}" && -x "${SBX_SB_BIN}" ]]; then
     install -d -m 0755 "$BIN_DIR"
     cat "$SBX_SB_BIN" > "$SB_BIN"; chmod 0755 "$SB_BIN"
     ok "使用本地 sing-box: $("$SB_BIN" version | head -1)"
@@ -318,6 +320,11 @@ install_sing_box() {
   local found
   found=$(find "$tmp" -type f -name sing-box | head -1)
   [[ -n "$found" ]] || { rm -rf "$tmp"; die "压缩包中未找到 sing-box"; }
+
+  # 升级前备份旧二进制（存在时），供失败回滚
+  if [[ -x "$SB_BIN" ]]; then
+    cp -f "$SB_BIN" "$SB_BIN.bak" || { rm -rf "$tmp"; die "旧 sing-box 备份失败，已中止升级"; }
+  fi
   install -d -m 0755 "$BIN_DIR"
   install -m 0755 "$found" "$SB_BIN"
   # 部分构建附带 libcronet.so（NaiveProxy 用），一并放到同目录
@@ -326,8 +333,19 @@ install_sing_box() {
   [[ -n "$lib" ]] && install -m 0644 "$lib" "$BIN_DIR/libcronet.so" 2>/dev/null || true
   rm -rf "$tmp"
 
-  "$SB_BIN" version >/dev/null 2>&1 || die "sing-box 无法运行（架构或 libc 不匹配）"
+  if ! "$SB_BIN" version >/dev/null 2>&1; then
+    [[ -f "$SB_BIN.bak" ]] && { mv -f "$SB_BIN.bak" "$SB_BIN"; warn "新 sing-box 异常，已回滚旧版本"; }
+    die "sing-box 无法运行（架构或 libc 不匹配）"
+  fi
+  rm -f "$SB_BIN.bak"
   ok "sing-box 安装完成: $("$SB_BIN" version | head -1)"
+}
+
+# sb_supports_snell 判断当前 sing-box 是否支持 Snell（>= 1.14.0）。
+sb_supports_snell() {
+  local v
+  v=$("$SB_BIN" version 2>/dev/null | head -1 | sed -nE 's/.*version v?([0-9][0-9.]*).*/\1/p')
+  [[ -n "$v" ]] && ver_ge "$v" "1.14.0"
 }
 
 # ---------------------------------------------------------------- sbx-core 安装
@@ -810,6 +828,53 @@ do_add_anytls() {
   commit_node
 }
 
+# Snell：先确保内核 >= 1.14.0（不满足则按需升级），再创建
+add_snell() {
+  local ver="$1"
+  # 内核版本检测：Snell 需要 sing-box >= 1.14.0
+  if ! sb_supports_snell; then
+    warn "当前 sing-box 版本不支持 Snell，Snell 需要 sing-box >= 1.14.0"
+    info "正在按现有机制升级 sing-box 内核……"
+    if ! install_sing_box force; then
+      err "sing-box 内核升级失败，已中止创建 Snell"
+      return 1
+    fi
+    # 升级后校验：配置通过 + 服务真实运行
+    "$SB_BIN" check -c "$SB_CONF" >/dev/null 2>&1 \
+      || { err "升级后配置校验失败，已中止创建 Snell（原配置未动）"; return 1; }
+    if ! svc_do restart sing-box; then
+      err "升级后 sing-box 服务启动失败，已中止创建 Snell"
+      return 1
+    fi
+    sb_supports_snell || { err "升级后 sing-box 仍不支持 Snell，已中止创建"; return 1; }
+    ok "sing-box 已升级到 $("$SB_BIN" version | head -1)"
+  fi
+
+  local port name psk extra
+  port=$(prompt_port "Snell v$ver" "$(pick_port)")
+  name=$(prompt_name "snell-v$ver-$port")
+  psk=$(core_node secret hex 32) || { warn "生成 PSK 失败"; return 1; }
+  extra=()
+  if [[ "$ver" == 5 ]]; then
+    extra=(--obfs-mode="none")
+  else
+    extra=(--mode="default")
+  fi
+
+  sbx_lock do_add_snell "$ver" "$port" "$name" "$psk" "${extra[@]}"
+  local rc=$?
+  case $rc in
+    0) ok "Snell v$ver 节点已添加"; show_links_for_last ;;
+    2) warn "节点已创建，但流量统计规则应用失败"; show_links_for_last ;;
+    *) warn "节点添加失败" ;;
+  esac
+}
+do_add_snell() {
+  local ver="$1" port="$2" name="$3" psk="$4"; shift 4
+  core_node add snell --port="$port" --name="$name" --version="$ver" --psk="$psk" "$@" >/dev/null || return 1
+  commit_node
+}
+
 show_links_for_last() {
   local last host6
   last=$(core_node last)
@@ -977,12 +1042,32 @@ menu_add_node() {
   echo "  2) Shadowsocks 2022  (轻量高速)"
   echo "  3) Trojan            (自签证书)"
   echo "  4) AnyTLS"
+  echo "  5) Snell"
   echo "  0) 返回"
   echo
   printf '请选择: '
   read -r c || true
   case "$c" in
-    1) add_vless ;; 2) add_ss ;; 3) add_trojan ;; 4) add_anytls ;;
+    1) add_vless ;; 2) add_ss ;; 3) add_trojan ;; 4) add_anytls ;; 5) menu_snell ;;
+    0|"") return 0 ;;
+    *) warn "无效选择" ;;
+  esac
+  pause
+}
+
+# Snell 二级菜单：v5 / v6 / 返回
+menu_snell() {
+  banner
+  printf '%sSnell%s\n\n' "$C_B" "$C_RESET"
+  echo "  1. Snell v5"
+  echo "  2. Snell v6"
+  echo "  0. 返回"
+  echo
+  printf '请选择: '
+  read -r c || true
+  case "$c" in
+    1) add_snell 5 ;;
+    2) add_snell 6 ;;
     0|"") return 0 ;;
     *) warn "无效选择" ;;
   esac
@@ -1031,7 +1116,11 @@ menu_edit_node() {
   type=$(echo "$info" | cut -f1); sni=$(echo "$info" | cut -f2)
   port=$(echo "$info" | cut -f3)
 
-  printf '\n节点类型: %s   当前端口: %s\n' "$type" "$port"
+  local disp_type="$type"
+  if [[ "$type" == "snell" ]]; then
+    disp_type="Snell v$(echo "$info" | cut -f4)"
+  fi
+  printf '\n节点类型: %s   当前端口: %s\n' "$disp_type" "$port"
   [[ -n "$sni" ]] && printf '当前 SNI: %s\n' "$sni"
   echo
 
@@ -1077,6 +1166,18 @@ menu_edit_node() {
         "") : ;;
         *) warn "无效选择，跳过算法修改"; ;;
       esac ;;
+    snell)
+      # 显示当前版本，允许重新生成 PSK（不直接改版本，避免半 v5 半 v6 非法配置）
+      local cur_ver
+      cur_ver=$(echo "$info" | cut -f4)
+      [[ -n "$cur_ver" ]] && printf '当前版本: Snell v%s\n' "$cur_ver"
+      printf '重新生成 PSK? [y/N]: '
+      read -r rp || true
+      if [[ "${rp,,}" == "y" ]]; then
+        local new_psk
+        new_psk=$(core_node secret hex 32) || { warn "生成 PSK 失败"; pause; return 1; }
+        args+=("--psk=$new_psk")
+      fi ;;
   esac
 
   if [[ ${#args[@]} -le 1 ]]; then echo "未做任何修改"; pause; return 0; fi
@@ -1085,7 +1186,7 @@ menu_edit_node() {
   out=$(sbx_lock do_edit_node "${args[@]}" 2>/dev/null)
   rc=$?
   if [[ $rc -eq 0 ]]; then
-    ok "节点 $id 已更新：$(printf '%s' "$out" | tr ',' '\n' | grep -o '端口→[0-9]*\|SNI→[^"]*' | paste -sd' ' - || echo '完成')"
+    ok "节点 $id 已更新：$(printf '%s' "$out" | tr ',' '\n' | grep -o '端口→[0-9]*\|SNI→[^"]*\|PSK 已更新' | paste -sd' ' - || echo '完成')"
     printf '%s提示：修改后分享链接已变化，请重新导出发给客户端。%s\n' "$C_DIM" "$C_RESET"
     hr
     local h6; h6=$(core_node get-host6)

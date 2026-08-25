@@ -21,7 +21,7 @@ func PublicNodes(list []Node) []PublicNodeDTO {
 		out = append(out, PublicNodeDTO{
 			ID:   id,
 			Name: DisplayName(n),
-			Type: Str(n, "type"),
+			Type: DisplayType(n),
 			Port: int(port),
 		})
 	}

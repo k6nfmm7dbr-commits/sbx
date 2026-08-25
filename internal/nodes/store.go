@@ -383,6 +383,7 @@ var protoTransports = map[string][]string{
 	"trojan":      {"tcp"},
 	"anytls":      {"tcp"},
 	"shadowsocks": {"tcp", "udp"},
+	"snell":       {"tcp", "udp"},
 }
 
 // Protocols 对齐 node_protocols：计数规则与连接数显示的传输层归属；
@@ -431,10 +432,24 @@ func DisplayName(n Node) string {
 	if s := Str(n, "name"); s != "" {
 		return s
 	}
-	if s := Str(n, "type"); s != "" {
+	if s := DisplayType(n); s != "" {
 		return s
 	}
 	return "node" + IDString(n)
+}
+
+// DisplayType 返回节点协议的用户可见名称。
+// Snell 需区分版本：type=snell + version=5 → "Snell v5"；version=6 → "Snell v6"。
+// 其余协议返回原始 type（与旧行为一致）。
+func DisplayType(n Node) string {
+	t := Str(n, "type")
+	if t == "snell" {
+		if v, _ := toInt(n["version"]); v == 6 {
+			return "Snell v6"
+		}
+		return "Snell v5"
+	}
+	return t
 }
 
 // TruncateRunes 按“字符数”截断（对齐 Python s[:16] 的字符语义，中文按 1 字符计）。
