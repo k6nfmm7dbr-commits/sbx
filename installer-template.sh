@@ -350,8 +350,8 @@ prepare_dirs() {
   install -d -m 0755 "$APP_DIR" "$WEB_DIR" "$SB_DIR"
   install -d -m 0700 "$CERT_DIR"
   # nodes.json/state.json 含节点凭据（UUID/密码/Reality 私钥）：
-  # 先以 0600 预创建空文件（不受 umask 影响），再写入内容，
-  # 保证敏感内容从落盘第一字节起就是 0600。
+  # 首次创建用 install -m 0600 预建空文件（不受 umask 影响）再写入内容；
+  # 已存在的旧文件若权限过宽（历史安装/手工操作），统一收紧到 0600。
   if [[ ! -f "$NODES_JSON" ]]; then
     install -m 0600 /dev/null "$NODES_JSON"
     printf '[]\n' > "$NODES_JSON"
@@ -360,10 +360,13 @@ prepare_dirs() {
     install -m 0600 /dev/null "$STATE_JSON"
     printf '{}\n' > "$STATE_JSON"
   fi
+  chmod 600 "$NODES_JSON" "$STATE_JSON"
 }
 
 ensure_sb_config() {
   [[ -f "$SB_CONF" ]] && return 0
+  # 先以 0600 预创建（不受 umask 影响）：后续写入的节点配置含 Reality 私钥等凭据
+  install -m 0600 /dev/null "$SB_CONF"
   cat > "$SB_CONF" <<'EOF'
 {
   "log": { "level": "warn", "timestamp": true },
@@ -375,6 +378,7 @@ ensure_sb_config() {
   "route": { "final": "direct" }
 }
 EOF
+  chmod 600 "$SB_CONF"
   ok "已生成 sing-box 基础配置"
 }
 
@@ -389,11 +393,14 @@ ensure_panel_conf() {
       info "请手工修复该文件后重新运行安装；原文件未被改动"
       return 1
     fi
+    chmod 600 "$PANEL_CONF"
     return 0
   fi
   local token port
   token=$(rand_hex 16)
   port=$(pick_port)
+  # 先以 0600 预创建（不受 umask 影响），避免含 token 的内容出现短暂暴露窗口
+  install -m 0600 /dev/null "$PANEL_CONF"
   cat > "$PANEL_CONF" <<EOF
 {
   "db": "$APP_DIR/traffic.db",
