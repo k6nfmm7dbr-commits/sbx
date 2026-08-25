@@ -57,36 +57,8 @@ func Show() error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("后端: %s   日期: %s   时区: %s\n", s.Backend, s.Day, s.TZ)
-	fmt.Println("-" + repeatStr("-", 67))
-	fmt.Printf("%-18s %12s %12s %12s %12s\n", "节点", "今日↑", "今日↓", "累计↑", "累计↓")
-	for _, n := range s.Nodes {
-		fmt.Printf("%-18s %12s %12s %12s %12s\n",
-			truncDisplay(n.Name), traffic.Human(n.Today.Rx), traffic.Human(n.Today.Tx),
-			traffic.Human(n.Total.Rx), traffic.Human(n.Total.Tx))
-	}
-	fmt.Println("-" + repeatStr("-", 67))
-	fmt.Printf("%-18s %12s %12s %12s %12s\n",
-		"合计", traffic.Human(s.Today.Rx), traffic.Human(s.Today.Tx),
-		traffic.Human(s.Total.Rx), traffic.Human(s.Total.Tx))
+	fmt.Print(renderShow(s, terminalCols()))
 	return nil
-}
-
-func repeatStr(s string, n int) string {
-	out := ""
-	for i := 0; i < n; i++ {
-		out += s
-	}
-	return out
-}
-
-// truncDisplay 对齐 Python name[:16]（按字符截断）。
-func truncDisplay(name string) string {
-	r := []rune(name)
-	if len(r) > 16 {
-		return string(r[:16])
-	}
-	return name
 }
 
 // Daily 输出最近 N 天每日流量表（旧 cmd_daily）。
@@ -101,11 +73,7 @@ func Daily(days int) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%-12s %14s %14s %14s\n", "日期", "上传", "下载", "合计")
-	for _, row := range rows {
-		fmt.Printf("%-12s %14s %14s %14s\n",
-			row.Day, traffic.Human(row.Rx), traffic.Human(row.Tx), traffic.Human(row.Rx+row.Tx))
-	}
+	fmt.Print(renderDaily(rows, terminalCols()))
 	return nil
 }
 

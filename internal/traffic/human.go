@@ -3,19 +3,47 @@ package traffic
 import (
 	"database/sql"
 	"fmt"
-	"math"
+	"strconv"
+	"strings"
 )
 
-// Human 以 1024 进制输出 "%.2f KiB" 风格（与旧 human() 一致）。
+// Human 以 1024 进制格式化字节数：
+//
+//	B     整数（0 B / 512 B）
+//	KiB+  最多 2 位小数，去掉无意义尾零（1.24 KiB / 35.8 MiB / 2.34 GiB / 1.08 TiB）
+//
+// 数值本身不变，仅优化显示。
 func Human(n int64) string {
-	f := float64(n)
-	for _, unit := range []string{"B", "KiB", "MiB", "GiB", "TiB", "PiB"} {
-		if math.Abs(f) < 1024 || unit == "PiB" {
-			return fmt.Sprintf("%.2f %s", f, unit)
-		}
-		f /= 1024
+	if n >= 0 && n < 1024 {
+		return fmt.Sprintf("%d B", n)
 	}
-	return fmt.Sprintf("%.2f PiB", f)
+	neg := n < 0
+	f := float64(n)
+	if neg {
+		f = -f
+	}
+	unit := "B"
+	for f >= 1024 && unit != "PiB" {
+		f /= 1024
+		switch unit {
+		case "B":
+			unit = "KiB"
+		case "KiB":
+			unit = "MiB"
+		case "MiB":
+			unit = "GiB"
+		case "GiB":
+			unit = "TiB"
+		case "TiB":
+			unit = "PiB"
+		}
+	}
+	s := strconv.FormatFloat(f, 'f', 2, 64)
+	s = strings.TrimRight(strings.TrimRight(s, "0"), ".")
+	if neg {
+		s = "-" + s
+	}
+	return s + " " + unit
 }
 
 // DailyRow 对齐 daily 表行 / q_daily 返回结构。
