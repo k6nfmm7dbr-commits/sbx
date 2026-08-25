@@ -34,7 +34,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/
 ## 当前版本
 
 ```text
-v3.0.2
+v3.0.3
 ```
 
 ## 节点
