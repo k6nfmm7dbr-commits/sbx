@@ -19,7 +19,7 @@ function api(path, params) {
 }
 
 /* ---------- 格式化 ---------- */
-var UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+var UNITS = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
 function fmtBytes(n) {
   n = Number(n) || 0;
   var i = 0, v = n;
@@ -45,21 +45,38 @@ function setText(id, txt) {
   if (el && el.textContent !== txt) el.textContent = txt;
 }
 
-/* ---------- 数值缓动 ---------- */
+/* ---------- 数值缓动（按需 rAF，尊重 prefers-reduced-motion） ---------- */
+var reducedMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 var eased = {};
 function easeTo(id, target, fmt) {
+  if (reducedMotion) { setText(id, fmt(target)); return; }
   var e = eased[id];
   if (!e) { e = eased[id] = { cur: target, target: target, fmt: fmt }; setText(id, fmt(target)); return; }
   e.target = target; e.fmt = fmt;
+  kickEase();
 }
 function tickEase() {
+  var any = false;
   for (var id in eased) {
     var e = eased[id];
     var diff = e.target - e.cur;
     if (Math.abs(diff) < Math.max(1, Math.abs(e.target) * 0.005)) e.cur = e.target;
-    else e.cur += diff * 0.22;
+    else { e.cur += diff * 0.22; any = true; }
     setText(id, e.fmt(e.cur));
   }
+  return any;
+}
+// 按需 rAF 调度：有动画才跑，收敛或页面隐藏即停，不再 25FPS 永久轮询。
+var easeRunning = false;
+function easeLoop() {
+  if (document.hidden) { easeRunning = false; return; }
+  if (!tickEase()) { easeRunning = false; return; }
+  requestAnimationFrame(easeLoop);
+}
+function kickEase() {
+  if (easeRunning || reducedMotion) return;
+  easeRunning = true;
+  requestAnimationFrame(easeLoop);
 }
 
 /* ---------- 渲染：概览（低频 summary） ---------- */
@@ -87,13 +104,13 @@ function renderNodeCards(s) {
             '<span class="port">端口 ' + esc(portText(n)) + '</span></div>' +
         '</div>' +
         '<div class="node-rate">' +
-          '<b class="up" data-node-live="' + n.id + '" data-kind="rate-up">—</b>' +
-          '<b class="down" data-node-live="' + n.id + '" data-kind="rate-down">—</b>' +
+          '<b class="up" data-node-live="' + esc(n.id) + '" data-kind="rate-up">—</b>' +
+          '<b class="down" data-node-live="' + esc(n.id) + '" data-kind="rate-down">—</b>' +
         '</div>' +
       '</div>' +
       '<div class="node-stats">' +
-        '<div class="node-stat"><span>TCP 连接</span><b data-node-live="' + n.id + '" data-kind="conns">—</b></div>' +
-        '<div class="node-stat"><span>UDP 会话</span><b data-node-live="' + n.id + '" data-kind="conns_udp">—</b></div>' +
+        '<div class="node-stat"><span>TCP 连接</span><b data-node-live="' + esc(n.id) + '" data-kind="conns">—</b></div>' +
+        '<div class="node-stat"><span>UDP 会话</span><b data-node-live="' + esc(n.id) + '" data-kind="conns_udp">—</b></div>' +
       '</div>' +
     '</div>';
   }).join('');
@@ -197,8 +214,6 @@ document.getElementById('node-select').addEventListener('change', function (e) {
 })();
 
 /* ---------- 启动与轮询 ---------- */
-setInterval(tickEase, 40);
-
 function loadSummary() { return api('/api/summary').then(renderSummary).catch(function (e) { if (e.message !== '未登录') toast(e.message); }); }
 function loadLive() { return api('/api/live').then(renderLive).catch(function () {}); }
 

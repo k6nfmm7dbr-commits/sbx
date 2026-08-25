@@ -45,9 +45,10 @@ done
 [[ -f "$ROOT/scripts/dist-manifest.txt" ]]; ck "分发清单 dist-manifest.txt 存在" 0 $?
 [[ -f "$ROOT/scripts/dist-manifest.txt" ]] && { grep -q '^sbx-core-linux-amd64$' "$ROOT/scripts/dist-manifest.txt"; ck "清单含 amd64 产物" 0 $?; grep -q '^sbx-core-linux-arm64$' "$ROOT/scripts/dist-manifest.txt"; ck "清单含 arm64 产物" 0 $?; grep -q '^SHA256SUMS$' "$ROOT/scripts/dist-manifest.txt"; ck "清单含 SHA256SUMS" 0 $?; }
 
-# ---- 3. 安装器下载函数确实使用 RAW_BASE + 架构名 + SHA256SUMS ----
-grep -q '\$RAW_BASE/\${name}' "$TPL"; ck "binary 下载使用 RAW_BASE/架构文件名" 0 $?
-grep -q '\$RAW_BASE/SHA256SUMS' "$TPL"; ck "校验文件下载使用 RAW_BASE/SHA256SUMS" 0 $?
+# ---- 3. 安装器下载函数确实使用 base + 架构名 + SHA256SUMS ----
+grep -q '\$base/\${name}' "$TPL"; ck "binary 下载使用 base/架构文件名" 0 $?
+grep -q '\$base/SHA256SUMS' "$TPL"; ck "校验文件下载使用 base/SHA256SUMS" 0 $?
+grep -q 'dist_sha\|RAW_BASE' "$TPL"; ck "安装器解析 dist commit 或回退 RAW_BASE" 0 $?
 
 # ---- 3b. rolling 分发：不得因「已装版本号==APP_VERSION」跳过下载（防 stale 二进制）----
 sed -n '/^install_sbx_core()/,/^}/p' "$TPL" > "$TMPD/isc.sh"

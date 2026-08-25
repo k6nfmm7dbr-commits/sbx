@@ -5,13 +5,18 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout@v4（pin 完整 commit SHA，防供应链替换）
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
-      - uses: actions/setup-go@v5
+      # actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
           go-version: "1.23"
 
@@ -25,8 +30,22 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      - name: go test
+        run: go test ./...
+
       - name: go test (race)
         run: go test -race ./...
+
+      - name: shellcheck（安装器/脚本静态检查）
+        run: |
+          sudo apt-get update -qq >/dev/null
+          sudo apt-get install -y -qq shellcheck >/dev/null
+          # 生产代码：error+warning 全查，不豁免
+          shellcheck installer-template.sh sbx.sh
+          # 测试/真机验收脚本：仅豁免 SC2034——这些脚本大量使用
+          # `read RX TX <<< ...`（RX 仅作配对字段）与 source 跨文件追踪，
+          # 属 shellcheck 已知局限；其余 error+warning 仍全部检查。
+          shellcheck -e SC2034 scripts/*.sh tests/*.sh
 
       - name: sbx.sh 与模板同步检查（防 drift）
         run: |
@@ -49,7 +68,7 @@ jobs:
       - name: 安装器分发链 / 权限流程测试（提取模板真实逻辑）
         run: bash tests/dist_flow_test.sh
 
-      - name: v3.0.4 基线收口测试（版本一致性 / 无 Tag / checksum fail-closed / 权限）
+      - name: v3.0.5 基线收口测试（版本一致性 / 无 Tag / checksum fail-closed / 权限）
         run: bash tests/baseline_test.sh
 
       - name: Python reference suite（旧实现回归，src/ 仅作参考保留）
@@ -65,8 +84,8 @@ jobs:
           }
 
   # 二进制分发：main 全部测试通过后，把全架构产物发布到 dist 分支（rolling latest）。
-  # dist 是普通分支，不是 Tag——安装器固定从 raw .../dist/<artifact> 下载，
-  # 永远拿到与 main 最新源码同版本构建的二进制。不创建 Release，不创建 Tag。
+  # dist 是普通分支，不是 Tag——安装器固定从 raw .../dist/<artifact> 下载。
+  # 仅当本次提交实际影响产物/安装器时才重建发布（纯 README/docs 跳过）。
   publish-dist:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     needs: test
@@ -74,19 +93,35 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
-      - uses: actions/setup-go@v5
+      # actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
           go-version: "1.23"
 
+      - name: 判断是否影响产物/安装器（纯 docs 跳过）
+        id: changed
+        run: |
+          if git diff --quiet HEAD~1 HEAD -- cmd internal go.mod go.sum \
+              scripts installer-template.sh build.py internal/version; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "无产物相关变更，跳过发布"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: 构建全架构二进制
+        if: steps.changed.outputs.skip != 'true'
         run: ./scripts/build-release.sh dist
 
       - name: SHA256SUMS 自检 + 版本三方一致性（APP_VERSION/Go/二进制，无 Tag）
+        if: steps.changed.outputs.skip != 'true'
         run: bash scripts/artifact_check.sh dist
 
       - name: 分发清单一致性（产物与 scripts/dist-manifest.txt 完全一致）
+        if: steps.changed.outputs.skip != 'true'
         run: |
           ls dist | sort > /tmp/actual.txt
           sort scripts/dist-manifest.txt > /tmp/expected.txt
@@ -95,6 +130,7 @@ jobs:
           }
 
       - name: 发布到 dist 分支（force-push，仅产物文件）
+        if: steps.changed.outputs.skip != 'true'
         run: |
           git config user.name "sbx-dist-bot"
           git config user.email "actions@users.noreply.github.com"
@@ -112,6 +148,7 @@ jobs:
           git push -f origin dist-new:dist
 
       - name: 验证 raw 分发地址真实可用（amd64 + SHA256SUMS）
+        if: steps.changed.outputs.skip != 'true'
         run: |
           sleep 10
           for f in sbx-core-linux-amd64 sbx-core-linux-arm64 SHA256SUMS; do

@@ -66,12 +66,6 @@ Python 版写 JSON 保持插入序，Go 版按键排序。所有消费方均为 
 
 ## 9. 第三轮稳定性修复中记录但未修改的事项（v3.0.3）
 
-以下问题已识别、按"只记录不修改"原则保留现状：
-
-- **`/api/nodes` 返回完整凭据**：当前 API 会把节点的 password / UUID /
-  Reality private_key 原样返回给前端。未来应改为返回脱敏后的 Node DTO
-  （仅含展示字段），但涉及 API schema 与前端消费方兼容，需单独一轮
-  设计迁移（如 `?detail=full` 显式开关 + 默认脱敏）。
 - **`reset` 等统计类命令的配置读取仍为宽松模式**：`once/show/daily/reset/config-get`
   不启动网络服务、不改配置、不动防火墙；其中 reset 仅删除用户显式指定的
   统计数据。若未来要求全量 fail-closed，可将这些命令一并切换到
@@ -79,3 +73,17 @@ Python 版写 JSON 保持插入序，Go 版按键排序。所有消费方均为 
 - **Apply 的 `--force` 强制重建开关**：v3.0.3 起"最终采样失败即中止 Apply"
   是刻意的默认行为（数据正确性 > 可用性）。若确有绕过需求（灾难恢复场景），
   未来可设计显式 `--force` 参数并输出强警告，本轮刻意未提供。
+
+## 10. v3.0.5 已落实（自历史条目迁移，不再"未来处理"）
+
+- **`/api/nodes` 凭据泄漏**：已改为返回脱敏 `PublicNodeDTO`（仅 id/name/type/port），
+  普通面板 token 不再等价于节点私钥。
+- **query string token 认证**：已彻底移除 `?token=` 渠道，仅保留
+  `Authorization: Bearer` 与 HttpOnly Cookie。
+- **认证常量时间比较**：已改用 `crypto/subtle.ConstantTimeCompare`。
+- **防火墙后端状态一致性**：新增 `effective-backend` 单一事实源，
+  Apply/Collector/Repair/Clear 共用同一后端，杜绝 auto 下 fallback 分叉。
+- **节点语义校验**：`validateNodes` 校验 id/port/type 合法性、唯一性。
+- **跨进程 mutation 锁**：`/run/lock/sbx.lock` flock 覆盖整个节点事务。
+- **sing-box 供应链**：官方无逐文件 checksum，改为 pin 版本 + sha256 校验。
+- **dist 供应链**：binary 与 SHA256SUMS 绑定同一 immutable commit。
