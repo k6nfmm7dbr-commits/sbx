@@ -103,10 +103,6 @@ body {
 }
 .stat label { font-size: 12px; color: var(--muted); }
 .stat strong { font-size: 22px; font-weight: 800; letter-spacing: -.3px; font-variant-numeric: tabular-nums; }
-.stat small { font-size: 11px; color: var(--faint); display: flex; gap: 8px; }
-.stat small i { font-style: normal; font-variant-numeric: tabular-nums; }
-.stat small i.up::before { content: "↑ "; }
-.stat small i.down::before { content: "↓ "; }
 
 /* ---------- 面板区块 ---------- */
 .panel { padding: 16px; margin-bottom: 14px; }

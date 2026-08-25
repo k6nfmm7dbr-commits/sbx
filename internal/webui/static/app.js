@@ -66,11 +66,7 @@ function tickEase() {
 function renderSummary(s) {
   state.summary = s;
   easeTo('kpi-today-total', s.today.rx + s.today.tx, fmtBytes);
-  easeTo('kpi-today-up', s.today.rx, fmtBytes);
-  easeTo('kpi-today-down', s.today.tx, fmtBytes);
   easeTo('kpi-all-total', s.total.rx + s.total.tx, fmtBytes);
-  easeTo('kpi-all-up', s.total.rx, fmtBytes);
-  easeTo('kpi-all-down', s.total.tx, fmtBytes);
   setText('kpi-nodes', s.nodes.length);
   renderNodeCards(s);
   renderNodeSelect(s);
