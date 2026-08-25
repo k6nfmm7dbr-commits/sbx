@@ -46,6 +46,9 @@ jobs:
       - name: 安装器 fw_apply / ensure_panel_conf 流程测试（提取模板真实逻辑）
         run: bash tests/installer_flow_test.sh
 
+      - name: 安装器分发链 / 权限流程测试（提取模板真实逻辑）
+        run: bash tests/dist_flow_test.sh
+
       - name: Python reference suite（旧实现回归，src/ 仅作参考保留）
         run: python3 tests/run_all.py
 
@@ -57,3 +60,58 @@ jobs:
             git diff --stat -- internal/*/testdata;
             exit 1;
           }
+
+  # 二进制分发：main 全部测试通过后，把全架构产物发布到 dist 分支（rolling latest）。
+  # dist 是普通分支，不是 Tag——安装器固定从 raw .../dist/<artifact> 下载，
+  # 永远拿到与 main 最新源码同版本构建的二进制。不创建 Release，不创建 Tag。
+  publish-dist:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: 构建全架构二进制
+        run: ./scripts/build-release.sh dist
+
+      - name: SHA256SUMS 自检 + 版本三方一致性（APP_VERSION/Go/二进制，无 Tag）
+        run: bash scripts/artifact_check.sh dist
+
+      - name: 分发清单一致性（产物与 scripts/dist-manifest.txt 完全一致）
+        run: |
+          ls dist | sort > /tmp/actual.txt
+          sort scripts/dist-manifest.txt > /tmp/expected.txt
+          diff /tmp/expected.txt /tmp/actual.txt || {
+            echo "::error::dist 产物与清单不一致"; exit 1;
+          }
+
+      - name: 发布到 dist 分支（force-push，仅产物文件）
+        run: |
+          git config user.name "sbx-dist-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          git fetch origin dist || true
+          git checkout --orphan dist-new
+          git rm -rf --quiet . 2>/dev/null || true
+          # dist/ 被 .gitignore 忽略，add 时显式 -f
+          git add -f dist/
+          git add scripts/dist-manifest.txt
+          VER="$(grep -m1 '^const Version' internal/version/version.go | sed 's/.*"\(.*\)".*/\1/')"
+          git commit -qm "dist: rebuild from ${GITHUB_SHA::7} (v$VER)"
+          git push -f origin dist-new:dist
+
+      - name: 验证 raw 分发地址真实可用（amd64 + SHA256SUMS）
+        run: |
+          sleep 10
+          for f in sbx-core-linux-amd64 sbx-core-linux-arm64 SHA256SUMS; do
+            code=$(curl -sIL -o /dev/null -w '%{http_code}' \
+              "https://raw.githubusercontent.com/${{ github.repository }}/dist/$f")
+            [[ "$code" == "200" ]] || { echo "::error::分发地址不可用: $f -> HTTP $code"; exit 1; }
+            echo "  [OK] $f -> 200"
+          done

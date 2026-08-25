@@ -3,6 +3,8 @@
 sing-box 节点搭建与内核流量统计面板。自用、轻量、无多用户、无分流、无订阅转换。
 
 **v3.0.0 起：后端为 Go 单二进制 `sbx-core`，服务器不再需要 Python 运行时。**
+`src/` 下的 Python 文件仅作参考实现与回归测试对照（reference/test only），
+不参与生产运行。
 
 ## 架构
 
@@ -26,10 +28,13 @@ bash <(curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/
 安装后运行 `sbx` 打开命令菜单。安装器会：
 
 1. 检测系统（Debian/Ubuntu、RHEL 系、Alpine）与 init（systemd/OpenRC）；
-2. 按 `uname -m` 从 GitHub Releases 下载对应架构的 `sbx-core` 并校验 SHA256，
+2. 按 `uname -m` 从仓库 `dist` 分支下载对应架构的 `sbx-core` 并校验 SHA256，
    失败则报错退出且不破坏现有安装；开发可用 `SBX_CORE_BIN=/path/to/sbx-core` 跳过下载；
 3. 安装 sing-box（Alpine 自动选 musl 构建）；
 4. 注册并启动三个服务：`sbx-firewall`（计数规则，oneshot）、`sing-box`、`sbx-panel`。
+
+**版本管理**：main 为唯一代码基线，项目不使用 Git Tag，安装不依赖任何 Tag/Release。
+`sbx-core` 二进制发布在 `dist` 分支（rolling latest，与 main 源码同版本构建）。
 
 ## 当前版本
 

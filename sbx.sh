@@ -32,8 +32,10 @@ export SBX_CONF="$PANEL_CONF"
 
 SB_VERSION_PIN="${SBX_SB_VERSION:-}"     # 留空=取最新稳定版
 GH_PROXY="${SBX_GH_PROXY:-}"             # 例: https://ghfast.top/
-# 项目不依赖 Git Tag 管理：发布资产统一走最新 Release 的稳定下载入口
-RELEASE_BASE="https://github.com/k6nfmm7dbr-commits/sbx/releases/latest/download"
+# 二进制分发走仓库 dist 分支（rolling latest，与 Git Tag 无关）：
+# raw.githubusercontent 对同一路径始终返回最新提交的产物，安装器无需感知版本号。
+# 项目不使用 Git Tag / 版本 Release，因此不存在会失效的版本化下载链接。
+RAW_BASE="${SBX_RAW_BASE:-https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/dist}"
 
 OS_FAMILY="unknown"
 INIT_SYS="unknown"
@@ -319,9 +321,9 @@ install_sbx_core() {
 
   # 全程不触碰现有安装：下载 → 校验 → 自检全部通过后才原子替换
   info "下载 sbx-core (${arch})..."
-  curl -fsSL -m 300 -o "$dl" "$(gh_url "$RELEASE_BASE/v${APP_VERSION}/${name}")" \
+  curl -fsSL -m 300 -o "$dl" "$(gh_url "$RAW_BASE/${name}")" \
     || { cleanup; die "下载 sbx-core 失败（可设置 SBX_GH_PROXY 使用镜像）；现有安装未被改动"; }
-  curl -fsSL -m 60 -o "$tmp/SHA256SUMS" "$(gh_url "$RELEASE_BASE/v${APP_VERSION}/SHA256SUMS")" \
+  curl -fsSL -m 60 -o "$tmp/SHA256SUMS" "$(gh_url "$RAW_BASE/SHA256SUMS")" \
     || { cleanup; die "下载 SHA256SUMS 失败；现有安装未被改动"; }
   verify_core_checksum "$dl" "$tmp/SHA256SUMS" "$name" \
     || { cleanup; die "sbx-core 校验失败；现有安装未被改动"; }
@@ -347,8 +349,17 @@ install_sbx_core() {
 prepare_dirs() {
   install -d -m 0755 "$APP_DIR" "$WEB_DIR" "$SB_DIR"
   install -d -m 0700 "$CERT_DIR"
-  [[ -f "$NODES_JSON" ]]  || echo '[]' > "$NODES_JSON"
-  [[ -f "$STATE_JSON" ]]  || echo '{}' > "$STATE_JSON"
+  # nodes.json/state.json 含节点凭据（UUID/密码/Reality 私钥）：
+  # 先以 0600 预创建空文件（不受 umask 影响），再写入内容，
+  # 保证敏感内容从落盘第一字节起就是 0600。
+  if [[ ! -f "$NODES_JSON" ]]; then
+    install -m 0600 /dev/null "$NODES_JSON"
+    printf '[]\n' > "$NODES_JSON"
+  fi
+  if [[ ! -f "$STATE_JSON" ]]; then
+    install -m 0600 /dev/null "$STATE_JSON"
+    printf '{}\n' > "$STATE_JSON"
+  fi
 }
 
 ensure_sb_config() {
