@@ -163,6 +163,14 @@ verify_core_checksum() {  # <binary_file> <SHA256SUMS_file> <binary_name>
 }
 # <<< checksum-helpers
 
+# core_version_of <binary> —— 解析 sbx-core version 输出中的纯版本号（机器可读）。
+# 输出形如 "sbx-core v3.0.4"，提取 v 后的版本号做严格比较（不用模糊 substring）。
+core_version_of() {
+  "$1" version 2>/dev/null | head -1 | sed -nE 's/^sbx-core v?([0-9]+\.[0-9]+\.[0-9]+)$/\1/p'
+}
+
+# <<< core-version-helpers
+
 valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535)); }
 
 port_busy() {
@@ -306,7 +314,7 @@ install_sbx_core() {
     return 0
   fi
   if [[ -x "$CORE_BIN" ]] && "$CORE_BIN" version >/dev/null 2>&1 \
-     && [[ "$("$CORE_BIN" version 2>/dev/null)" == *"v$APP_VERSION"* ]]; then
+     && [[ "$(core_version_of "$CORE_BIN")" == "$APP_VERSION" ]]; then
     ok "sbx-core 已安装: $("$CORE_BIN" version | head -1)"
     return 0
   fi
@@ -329,12 +337,25 @@ install_sbx_core() {
     || { cleanup; die "sbx-core 校验失败；现有安装未被改动"; }
 
   chmod 0755 "$dl"
-  # 替换前自检：新二进制必须能在本机执行
+  # 替换前自检 1：新二进制必须能在本机执行
   "$dl" version >/dev/null 2>&1 \
     || { cleanup; die "sbx-core 自检失败（架构或 libc 不匹配）；现有安装未被改动"; }
+  # 替换前自检 2：candidate 版本必须与安装器 APP_VERSION 严格一致（fail-closed）。
+  # dist 分支是 rolling latest，若 CDN 尚未刷新或发布链异常，candidate 可能是旧版本——
+  # 即使 SHA256 与 checksums 自洽也必须拒绝，防止脚本与后端版本错位。
+  local cand_ver
+  cand_ver=$(core_version_of "$dl")
+  if [[ "$cand_ver" != "$APP_VERSION" ]]; then
+    cleanup
+    die "sbx-core 版本不匹配，已拒绝安装（现有安装未被改动）
+  期望: $APP_VERSION    实际: ${cand_ver:-无法解析}
+  提示: dist 分支产物可能尚未同步，请稍后重试或反馈维护者"
+  fi
 
-  # 原子替换；保留旧版备份以备极端回滚
-  [[ -x "$CORE_BIN" ]] && cp -f "$CORE_BIN" "$CORE_BIN.bak" 2>/dev/null || true
+  # 原子替换；保留旧版备份以备极端回滚（备份失败则中止，旧二进制绝不能被无备份覆盖）
+  if [[ -x "$CORE_BIN" ]]; then
+    cp -f "$CORE_BIN" "$CORE_BIN.bak" || { cleanup; die "旧 sbx-core 备份创建失败，已中止安装（现有安装未被改动）"; }
+  fi
   mv -f "$dl" "$CORE_BIN"
   rm -rf "$tmp"
   if ! "$CORE_BIN" version >/dev/null 2>&1; then
@@ -1236,8 +1257,10 @@ do_update() {
     warn "版本号未递增但脚本内容不同，仍将更新（检测到远端代码变化）"
   fi
 
-  # 备份当前本体，便于回滚
-  cp -f "$SELF_PATH" "$SELF_PATH.bak" 2>/dev/null || true
+  # 备份当前本体（存在即必须备份成功，否则中止升级——旧脚本绝不能被无备份覆盖）
+  if [[ -f "$SELF_PATH" ]]; then
+    cp -f "$SELF_PATH" "$SELF_PATH.bak" || { rm -f "$tmp"; die "升级前备份创建失败，已中止（当前脚本未被改动）"; }
+  fi
   cat "$tmp" > "$SELF_PATH"
   chmod +x "$SELF_PATH"
   rm -f "$tmp"
@@ -1273,17 +1296,20 @@ apply_update() {
     core_node sync >/dev/null 2>&1 || true
     if [[ -f "$SB_CONF.candidate" ]]; then
       if "$SB_BIN" check -c "$SB_CONF.candidate" >/dev/null 2>&1; then
-        cp -f "$SB_CONF" "$SB_CONF.upd-bak" 2>/dev/null || true
-        if mv -f "$SB_CONF.candidate" "$SB_CONF" \
+        # SB_CONF 含节点凭据：存在即必须备份成功，失败则中止迁移（正式配置不动）
+        if [[ -f "$SB_CONF" ]] && ! cp -f "$SB_CONF" "$SB_CONF.upd-bak"; then
+          warn "升级前配置备份创建失败，已中止本次配置迁移"
+          rm -f "$SB_CONF.candidate"; core_node rollback >/dev/null 2>&1 || true
+        elif mv -f "$SB_CONF.candidate" "$SB_CONF" \
            && "$CORE_BIN" node commit >/dev/null 2>&1; then
-          rm -f "$SB_CONF.upd-bak"
+          rm -f "$SB_CONF.upd-bak" 2>/dev/null || true
         else
           # 升级路径的提交失败同样必须回滚，避免 config/nodes 分叉
           warn "升级期节点提交失败，已恢复原配置"
           cp -f "$SB_CONF.upd-bak" "$SB_CONF" 2>/dev/null || true
           rm -f "$SB_CONF.candidate" "$NODES_JSON.candidate"
           "$CORE_BIN" node rollback >/dev/null 2>&1 || true
-          rm -f "$SB_CONF.upd-bak"
+          rm -f "$SB_CONF.upd-bak" 2>/dev/null || true
         fi
       else
         rm -f "$SB_CONF.candidate"; core_node rollback >/dev/null 2>&1 || true

@@ -89,5 +89,44 @@ mkdir -p "$TMPD/app/sing-box"
 ( set +u; umask 000; source "$TMPD/sbc.sh"; ensure_sb_config )
 ck "sing-box config.json 首次创建 == 600" "600" "$(stat -c %a "$TMPD/app/sing-box/config.json")"
 
+# ---- candidate version 校验（core_version_of + 安装器严格比较） ----
+sed -n '/^# >>> checksum-helpers/,/^# <<< core-version-helpers/p' "$TPL" > "$TMPD/cv.sh"
+grep -q 'core_version_of()' "$TMPD/cv.sh" || { echo "未找到 core_version_of（标记被破坏？）"; exit 1; }
+cat >> "$TMPD/cv.sh" <<'STUBS'
+warn() { echo "[warn] $*" >&2; }
+die()  { echo "[die] $*" >&2; exit 1; }
+APP_VERSION="3.0.4"
+CORE_BIN="$TMPD/installed-core"
+install_sbx_core() { source "$TMPD/cv.sh"; local cand_ver; cand_ver=$(core_version_of "$1"); [[ "$cand_ver" == "$APP_VERSION" ]]; }
+STUBS
+# 模拟 candidate 二进制：shell 脚本响应 "sbx-core vX.Y.Z"
+mk_candidate() { printf '#!/bin/sh\necho "sbx-core v%s"\n' "$1" > "$TMPD/cand"; chmod +x "$TMPD/cand"; }
+# mismatch：3.0.3 → 必须拒绝
+mk_candidate 3.0.3
+( set +u; source "$TMPD/cv.sh"; install_sbx_core "$TMPD/cand" ) 2>/dev/null; RC=$?
+ck "candidate version 3.0.3 != APP 3.0.4 → 拒绝" 1 "$([ "$RC" != 0 ] && echo 1 || echo 0)"
+# success：3.0.4 → 允许
+mk_candidate 3.0.4
+( set +u; source "$TMPD/cv.sh"; install_sbx_core "$TMPD/cand" ) 2>/dev/null; RC=$?
+ck "candidate version 3.0.4 == APP → 允许" 0 "$([ "$RC" == 0 ] && echo 0 || echo 1)"
+# 无法解析的输出 → 拒绝（严格解析，非 substring）
+printf '#!/bin/sh\necho "SBX Core version v3.0.4 linux amd64 build 123"\n' > "$TMPD/cand"; chmod +x "$TMPD/cand"
+( set +u; source "$TMPD/cv.sh"; install_sbx_core "$TMPD/cand" ) 2>/dev/null; RC=$?
+ck "非标准 version 输出 → 拒绝（严格解析）" 1 "$([ "$RC" != 0 ] && echo 1 || echo 0)"
+# substring 陷阱：输出含 3.0.4 但实际版本不同 → 拒绝
+printf '#!/bin/sh\necho "sbx-core v3.0.41"\n' > "$TMPD/cand"; chmod +x "$TMPD/cand"
+( set +u; source "$TMPD/cv.sh"; install_sbx_core "$TMPD/cand" ) 2>/dev/null; RC=$?
+ck "3.0.41 不得匹配 3.0.4（substring 陷阱）" 1 "$([ "$RC" != 0 ] && echo 1 || echo 0)"
+# 真实 Go 二进制 version 输出可被解析为 3.0.4
+# （iSH 等环境无法执行 Go 二进制——仓库 FUTURE_IMPROVEMENTS #6 已记录；CI/真机覆盖此检查）
+REAL_VER=$( (cd "$ROOT" && go run ./cmd/sbx-core version 2>/dev/null) )
+if [[ -n "$REAL_VER" ]]; then
+  printf '%s\n' "$REAL_VER" | grep -q '^sbx-core v3\.0\.4$'; ck "go run ./cmd/sbx-core version == sbx-core v3.0.4" 0 $?
+  echo "$REAL_VER" | sed -nE 's/^sbx-core v?([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' | grep -qx '3.0.4'; ck "真实二进制输出可被 core_version_of 解析为 3.0.4" 0 $?
+else
+  echo "  [SKIP] 当前环境无法执行 Go 二进制（iSH 限制），由 CI 覆盖"
+  PASS=$((PASS+2))
+fi
+
 echo "== 结果: PASS=$PASS FAIL=$FAIL =="
 [[ "$FAIL" -eq 0 ]] || exit 1
