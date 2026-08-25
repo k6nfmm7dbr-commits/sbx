@@ -96,9 +96,10 @@ jobs:
           git config user.name "sbx-dist-bot"
           git config user.email "actions@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
-          git fetch origin dist || true
+          git fetch origin dist || true   # 首次运行时 dist 分支尚不存在，属正常
           git checkout --orphan dist-new
-          git rm -rf --quiet . 2>/dev/null || true
+          # 只清空索引、不动工作区（git rm -rf . 会把刚构建的 dist/ 产物一起删掉）
+          git rm -r --cached --quiet . 2>/dev/null || true
           # dist/ 被 .gitignore 忽略，add 时显式 -f
           git add -f dist/
           git add scripts/dist-manifest.txt
