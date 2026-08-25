@@ -40,12 +40,13 @@ jobs:
         run: |
           sudo apt-get update -qq >/dev/null
           sudo apt-get install -y -qq shellcheck >/dev/null
-          # 生产代码：error+warning 全查，不豁免
-          shellcheck installer-template.sh sbx.sh
+          # 生产代码：error+warning 全查不豁免；info/style(SC2015 `A && B || C` 等
+          # intentional shell 惯用法)用 -S warning 排除，不 fail
+          shellcheck -S warning installer-template.sh sbx.sh
           # 测试/真机验收脚本：仅豁免 SC2034——这些脚本大量使用
           # `read RX TX <<< ...`（RX 仅作配对字段）与 source 跨文件追踪，
           # 属 shellcheck 已知局限；其余 error+warning 仍全部检查。
-          shellcheck -e SC2034 scripts/*.sh tests/*.sh
+          shellcheck -S warning -e SC2034 scripts/*.sh tests/*.sh
 
       - name: sbx.sh 与模板同步检查（防 drift）
         run: |
