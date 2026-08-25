@@ -230,6 +230,12 @@ func (c *CLI) run(args []string) int {
 	return c.Run(args)
 }
 
+// runGetInfo 执行 info 子命令并返回输出内容（含 method 字段）。
+func (c *CLI) runGetInfo(id string) string {
+	c.run([]string{"info", id})
+	return c.out()
+}
+
 func TestCLIRoundtrip(t *testing.T) {
 	cli, store, _ := newTestCLI(t)
 
@@ -312,7 +318,7 @@ func TestCLIRoundtrip(t *testing.T) {
 	if rc = cli.run([]string{"info", "1"}); rc != exitOK {
 		t.Fatal("info 失败")
 	}
-	if cli.out() != "shadowsocks\t\t8399\n" {
+	if cli.out() != "shadowsocks\t\t8399\t2022-blake3-aes-128-gcm\n" {
 		t.Errorf("info 输出异常: %q", cli.out())
 	}
 

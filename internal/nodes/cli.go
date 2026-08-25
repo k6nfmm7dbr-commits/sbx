@@ -43,6 +43,8 @@ func (c *CLI) Run(args []string) int {
 		return c.cmdCommit()
 	case "rollback":
 		return c.cmdRollback()
+	case "ss2022-key":
+		return c.cmdSS2022Key(rest)
 	case "list":
 		return c.cmdList(rest)
 	case "count":
@@ -72,7 +74,7 @@ func (c *CLI) Run(args []string) int {
 
 func (c *CLI) usageError(msg string) int {
 	fmt.Fprintln(c.Stderr, msg)
-	fmt.Fprintln(c.Stderr, "用法: sbx-core node <add|edit|remove|list|count|last|info|links|sync|commit|rollback|port-used|set-host|get-host|set-host6|get-host6>")
+	fmt.Fprintln(c.Stderr, "用法: sbx-core node <add|edit|remove|list|count|last|info|links|sync|commit|rollback|ss2022-key|port-used|set-host|get-host|set-host6|get-host6>")
 	return exitUsage
 }
 
@@ -273,7 +275,7 @@ func (c *CLI) cmdRemove(args []string) int {
 // SniTypes 是允许修改 SNI 的类型（reality + 自签证书类）。
 var sniTypes = map[string]bool{"vless": true, "trojan": true, "anytls": true}
 
-var editKnown = map[string]bool{"port": true, "sni": true}
+var editKnown = map[string]bool{"port": true, "sni": true, "method": true}
 
 func (c *CLI) cmdEdit(args []string) int {
 	p, err := parseArgs(args, editKnown)
@@ -322,6 +324,27 @@ func (c *CLI) cmdEdit(args []string) int {
 		target["sni"] = sni
 		changed = append(changed, "SNI→"+sni)
 	}
+	if method, has := p.flags["method"]; has && method != "" {
+		t := Str(target, "type")
+		if t != "shadowsocks" {
+			return c.fail(fmt.Sprintf("%s 类型节点没有加密算法可改", t))
+		}
+		if !IsSS2022Method(method) {
+			return c.fail("未知的 Shadowsocks 2022 method: " + method)
+		}
+		old := Str(target, "method")
+		if method != old {
+			// 算法切换：旧 key 长度不再符合新 method，必须重新生成
+			newPw, gerr := GenerateSS2022Password(method)
+			if gerr != nil {
+				return c.fail(gerr.Error())
+			}
+			target["method"] = method
+			target["password"] = newPw
+			changed = append(changed, "加密算法→"+method)
+		}
+		// method 相同：保留原 password，无需重生成
+	}
 	if len(changed) == 0 {
 		return c.fail("未指定要修改的内容（--port / --sni）")
 	}
@@ -369,6 +392,27 @@ func (c *CLI) cmdRollback() int {
 		}
 	}
 	fmt.Fprintln(c.Stdout, "ok")
+	return exitOK
+}
+
+// cmdSS2022Key 生成 Shadowsocks 2022 Base64 密码（crypto/rand）。
+// 用法: ss2022-key --method=2022-blake3-aes-128-gcm|2022-blake3-aes-256-gcm
+var ss2022KeyKnown = map[string]bool{"method": true}
+
+func (c *CLI) cmdSS2022Key(args []string) int {
+	p, err := parseArgs(args, ss2022KeyKnown)
+	if err != nil {
+		return c.usageError(err.Error())
+	}
+	method := p.flags["method"]
+	if !IsSS2022Method(method) {
+		return c.fail("未知的 Shadowsocks 2022 method: " + method)
+	}
+	pw, err := GenerateSS2022Password(method)
+	if err != nil {
+		return c.fail(err.Error())
+	}
+	fmt.Fprintln(c.Stdout, pw)
 	return exitOK
 }
 
@@ -425,7 +469,11 @@ func (c *CLI) cmdInfo(args []string) int {
 	}
 	for _, n := range LoadToolNodes(c.Store.NodesPath()) {
 		if IDString(n) == args[0] || Str(n, "id") == args[0] {
-			fmt.Fprintf(c.Stdout, "%s\t%s\t%s\n", Str(n, "type"), Str(n, "sni"), Str(n, "port"))
+			fmt.Fprintf(c.Stdout, "%s\t%s\t%s", Str(n, "type"), Str(n, "sni"), Str(n, "port"))
+			if m := Str(n, "method"); m != "" {
+				fmt.Fprintf(c.Stdout, "\t%s", m)
+			}
+			fmt.Fprintln(c.Stdout)
 			return exitOK
 		}
 	}

@@ -59,7 +59,12 @@ func BuildInbound(n Node) (map[string]any, error) {
 			},
 		}
 	case "shadowsocks":
-		base["method"] = Str(n, "method")
+		method := Str(n, "method")
+		if method == "" {
+			// 历史节点兼容：旧版默认 method，不重置 password
+			method = SS2022Method128
+		}
+		base["method"] = method
 		base["password"] = Str(n, "password")
 	case "trojan":
 		base["users"] = []any{map[string]any{"name": "u", "password": Str(n, "password")}}
