@@ -3,11 +3,18 @@ package nodes
 import (
 	"fmt"
 	"os"
-	"strings"
+	"regexp"
 )
 
 // TagPrefix 是 sbx 管理的 inbound 标签前缀。
 const TagPrefix = "sbx-n"
+
+// managedTagRe 精确匹配 sbx 真正拥有的 inbound 标签（sbx-n<数字>）。
+// 不能用 strings.HasPrefix("sbx-n")——那会误删用户自行创建的
+// sbx-news / sbx-native / sbx-node-custom 等标签。
+var managedTagRe = regexp.MustCompile(`^sbx-n[0-9]+$`)
+
+func isManagedTag(tag string) bool { return managedTagRe.MatchString(tag) }
 
 // Types 与旧 TYPES 一致。
 var Types = []string{"vless", "shadowsocks", "trojan", "anytls"}
@@ -103,14 +110,18 @@ func RebuildConfig(store *Store, list []Node) (map[string]any, error) {
 	}
 
 	others := make([]any, 0)
-	if raw, exists := cfg["inbounds"].([]any); exists {
-		for _, it := range raw {
+	if raw, exists := cfg["inbounds"]; exists {
+		list, ok := raw.([]any)
+		if !ok {
+			return nil, fmt.Errorf("读取 sing-box 配置失败: inbounds 必须是数组")
+		}
+		for _, it := range list {
 			m, isMap := it.(map[string]any)
 			if !isMap {
-				continue // 防御：非对象条目跳过
+				return nil, fmt.Errorf("读取 sing-box 配置失败: inbounds 数组元素必须是对象")
 			}
 			tag, _ := m["tag"].(string)
-			if strings.HasPrefix(tag, TagPrefix) {
+			if isManagedTag(tag) {
 				continue
 			}
 			others = append(others, it)
@@ -130,13 +141,14 @@ func RebuildConfig(store *Store, list []Node) (map[string]any, error) {
 	if _, exists := cfg["outbounds"]; !exists {
 		cfg["outbounds"] = []any{map[string]any{"type": "direct", "tag": "direct"}}
 	}
-	route, exists := cfg["route"].(map[string]any)
-	if !exists {
-		route = map[string]any{}
-		cfg["route"] = route
-	}
-	if _, hasFinal := route["final"]; !hasFinal {
-		route["final"] = "direct"
+	if rawRoute, hasRoute := cfg["route"]; !hasRoute {
+		cfg["route"] = map[string]any{"final": "direct"}
+	} else if route, ok := rawRoute.(map[string]any); ok {
+		if _, hasFinal := route["final"]; !hasFinal {
+			route["final"] = "direct"
+		}
+	} else {
+		return nil, fmt.Errorf("读取 sing-box 配置失败: route 必须是对象")
 	}
 	return cfg, nil
 }

@@ -67,8 +67,8 @@ func LoadToolNodes(path string) []Node {
 }
 
 // LoadToolNodesStrict 严格读取：文件不存在视为空列表（保持“全新安装可直接添加”）；
-// 但存在却损坏/顶层结构错误时返回错误——修改类操作必须据此拒绝覆盖原文件，
-// 防止把损坏误判为空而写回只剩新数据的文件。
+// 但存在却损坏/顶层结构错误/节点语义非法时返回错误——修改类操作必须据此拒绝
+// 覆盖原文件，防止把损坏误判为空而写回只剩新数据的文件。
 func LoadToolNodesStrict(path string) ([]Node, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -80,6 +80,9 @@ func LoadToolNodesStrict(path string) ([]Node, error) {
 	list, _, err := decodeNodesFile(data)
 	if err != nil {
 		return nil, fmt.Errorf("nodes.json 解析失败，已拒绝修改。原文件未被覆盖: %w", err)
+	}
+	if err := validateNodes(list); err != nil {
+		return nil, fmt.Errorf("nodes.json 校验失败，已拒绝修改。原文件未被覆盖: %w", err)
 	}
 	return list, nil
 }
@@ -151,13 +154,14 @@ func LoadPanelNodes(path string) []Node {
 	return out
 }
 
-// LoadPanelNodesStrict 严格读取面板节点列表（元素过滤规则与宽松版一致）：
+// LoadPanelNodesStrict 严格读取面板节点列表：
 //   - 文件不存在：返回空列表（全新安装合法状态，允许以 0 节点首次建规则）；
-//   - 文件存在但读取失败 / JSON 损坏 / 顶层结构错误：返回错误。
+//   - 文件存在但读取失败 / JSON 损坏 / 顶层结构错误 / 节点语义非法：返回错误。
 //
-// 典型事故场景：nodes.json 损坏 → 宽松读取得到空列表 → Apply 以 0 节点重建
-// nftables/iptables 并清掉全部 per-node counter 基线。strict 模式下这类路径
-// 必须在改动任何防火墙状态之前中止。
+// 与宽松版不同：数组元素必须都是对象且含 id（不再 continue 跳过），并额外
+// 校验 id/port/type。典型事故场景：nodes.json 损坏 → 宽松读取得到空列表 →
+// Apply 以 0 节点重建防火墙并清掉全部 per-node 计数基线。strict 模式在改动
+// 任何防火墙状态之前即中止。
 func LoadPanelNodesStrict(path string) ([]Node, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -166,28 +170,51 @@ func LoadPanelNodesStrict(path string) ([]Node, error) {
 		}
 		return nil, fmt.Errorf("nodes.json 读取失败: %w", err)
 	}
-	v, err := DecodeJSON(data)
+	list, err := decodePanelNodesStrict(data)
 	if err != nil {
 		return nil, fmt.Errorf("nodes.json 损坏, 拒绝据此修改防火墙规则(请修复 %s): %w", path, err)
+	}
+	if err := validateNodes(list); err != nil {
+		return nil, fmt.Errorf("nodes.json 校验失败, 拒绝据此修改防火墙规则(%s): %w", path, err)
+	}
+	return list, nil
+}
+
+// decodePanelNodesStrict 严格解析面板节点文件（容忍 {"nodes":[...]} 包装）：
+// 顶层只能是一个 JSON value + EOF；数组元素必须都是对象且含 id。
+func decodePanelNodesStrict(data []byte) ([]Node, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
 	}
 	if m, ok := v.(map[string]any); ok {
 		v = m["nodes"]
 	}
 	list, ok := v.([]any)
 	if !ok {
-		return nil, fmt.Errorf("nodes.json 结构错误, 拒绝据此修改防火墙规则(%s): 顶层必须是数组或 {\"nodes\":[...]}", path)
+		return nil, fmt.Errorf("顶层必须是数组或 {\"nodes\":[...]}")
 	}
 	out := make([]Node, 0, len(list))
 	for _, it := range list {
-		m, ok := it.(map[string]any)
-		if !ok {
-			continue
+		m, isMap := it.(map[string]any)
+		if !isMap {
+			return nil, fmt.Errorf("数组元素必须是对象")
 		}
-		if _, has := m["id"]; has {
-			out = append(out, Node(m))
+		if _, has := m["id"]; !has {
+			return nil, fmt.Errorf("节点缺少 id")
 		}
+		out = append(out, Node(m))
 	}
-	return out, nil
+	var extra any
+	if err := dec.Decode(&extra); err != nil {
+		if errors.Is(err, io.EOF) {
+			return out, nil
+		}
+		return nil, fmt.Errorf("尾部存在非法数据: %w", err)
+	}
+	return nil, fmt.Errorf("存在多个 JSON 值")
 }
 
 // SaveNodesFile 原子写 nodes.json（indent=2 + 结尾换行，Python 兼容格式）。
@@ -283,6 +310,63 @@ func toInt(v any) (int64, error) {
 		return strconv.ParseInt(strings.TrimSpace(t), 10, 64)
 	}
 	return 0, fmt.Errorf("不是整数: %v", v)
+}
+
+// strictInt64 严格整数校验：id/port 这类字段必须是真正的整数类型
+// （json.Number / int64），不接受字符串形式（如 "1"）——字符串 id 属数据损坏。
+func strictInt64(v any) (int64, bool) {
+	switch t := v.(type) {
+	case json.Number:
+		n, err := t.Int64()
+		if err != nil {
+			return 0, false
+		}
+		return n, true
+	case int64:
+		return t, true
+	case int:
+		return int64(t), true
+	case float64:
+		if t == float64(int64(t)) {
+			return int64(t), true
+		}
+		return 0, false
+	default:
+		return 0, false
+	}
+}
+
+// validateNodes 对节点列表做语义校验：id 为正整数且不重复、port 在 1..65535
+// 且不重复、type 属于受支持协议。用于所有 state-changing 路径前的兜底，
+// 防止「明显损坏的节点数据」被当作空列表/合法数据继续修改 firewall/config。
+func validateNodes(list []Node) error {
+	seenID := map[int64]bool{}
+	seenPort := map[int64]bool{}
+	for _, n := range list {
+		id, ok := strictInt64(n["id"])
+		if !ok || id <= 0 {
+			return fmt.Errorf("节点 id 非法(必须为正整数): %v", n["id"])
+		}
+		if seenID[id] {
+			return fmt.Errorf("节点 id 重复: %d", id)
+		}
+		seenID[id] = true
+
+		port, ok := strictInt64(n["port"])
+		if !ok || port < 1 || port > 65535 {
+			return fmt.Errorf("节点 %d 端口非法: %v", id, n["port"])
+		}
+		if seenPort[port] {
+			return fmt.Errorf("节点端口重复: %d", port)
+		}
+		seenPort[port] = true
+
+		t := Str(n, "type")
+		if !ValidType(t) {
+			return fmt.Errorf("节点 %d 类型不受支持: %q", id, t)
+		}
+	}
+	return nil
 }
 
 // ParsePorts 对齐 panel.parse_ports：唯一监听端口 -> [(p,p)]，非法返回空。

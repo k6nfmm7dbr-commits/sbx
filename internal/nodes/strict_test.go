@@ -43,13 +43,61 @@ func TestLoadPanelNodesStrictCorruptFails(t *testing.T) {
 
 func TestLoadPanelNodesStrictValidWrapped(t *testing.T) {
 	p := strictPath(t)
-	writeFixture(t, p, `{"nodes":[{"id":1,"name":"a"},{"name":"no-id"},{"id":2}]}`)
+	writeFixture(t, p, `{"nodes":[{"id":1,"name":"a","port":443,"type":"vless"},{"id":2,"name":"b","port":444,"type":"trojan"}]}`)
 	list, err := LoadPanelNodesStrict(p)
 	if err != nil {
 		t.Fatalf("合法包装不应报错: %v", err)
 	}
 	if len(list) != 2 {
-		t.Fatalf("只保留含 id 的对象, 期望 2 得到 %d", len(list))
+		t.Fatalf("期望 2 个节点, 得到 %d", len(list))
+	}
+}
+
+func TestLoadPanelNodesStrictMissingIDFails(t *testing.T) {
+	p := strictPath(t)
+	writeFixture(t, p, `{"nodes":[{"id":1,"port":443,"type":"vless"},{"name":"no-id","port":444,"type":"trojan"}]}`)
+	if _, err := LoadPanelNodesStrict(p); err == nil {
+		t.Fatal("缺 id 的节点必须报错, 不能静默跳过")
+	}
+}
+
+func TestLoadPanelNodesStrictDuplicateIDFails(t *testing.T) {
+	p := strictPath(t)
+	writeFixture(t, p, `[{"id":1,"port":443,"type":"vless"},{"id":1,"port":444,"type":"trojan"}]`)
+	if _, err := LoadPanelNodesStrict(p); err == nil {
+		t.Fatal("重复 id 必须报错")
+	}
+}
+
+func TestLoadPanelNodesStrictDuplicatePortFails(t *testing.T) {
+	p := strictPath(t)
+	writeFixture(t, p, `[{"id":1,"port":443,"type":"vless"},{"id":2,"port":443,"type":"trojan"}]`)
+	if _, err := LoadPanelNodesStrict(p); err == nil {
+		t.Fatal("重复端口必须报错")
+	}
+}
+
+func TestLoadPanelNodesStrictStringIDFails(t *testing.T) {
+	p := strictPath(t)
+	writeFixture(t, p, `[{"id":"1","port":443,"type":"vless"}]`)
+	if _, err := LoadPanelNodesStrict(p); err == nil {
+		t.Fatal("字符串 id 必须报错(必须是整数)")
+	}
+}
+
+func TestLoadPanelNodesStrictInvalidPortFails(t *testing.T) {
+	p := strictPath(t)
+	writeFixture(t, p, `[{"id":1,"port":70000,"type":"vless"}]`)
+	if _, err := LoadPanelNodesStrict(p); err == nil {
+		t.Fatal("端口越界必须报错")
+	}
+}
+
+func TestLoadPanelNodesStrictUnsupportedTypeFails(t *testing.T) {
+	p := strictPath(t)
+	writeFixture(t, p, `[{"id":1,"port":443,"type":"wireguard"}]`)
+	if _, err := LoadPanelNodesStrict(p); err == nil {
+		t.Fatal("不支持的协议必须报错")
 	}
 }
 

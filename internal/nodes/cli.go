@@ -173,6 +173,9 @@ func (c *CLI) cmdAdd(args []string) int {
 	if perr != nil {
 		return c.fail("invalid literal for int() with base 10: '" + portStr + "'")
 	}
+	if portNum < 1 || portNum > 65535 {
+		return c.fail("端口需在 1-65535")
+	}
 	node["port"] = json.Number(strconv.FormatInt(portNum, 10))
 
 	if name := p.flags["name"]; name != "" {
@@ -233,6 +236,11 @@ func (c *CLI) strictLoadForMutation() ([]Node, int) {
 }
 
 func (c *CLI) writeCandidates(list []Node) (string, string, int) {
+	// 所有 mutation 共享的兜底校验：最终节点列表必须语义合法，
+	// 防止 add/edit/remove/sync 写入损坏节点。
+	if err := validateNodes(list); err != nil {
+		return "", "", c.fail(err.Error())
+	}
 	cfg, err := RebuildConfig(c.Store, list)
 	if err != nil {
 		return "", "", c.fail(err.Error())
