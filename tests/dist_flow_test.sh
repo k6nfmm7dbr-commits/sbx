@@ -49,6 +49,11 @@ done
 grep -q '\$RAW_BASE/\${name}' "$TPL"; ck "binary 下载使用 RAW_BASE/架构文件名" 0 $?
 grep -q '\$RAW_BASE/SHA256SUMS' "$TPL"; ck "校验文件下载使用 RAW_BASE/SHA256SUMS" 0 $?
 
+# ---- 3b. rolling 分发：不得因「已装版本号==APP_VERSION」跳过下载（防 stale 二进制）----
+sed -n '/^install_sbx_core()/,/^}/p' "$TPL" > "$TMPD/isc.sh"
+grep -q 'core_version_of "\$CORE_BIN"' "$TMPD/isc.sh"; [[ $? -ne 0 ]]; ck "install_sbx_core 不再按已装版本号跳过下载" 0 $?
+grep -q '不能因' "$TMPD/isc.sh"; ck "保留 rolling 不跳过的说明注释" 0 $?
+
 # ---- 4. prepare_dirs：0600 权限创建（提取真实实现） ----
 # 提取 prepare_dirs 到下一个函数（函数体无 heredoc，但统一用边界法）
 NEXT_FN=$(awk '/^prepare_dirs\(\)/{f=1;next} f&&/^[a-z_]+\(\)\s*\{/{print $1;exit}' "$TPL" | tr -d ' {')

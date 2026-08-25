@@ -313,11 +313,11 @@ install_sbx_core() {
     ok "使用本地 sbx-core: $("$CORE_BIN" version 2>/dev/null | head -1)"
     return 0
   fi
-  if [[ -x "$CORE_BIN" ]] && "$CORE_BIN" version >/dev/null 2>&1 \
-     && [[ "$(core_version_of "$CORE_BIN")" == "$APP_VERSION" ]]; then
-    ok "sbx-core 已安装: $("$CORE_BIN" version | head -1)"
-    return 0
-  fi
+  # 注意：不能因「已装二进制版本号 == APP_VERSION」就跳过下载。
+  # dist 是 rolling latest——功能更新不升版本号时二进制内容会变而版本号不变，
+  # 若跳过会导致服务器上的旧二进制永远无法刷新（例如新增子命令后脚本已更新、
+  # 后端却仍是旧版）。因此安装/升级总是下载最新二进制，靠 SHA256 + 版本校验 +
+  # 原子替换保证安全，失败时旧二进制不受影响。
 
   local arch name tmp dl rc=0
   arch="$(sb_arch)"
