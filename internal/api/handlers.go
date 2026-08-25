@@ -139,5 +139,3 @@ func queryExportRows(db *sql.DB) ([]exportRow, error) {
 	}
 	return out, rows.Err()
 }
-
-

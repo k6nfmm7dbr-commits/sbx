@@ -359,10 +359,10 @@ func TestSecurityHeaders(t *testing.T) {
 	ts, _, _ := newTestServer(t, "", &fakeSource{backend: "nft"}, "")
 	resp := doReq(t, ts, http.MethodGet, "/healthz", nil)
 	for hdr, want := range map[string]string{
-		"X-Frame-Options":           "DENY",
-		"X-Content-Type-Options":    "nosniff",
-		"Referrer-Policy":           "no-referrer",
-		"Content-Security-Policy":   "default-src 'self'; img-src 'self' data:",
+		"X-Frame-Options":         "DENY",
+		"X-Content-Type-Options":  "nosniff",
+		"Referrer-Policy":         "no-referrer",
+		"Content-Security-Policy": "default-src 'self'; img-src 'self' data:",
 	} {
 		if got := resp.Header.Get(hdr); got != want {
 			t.Errorf("响应头 %s=%q want %q", hdr, got, want)
