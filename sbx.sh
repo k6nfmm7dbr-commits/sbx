@@ -853,7 +853,7 @@ add_snell() {
   local port name psk extra
   port=$(prompt_port "Snell v$ver" "$(pick_port)")
   name=$(prompt_name "snell-v$ver-$port")
-  psk=$(core_node secret hex 32) || { warn "生成 PSK 失败"; return 1; }
+  psk=$("$CORE_BIN" secret hex 32) || { warn "生成 PSK 失败"; return 1; }
   extra=()
   if [[ "$ver" == 5 ]]; then
     extra=(--obfs-mode="none")
@@ -1175,7 +1175,7 @@ menu_edit_node() {
       read -r rp || true
       if [[ "${rp,,}" == "y" ]]; then
         local new_psk
-        new_psk=$(core_node secret hex 32) || { warn "生成 PSK 失败"; pause; return 1; }
+        new_psk=$("$CORE_BIN" secret hex 32) || { warn "生成 PSK 失败"; pause; return 1; }
         args+=("--psk=$new_psk")
       fi ;;
   esac
