@@ -52,7 +52,17 @@ grep -q '\$RAW_BASE/SHA256SUMS' "$TPL"; ck "校验文件下载使用 RAW_BASE/SH
 # ---- 3b. rolling 分发：不得因「已装版本号==APP_VERSION」跳过下载（防 stale 二进制）----
 sed -n '/^install_sbx_core()/,/^}/p' "$TPL" > "$TMPD/isc.sh"
 grep -q 'core_version_of "\$CORE_BIN"' "$TMPD/isc.sh"; [[ $? -ne 0 ]]; ck "install_sbx_core 不再按已装版本号跳过下载" 0 $?
-grep -q '不能因' "$TMPD/isc.sh"; ck "保留 rolling 不跳过的说明注释" 0 $?
+grep -q '代码内容' "$TMPD/isc.sh"; ck "保留按内容判断的说明注释" 0 $?
+# 内容比较：先取 SHA256SUMS 与本地二进制 sha256 对比，一致才跳过
+grep -q 'sha256_of "\$CORE_BIN"' "$TMPD/isc.sh"; ck "install_sbx_core 按二进制内容(sha256)判断是否跳过" 0 $?
+grep -q 'expect_sum' "$TMPD/isc.sh"; ck "install_sbx_core 提取 SHA256SUMS 期望哈希" 0 $?
+grep -q 'CORE_REPLACED=1' "$TMPD/isc.sh"; ck "install_sbx_core 替换成功后置 CORE_REPLACED 信号" 0 $?
+
+# ---- 3c. do_update 脚本相同时也检查二进制内容（不只靠脚本/版本号）----
+sed -n '/^do_update()/,/^apply_update()/p' "$TPL" | sed '$d' > "$TMPD/du.sh"
+grep -q '检查后端 sbx-core 是否同步' "$TMPD/du.sh"; ck "do_update 脚本相同时也检查二进制" 0 $?
+grep -q 'install_sbx_core' "$TMPD/du.sh"; ck "do_update 脚本相同分支调用 install_sbx_core" 0 $?
+grep -q 'CORE_REPLACED' "$TMPD/du.sh"; ck "do_update 依据 CORE_REPLACED 判断是否更新了后端" 0 $?
 
 # ---- 4. prepare_dirs：0600 权限创建（提取真实实现） ----
 # 提取 prepare_dirs 到下一个函数（函数体无 heredoc，但统一用边界法）

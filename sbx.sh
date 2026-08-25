@@ -305,19 +305,20 @@ install_sing_box() {
 # ---------------------------------------------------------------- sbx-core 安装
 install_sbx_core() {
   install -d -m 0755 "$BIN_DIR"
+  CORE_REPLACED=0   # 全局信号：本次是否真正替换了二进制（供 do_update 判断是否需重启）
   # 开发/测试：直接使用本地构建的二进制
   if [[ -n "${SBX_CORE_BIN:-}" && -x "${SBX_CORE_BIN}" ]]; then
     cat "$SBX_CORE_BIN" > "$CORE_BIN.tmp.$$" && chmod 0755 "$CORE_BIN.tmp.$$" \
       && mv -f "$CORE_BIN.tmp.$$" "$CORE_BIN" \
       || die "本地 sbx-core 拷贝失败；现有安装未被改动"
+    CORE_REPLACED=1
     ok "使用本地 sbx-core: $("$CORE_BIN" version 2>/dev/null | head -1)"
     return 0
   fi
-  # 注意：不能因「已装二进制版本号 == APP_VERSION」就跳过下载。
-  # dist 是 rolling latest——功能更新不升版本号时二进制内容会变而版本号不变，
-  # 若跳过会导致服务器上的旧二进制永远无法刷新（例如新增子命令后脚本已更新、
-  # 后端却仍是旧版）。因此安装/升级总是下载最新二进制，靠 SHA256 + 版本校验 +
-  # 原子替换保证安全，失败时旧二进制不受影响。
+  # 更新判断基于「代码内容」而非版本号：dist 是 rolling latest，版本号不随
+  # 功能递增，二进制内容会变而版本号不变。因此先取 SHA256SUMS 与本地二进制做
+  # 内容比较——一致则跳过，不一致才下载替换。绝不能用「版本号相等」判断跳过
+  # （那会导致旧二进制永远无法刷新）。
 
   local arch name tmp dl rc=0
   arch="$(sb_arch)"
@@ -327,12 +328,24 @@ install_sbx_core() {
   dl="$BIN_DIR/.sbx-core.dl.$$"
   cleanup() { rm -rf "$tmp" "$dl" 2>/dev/null || true; }
 
-  # 全程不触碰现有安装：下载 → 校验 → 自检全部通过后才原子替换
+  # 先下载 SHA256SUMS（小文件），与本地二进制做内容比较
+  curl -fsSL -m 60 -o "$tmp/SHA256SUMS" "$(gh_url "$RAW_BASE/SHA256SUMS")" \
+    || { cleanup; die "下载 SHA256SUMS 失败；现有安装未被改动"; }
+  if [[ -x "$CORE_BIN" ]]; then
+    local local_sum expect_sum
+    local_sum=$(sha256_of "$CORE_BIN" 2>/dev/null || true)
+    expect_sum=$(awk -v x="$name" '$2==x{print $1}' "$tmp/SHA256SUMS")
+    if [[ -n "$local_sum" && -n "$expect_sum" && "$local_sum" == "$expect_sum" ]]; then
+      cleanup
+      ok "sbx-core 已是最新: $("$CORE_BIN" version 2>/dev/null | head -1)"
+      return 0
+    fi
+  fi
+
+  # 内容不一致或本地缺失 → 下载完整二进制并校验替换
   info "下载 sbx-core (${arch})..."
   curl -fsSL -m 300 -o "$dl" "$(gh_url "$RAW_BASE/${name}")" \
     || { cleanup; die "下载 sbx-core 失败（可设置 SBX_GH_PROXY 使用镜像）；现有安装未被改动"; }
-  curl -fsSL -m 60 -o "$tmp/SHA256SUMS" "$(gh_url "$RAW_BASE/SHA256SUMS")" \
-    || { cleanup; die "下载 SHA256SUMS 失败；现有安装未被改动"; }
   verify_core_checksum "$dl" "$tmp/SHA256SUMS" "$name" \
     || { cleanup; die "sbx-core 校验失败；现有安装未被改动"; }
 
@@ -363,6 +376,7 @@ install_sbx_core() {
     die "sbx-core 安装后自检失败"
   fi
   rm -f "$CORE_BIN.bak"
+  CORE_REPLACED=1
   ok "sbx-core 安装完成: $("$CORE_BIN" version | head -1)"
 }
 
@@ -1282,7 +1296,21 @@ do_update() {
 
   if [[ "$same_content" == "yes" && "$force" != "--force" ]]; then
     rm -f "$tmp"
-    ok "已是最新版本，无需升级"
+    # 脚本内容相同，但 dist 分支的 Go 二进制可能单独更新（rolling latest，
+    # 版本号不随功能递增）。不能只看脚本/版本号——仍需按内容检查后端二进制。
+    info "脚本已是最新，检查后端 sbx-core 是否同步..."
+    CORE_REPLACED=0
+    if ! install_sbx_core; then
+      die "后端 sbx-core 检查/更新失败，已保留现有安装"
+    fi
+    if [[ "${CORE_REPLACED:-0}" == "1" ]]; then
+      # 二进制内容有变化 → 刷新使用该二进制的面板与防火墙规则
+      svc_do restart sbx-panel || svc_do start sbx-panel || true
+      fw_apply || warn "计数规则应用失败，流量统计可能不准"
+      ok "后端 sbx-core 已更新"
+    else
+      ok "已是最新版本，无需升级"
+    fi
     printf '%s如需强制重装当前版本，运行: sbx --update --force%s\n' "$C_DIM" "$C_RESET"
     return 0
   fi
