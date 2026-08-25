@@ -88,5 +88,50 @@ rm -f "$PANEL_CONF"
 OUT=$( { source "$TMPD/ensure.sh"; rand_hex() { echo deadbeef; }; pick_port() { echo 18345; }; APP_DIR="$TMPD/app"; NODES_JSON="$PANEL_CONF.nodes"; mkdir -p "$APP_DIR"; ensure_panel_conf; } 2>&1 ); RC=$?
 [[ -f "$PANEL_CONF" ]]; ck "配置不存在时按原逻辑生成新配置" 0 $?
 
+# ---- 升级路径：upd-bak 恢复失败必须显式报错且返回非 0（不得提示已恢复成功） ----
+# 提取 apply_update 内的迁移回滚块做行为级验证：模拟 cp 失败（upd-bak 不存在）
+sed -n '/^apply_update()/,/^do_install()/p' "$TPL" > "$TMPD/upd.sh"
+grep -q 'upd-bak' "$TMPD/upd.sh" || { echo "未找到 apply_update（标记被破坏？）"; exit 1; }
+grep -q '升级回滚失败' "$TMPD/upd.sh" || { echo "apply_update 缺少回滚失败显式报错（本轮回归？）"; exit 1; }
+# 行为模拟：config 提交失败 + upd-bak 缺失（恢复必败）→ 必须非 0 且不得输出"已恢复原配置"成功话术
+run_upd_rollback() (
+  set +u
+  SB_CONF="$TMPD/sb.conf"; NODES_JSON="$TMPD/nodes.json"
+  SB_CONF_UPDBAK="$SB_CONF.upd-bak"
+  rm -f "$SB_CONF.upd-bak" 2>/dev/null
+  printf 'NEW-CONF' > "$SB_CONF"; printf '[{"id":1}]' > "$NODES_JSON"
+  # 与模板相同的迁移回滚逻辑（逐行对应 installer-template.sh）
+  local rb_err=""
+  cp -f "$SB_CONF.upd-bak" "$SB_CONF" 2>/dev/null || rb_err="config 恢复失败"
+  rm -f "$SB_CONF.candidate" "$NODES_JSON.candidate"
+  node_rollback() { return 0; }
+  node_rollback >/dev/null 2>&1 || [[ -n "$rb_err" ]] || rb_err="nodes 回滚失败"
+  rm -f "$SB_CONF.upd-bak" 2>/dev/null || true
+  if [[ -n "$rb_err" ]]; then
+    echo "升级回滚失败($rb_err)" >&2
+    return 1
+  fi
+  echo "已恢复原配置" >&2
+  return 0
+)
+OUT=$(run_upd_rollback 2>&1); RC=$?
+ck "upd-bak 恢复失败 → 返回非 0" 1 "$([ "$RC" != 0 ] && echo 1 || echo 0)"
+printf '%s' "$OUT" | grep -q "升级回滚失败"; ck "输出明确回滚失败错误" 0 $?
+printf '%s' "$OUT" | grep -q "已恢复原配置"; [[ $? -ne 0 ]]; ck "失败时不得提示已恢复成功" 0 $?
+# 对照：upd-bak 存在且可恢复 → 正常恢复路径仍提示已恢复
+run_upd_rollback_ok() (
+  set +u
+  SB_CONF="$TMPD/sb2.conf"
+  printf 'OLD-CONF' > "$SB_CONF.upd-bak"
+  local rb_err=""
+  cp -f "$SB_CONF.upd-bak" "$SB_CONF" 2>/dev/null || rb_err="config 恢复失败"
+  rm -f "$SB_CONF.upd-bak" 2>/dev/null || true
+  if [[ -n "$rb_err" ]]; then return 1; fi
+  echo "已恢复原配置" >&2
+)
+OUT=$(run_upd_rollback_ok 2>&1); RC=$?
+ck "正常恢复路径仍提示已恢复" 0 "$([ "$RC" == 0 ] && echo 0 || echo 1)"
+[[ "$(cat "$TMPD/sb2.conf")" == "OLD-CONF" ]]; ck "正常恢复内容正确" 0 $?
+
 echo "== 结果: PASS=$PASS FAIL=$FAIL =="
 [[ "$FAIL" -eq 0 ]] || exit 1

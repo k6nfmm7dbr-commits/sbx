@@ -28,13 +28,14 @@ bash <(curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/
 安装后运行 `sbx` 打开命令菜单。安装器会：
 
 1. 检测系统（Debian/Ubuntu、RHEL 系、Alpine）与 init（systemd/OpenRC）；
-2. 按 `uname -m` 从仓库 `dist` 分支下载对应架构的 `sbx-core` 并校验 SHA256，
+2. 按 `uname -m` 从仓库 `dist` 分支下载对应架构的 `sbx-core`，
+   并用同一分支的 `SHA256SUMS` 做完整性校验（checksum/版本不一致即拒绝安装），
    失败则报错退出且不破坏现有安装；开发可用 `SBX_CORE_BIN=/path/to/sbx-core` 跳过下载；
 3. 安装 sing-box（Alpine 自动选 musl 构建）；
 4. 注册并启动三个服务：`sbx-firewall`（计数规则，oneshot）、`sing-box`、`sbx-panel`。
 
-**版本管理**：main 为唯一代码基线，项目不使用 Git Tag，安装不依赖任何 Tag/Release。
-`sbx-core` 二进制发布在 `dist` 分支（rolling latest，与 main 源码同版本构建）。
+**版本管理**：源码来自 `main`（唯一代码基线），`sbx-core` 二进制从 `dist` 分支下载、
+使用 `dist/SHA256SUMS` 校验。项目不使用 Git Tag，安装不依赖任何 Tag/Release。
 
 ## 当前版本
 

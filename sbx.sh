@@ -1271,10 +1271,14 @@ do_update() {
     ok "升级完成 → v$new_ver"
     [[ -t 0 ]] && { pause; exec bash "$SELF_PATH"; }
   else
+    # 回滚到升级前版本；恢复本身失败绝不能吞掉（否则脚本停在半更新状态还报"已恢复"）
     warn "应用失败，回滚到升级前版本"
-    [[ -f "$SELF_PATH.bak" ]] && { cat "$SELF_PATH.bak" > "$SELF_PATH"; chmod +x "$SELF_PATH"; }
-    bash "$SELF_PATH" --apply-update >/dev/null 2>&1 || true
-    die "升级未成功，已恢复原版本"
+    if [[ -f "$SELF_PATH.bak" ]] && cat "$SELF_PATH.bak" > "$SELF_PATH" 2>/dev/null && chmod +x "$SELF_PATH" 2>/dev/null; then
+      bash "$SELF_PATH" --apply-update >/dev/null 2>&1 || true
+      die "升级未成功，已恢复原版本"
+    else
+      die "严重: 升级失败且回滚失败! 当前脚本可能处于半更新状态，请重新运行安装命令修复"
+    fi
   fi
 }
 
@@ -1304,12 +1308,18 @@ apply_update() {
            && "$CORE_BIN" node commit >/dev/null 2>&1; then
           rm -f "$SB_CONF.upd-bak" 2>/dev/null || true
         else
-          # 升级路径的提交失败同样必须回滚，避免 config/nodes 分叉
-          warn "升级期节点提交失败，已恢复原配置"
-          cp -f "$SB_CONF.upd-bak" "$SB_CONF" 2>/dev/null || true
+          # 升级路径的提交失败同样必须回滚，避免 config/nodes 分叉。
+          # 回滚恢复本身失败绝不能吞掉：那会留下 config/nodes 分叉还谎报"已恢复"。
+          local rb_err=""
+          cp -f "$SB_CONF.upd-bak" "$SB_CONF" 2>/dev/null || rb_err="config 恢复失败"
           rm -f "$SB_CONF.candidate" "$NODES_JSON.candidate"
-          "$CORE_BIN" node rollback >/dev/null 2>&1 || true
+          "$CORE_BIN" node rollback >/dev/null 2>&1 || [[ -n "$rb_err" ]] || rb_err="nodes 回滚失败"
           rm -f "$SB_CONF.upd-bak" 2>/dev/null || true
+          if [[ -n "$rb_err" ]]; then
+            err "升级回滚失败($rb_err)! config 与 nodes 可能不一致，请手工检查 $SB_CONF 与 $NODES_JSON"
+            return 1
+          fi
+          warn "升级期节点提交失败，已恢复原配置"
         fi
       else
         rm -f "$SB_CONF.candidate"; core_node rollback >/dev/null 2>&1 || true
