@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
 # artifact_check.sh — 发布产物一致性与版本一致性自检（Release 前必须全部通过）
 #
-# 用法: bash scripts/artifact_check.sh <dist目录> [期望版本号(不带v前缀)]
+# 用法: bash scripts/artifact_check.sh <dist目录> [已废弃: 第二参数被忽略]
 #
 # 检查项：
 #   1. 七个架构产物全部存在
 #   2. SHA256SUMS 中每个产物恰好出现一次
 #   3. 实际 sha256 与 SHA256SUMS 记录一致
-#   4. （提供版本号时）internal/version、installer APP_VERSION、
-#      二进制 version 输出 三者与期望版本一致
+#   4. installer APP_VERSION / Go internal/version / 二进制 version 三方一致
+#      （本项目不依赖 Git Tag，版本一致性不涉及任何 Git Tag）
 set -euo pipefail
 
 DIST="${1:-dist}"
-EXPECT_TAG="${2:-}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$DIST"
 
@@ -42,15 +41,15 @@ while read -r sum name; do
   esac
 done < SHA256SUMS
 
-if [[ -n "$EXPECT_TAG" ]]; then
-  tag="${EXPECT_TAG#v}"
-  grep -q "^const Version = \"${tag}\"$" "$ROOT/internal/version/version.go" \
-    || fail "internal/version 与期望版本 $tag 不一致"
-  grep -q "^APP_VERSION=\"${tag}\"$" "$ROOT/installer-template.sh" \
-    || fail "installer APP_VERSION 与期望版本 $tag 不一致"
-  ./sbx-core-linux-amd64 version | grep -qx "sbx-core v${tag}" \
-    || fail "二进制 version 输出与期望版本 $tag 不一致: $(./sbx-core-linux-amd64 version)"
-  echo "  [OK] 版本三方一致: v$tag"
-fi
+# 版本一致性检查（无 Tag 模式，无条件执行）：
+# installer APP_VERSION == Go internal/version == 二进制 version 输出。
+# 本项目不依赖 Git Tag，因此不存在也不检查任何 Git Tag。
+GO_VER="$(grep '^const Version = ' "$ROOT/internal/version/version.go" | sed 's/.*"\(.*\)".*/\1/')"
+APP_VER="$(grep -m1 '^APP_VERSION=' "$ROOT/installer-template.sh" | sed -E 's/^APP_VERSION="?([^"]+)"?.*/\1/')"
+BIN_VER="$(./sbx-core-linux-amd64 version | sed 's/^sbx-core v//')"
+
+[[ "$GO_VER" == "$APP_VER" ]] || fail "internal/version($GO_VER) 与 installer APP_VERSION($APP_VER) 不一致"
+[[ "$GO_VER" == "$BIN_VER" ]] || fail "internal/version($GO_VER) 与二进制 version 输出($BIN_VER) 不一致"
+echo "  [OK] 版本三方一致: v$GO_VER（无 Git Tag）"
 
 echo "[artifact-check] ALL OK"

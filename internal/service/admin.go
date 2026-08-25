@@ -25,8 +25,13 @@ func openDB(cfg *config.Config) (*database.DB, func(), error) {
 }
 
 // Once 执行单轮采集（旧 cmd_once）。
+// 会写 SQLite（daily/totals/samples/counter_state），属 mutation：
+// panel.json 存在但损坏时必须 fail-closed，绝不基于 defaults 误写数据库。
 func Once() error {
-	cfg := config.Load()
+	cfg, err := config.LoadStrict()
+	if err != nil {
+		return err
+	}
 	db, closer, err := openDB(cfg)
 	if err != nil {
 		return err
@@ -105,8 +110,13 @@ func Daily(days int) error {
 }
 
 // Reset 清空统计数据（可选 scope，旧 cmd_reset）。
+// destructive 操作：panel.json 存在但损坏时必须 fail-closed——
+// 绝不允许在 defaults 猜测下打开错误路径的数据库执行删除。
 func Reset(scope string) error {
-	cfg := config.Load()
+	cfg, err := config.LoadStrict()
+	if err != nil {
+		return err
+	}
 	db, closer, err := openDB(cfg)
 	if err != nil {
 		return err
@@ -240,23 +250,34 @@ func finalSampleForRebuild(ctx context.Context, cfg *config.Config) error {
 }
 
 // Clear 移除内核计数规则，保留历史统计（旧 cmd_clear）。
-// 会改动系统防火墙状态，配置读取同样 strict：panel.json 存在但损坏时
-// 拒绝在默认路径猜测下执行清理动作。
+//
+// v3.0.x 数据保护：与 Apply 同一原则——最终采样失败时禁止清除计数器。
+// 若 Tick 失败仍删除 nftables/iptables 计数器，最后一次采样到删除之间
+// 的流量将永久丢失。仅明确的 LookupError（规则本就不存在/首次运行）放行。
+// systemd ExecStop 走同一路径，同样受保护。
 func Clear() int {
 	cfg, err := config.LoadStrict()
 	if err != nil {
 		slog.Error(err.Error())
 		return 1
 	}
-	func() {
-		db, closer, err := openDB(cfg)
-		if err != nil {
-			return
-		}
-		defer closer()
-		c := traffic.NewCollector(cfg, db)
-		_ = c.Tick(context.Background()) // 忽略一切错误
-	}()
+	// 先落库最后一段流量；失败则保留现场，下一轮还有机会重新采集。
+	db, closer, err := openDB(cfg)
+	if err != nil {
+		slog.Error("最终采样失败, 已取消清除(内核计数器保留)", "err", err)
+		return 1
+	}
+	c := traffic.NewCollector(cfg, db)
+	tickErr := c.Tick(context.Background())
+	closer()
+	switch {
+	case tickErr == nil:
+	case firewall.IsLookup(tickErr):
+		slog.Info("计数规则不存在(首次运行?), 直接清除", "err", tickErr)
+	default:
+		slog.Error("最终采样失败, 已取消清除(内核计数器保留, 排除故障后重试)", "err", tickErr)
+		return 1
+	}
 	if firewall.Which("nft") {
 		firewall.RunCmd(context.Background(), "nft", "delete", "table", "inet", firewall.NFTTable)
 	}

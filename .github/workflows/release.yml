@@ -1,14 +1,16 @@
 name: Release
 
+# 本项目不依赖 Git Tag 管理：本工作流仅手动触发，
+# 用于构建全架构二进制并完成一致性校验（不创建 Release、不创建 Tag）。
+# 发布资产如需更新，由维护者手动上传到既有 Release（或另行明确操作）。
 on:
-  push:
-    tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,16 +37,16 @@ jobs:
       - name: SHA256SUMS 自检
         run: cd dist && sha256sum -c SHA256SUMS
 
-      - name: 发布物一致性与版本三方一致性检查
-        env:
-          EXPECT_TAG: ${{ github.ref_name }}
-        run: bash scripts/artifact_check.sh dist "$EXPECT_TAG"
+      # 无 Tag 时代的一致性检查：APP_VERSION == Go Version == 产物 version 输出
+      # （artifact_check.sh 在未提供期望版本号时不做任何 Tag 相关断言）
+      - name: 发布物一致性检查（APP_VERSION / Go Version / 二进制输出）
+        run: bash scripts/artifact_check.sh dist
 
-      # 以上全部通过后才允许上传发布资产（先验证后上传）
-      - name: 发布
-        uses: softprops/action-gh-release@v2
+      - name: 上传构建产物（仅 workflow 附件，不创建 Release/Tag）
+        uses: actions/upload-artifact@v4
         with:
-          files: |
+          name: sbx-core-binaries
+          path: |
             dist/sbx-core-linux-amd64
             dist/sbx-core-linux-arm64
             dist/sbx-core-linux-armv7
@@ -53,4 +55,3 @@ jobs:
             dist/sbx-core-linux-s390x
             dist/sbx-core-linux-riscv64
             dist/SHA256SUMS
-          generate_release_notes: true

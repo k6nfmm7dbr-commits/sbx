@@ -32,7 +32,8 @@ export SBX_CONF="$PANEL_CONF"
 
 SB_VERSION_PIN="${SBX_SB_VERSION:-}"     # 留空=取最新稳定版
 GH_PROXY="${SBX_GH_PROXY:-}"             # 例: https://ghfast.top/
-RELEASE_BASE="https://github.com/k6nfmm7dbr-commits/sbx/releases/download"
+# 项目不依赖 Git Tag 管理：发布资产统一走最新 Release 的稳定下载入口
+RELEASE_BASE="https://github.com/k6nfmm7dbr-commits/sbx/releases/latest/download"
 
 OS_FAMILY="unknown"
 INIT_SYS="unknown"
@@ -51,6 +52,7 @@ init_colors() {
 info() { printf '%s[*]%s %s\n' "$C_BLUE" "$C_RESET" "$*"; }
 ok()   { printf '%s[+]%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
 warn() { printf '%s[!]%s %s\n' "$C_YEL" "$C_RESET" "$*" >&2; }
+err()  { printf '%s[x]%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; }
 die()  { printf '%s[x]%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
 hr()   { printf '%s%s%s\n' "$C_DIM" "────────────────────────────────────────────────" "$C_RESET"; }
 
@@ -368,7 +370,14 @@ EOF
 ensure_panel_conf() {
   if [[ -f "$PANEL_CONF" ]]; then
     # 保留/补齐面板查看令牌（由 sbx-core 原子写回）。
-    "$CORE_BIN" config-ensure-token >/dev/null 2>&1 || true
+    # 配置存在但损坏时 config-ensure-token 会 fail-closed——
+    # 此时必须中止安装并让用户手工修复，绝不吞掉错误继续，
+    # 更不允许用 defaults 覆盖原文件。
+    if ! "$CORE_BIN" config-ensure-token >/dev/null; then
+      err "panel.json 无法读取或配置已损坏（$PANEL_CONF）"
+      info "请手工修复该文件后重新运行安装；原文件未被改动"
+      return 1
+    fi
     return 0
   fi
   local token port
@@ -453,7 +462,12 @@ ensure_certs() {
 
 # ---------------------------------------------------------------- 流量规则
 fw_apply() {
-  "$CORE_BIN" apply || warn "计数规则应用失败，流量统计可能不准"
+  # apply 失败必须向上传递：不能 warn（rc=0）把失败伪装成成功
+  if "$CORE_BIN" apply; then
+    return 0
+  fi
+  warn "计数规则应用失败，流量统计可能不准"
+  return 1
 }
 fw_clear() {
   # 先停面板（停掉采集线程，避免其 repair() 自愈机制把刚删的表重建回来）
@@ -568,8 +582,12 @@ commit_node() {
   fi
   # 整个操作真正成功以后才允许删除备份
   rm -f "$SB_CONF.bak" "$NODES_JSON.bak" 2>/dev/null || true
-  fw_apply
-  panel_running && svc_do restart sbx-panel || true
+  # 节点本身已创建成功；防火墙规则失败不能伪装成功，也不能回滚节点
+  if fw_apply; then
+    panel_running && svc_do restart sbx-panel || true
+  else
+    warn "节点已创建，但流量统计规则应用失败；可稍后手动执行 sbx 菜单 → 重建计数规则"
+  fi
   return 0
 }
 # <<< commit-node-flow
@@ -743,7 +761,8 @@ EOF
 }
 
 start_all() {
-  svc_do start sbx-firewall || fw_apply
+  # fw_apply 失败在此处仅告警（启动流程属尽力而为，不能因 -e 中断整个菜单）
+  svc_do start sbx-firewall || fw_apply || warn "计数规则应用失败，流量统计可能不准"
   svc_do restart sing-box || svc_do start sing-box
   svc_do restart sbx-panel || svc_do start sbx-panel
   sleep 1
@@ -963,7 +982,7 @@ menu_service() {
     1) start_all; ok "已重启" ;;
     2) svc_do stop sing-box; svc_do stop sbx-panel; ok "已停止" ;;
     3) start_all; ok "已启动" ;;
-    4) fw_apply; ok "计数规则已重建" ;;
+    4) if fw_apply; then ok "计数规则已重建"; else err "计数规则重建失败，请检查系统防火墙工具"; fi ;;
     5) if [[ "$INIT_SYS" == "systemd" ]]; then journalctl -u sing-box -n 60 --no-pager
        else tail -n 60 /var/log/sing-box.log 2>/dev/null || echo "(暂无日志)"; fi ;;
     6) if [[ "$INIT_SYS" == "systemd" ]]; then journalctl -u sbx-panel -n 60 --no-pager
@@ -1254,9 +1273,12 @@ apply_update() {
     fi
   fi
   svc_do restart sing-box || true
-  fw_apply
   svc_do restart sbx-panel || svc_do start sbx-panel || true
-  ok "已重启 sing-box 与面板"
+  if fw_apply; then
+    ok "已重启 sing-box 与面板"
+  else
+    warn "已重启 sing-box 与面板，但计数规则应用失败（流量统计可能不准）"
+  fi
   return 0
 }
 
@@ -1288,7 +1310,8 @@ do_install() {
   fi
 
   start_all
-  fw_apply
+  # 全新安装的计数规则应用失败必须让用户知道，不能静默带过
+  fw_apply || warn "计数规则应用失败，流量统计暂不可用；可在菜单中重试"
 
   local nnum
   nnum=$(core_node count)
