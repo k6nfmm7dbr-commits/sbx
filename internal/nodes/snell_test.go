@@ -109,22 +109,47 @@ func TestSnellDisplayType(t *testing.T) {
 
 func TestSnellLinkFor(t *testing.T) {
 	s := &Store{AppDir: t.TempDir()}
+	v5 := Node{"id": json.Number("1"), "type": "snell", "port": json.Number("23000"),
+		"version": json.Number("5"), "psk": "cWndcrlUgCnvsInq", "name": "snell-v5-23000"}
+	link := s.LinkFor(v5, "91.110.232.102", "")
+	want := "snell://cWndcrlUgCnvsInq@91.110.232.102:23000#snell-v5-23000 (Snell v5)"
+	if link != want {
+		t.Errorf("Snell v5 URI 格式异常:\n got  %q\n want %q", link, want)
+	}
+	v6 := Node{"id": json.Number("1"), "type": "snell", "port": json.Number("23000"),
+		"version": json.Number("6"), "psk": "cWndcrlUgCnvsInq", "name": "snell-v6-23000"}
+	if link := s.LinkFor(v6, "91.110.232.102", ""); !strings.Contains(link, "(Snell v6)") {
+		t.Errorf("Snell v6 应标注 (Snell v6): %q", link)
+	}
+	// 无 name 时回退类型名
+	anon := Node{"id": json.Number("1"), "type": "snell", "port": json.Number("23000"),
+		"version": json.Number("5"), "psk": "x"}
+	if link := s.LinkFor(anon, "1.2.3.4", ""); !strings.HasPrefix(link, "snell://x@1.2.3.4:23000#snell (Snell v5)") {
+		t.Errorf("无 name 应回退 snell: %q", link)
+	}
+}
+
+func TestSnellSurgeFor(t *testing.T) {
+	s := &Store{AppDir: t.TempDir()}
 	v5 := Node{"id": json.Number("1"), "type": "snell", "port": json.Number("16888"),
 		"version": json.Number("5"), "psk": "cWndcrlUgCnvsInq", "name": "aws jp"}
-	link := s.LinkFor(v5, "18.178.190.117", "")
+	link := s.SnellSurgeFor(v5, "18.178.190.117", "")
 	want := "aws jp = snell, 18.178.190.117, 16888, psk=cWndcrlUgCnvsInq, version=5, reuse=true, tfo=true, ecn=true"
 	if link != want {
 		t.Errorf("Snell v5 Surge 格式异常:\n got  %q\n want %q", link, want)
 	}
 	v6 := Node{"id": json.Number("1"), "type": "snell", "port": json.Number("16888"),
 		"version": json.Number("6"), "psk": "cWndcrlUgCnvsInq", "name": "aws jp"}
-	if link := s.LinkFor(v6, "18.178.190.117", ""); !strings.Contains(link, "version=6") {
-		t.Errorf("Snell v6 应标注 version=6: %q", link)
+	if link := s.SnellSurgeFor(v6, "18.178.190.117", ""); !strings.Contains(link, "version=6") {
+		t.Errorf("Snell v6 Surge 应标注 version=6: %q", link)
 	}
-	// 无 name 时回退类型名
-	anon := Node{"id": json.Number("1"), "type": "snell", "port": json.Number("16888"),
-		"version": json.Number("5"), "psk": "x"}
-	if link := s.LinkFor(anon, "1.2.3.4", ""); !strings.HasPrefix(link, "snell = snell, ") {
+	// 非 snell 返回空
+	if link := s.SnellSurgeFor(Node{"type": "vless"}, "1.2.3.4", ""); link != "" {
+		t.Errorf("非 snell 应返回空: %q", link)
+	}
+	// 无 name 时回退 snell
+	anon := Node{"type": "snell", "port": json.Number("16888"), "version": json.Number("5"), "psk": "x"}
+	if link := s.SnellSurgeFor(anon, "1.2.3.4", ""); !strings.HasPrefix(link, "snell = snell, ") {
 		t.Errorf("无 name 应回退 snell: %q", link)
 	}
 }

@@ -555,10 +555,25 @@ func (c *CLI) cmdLinks(args []string) int {
 	for _, n := range list {
 		fmt.Fprintf(c.Stdout, "### %s (%s, 端口 %s)\n",
 			Str(n, "name"), DisplayType(n), Str(n, "port"))
-		fmt.Fprintln(c.Stdout, c.Store.LinkFor(n, host, ""))
-		if host6Val != "" {
-			fmt.Fprintln(c.Stdout, "# IPv6:")
-			fmt.Fprintln(c.Stdout, c.Store.LinkFor(n, host6Val, "-IPv6"))
+		if Str(n, "type") == "snell" {
+			fmt.Fprintf(c.Stdout, "# 通用 URI（Shadowrocket / sing-box / Stash / Loon 等）:\n")
+			fmt.Fprintln(c.Stdout, c.Store.LinkFor(n, host, ""))
+			if host6Val != "" {
+				fmt.Fprintln(c.Stdout, "# IPv6:")
+				fmt.Fprintln(c.Stdout, c.Store.LinkFor(n, host6Val, "-IPv6"))
+			}
+			fmt.Fprintf(c.Stdout, "# Surge 配置格式（iOS/macOS Surge）:\n")
+			fmt.Fprintln(c.Stdout, c.Store.SnellSurgeFor(n, host, ""))
+			if host6Val != "" {
+				fmt.Fprintln(c.Stdout, "# IPv6:")
+				fmt.Fprintln(c.Stdout, c.Store.SnellSurgeFor(n, host6Val, "-IPv6"))
+			}
+		} else {
+			fmt.Fprintln(c.Stdout, c.Store.LinkFor(n, host, ""))
+			if host6Val != "" {
+				fmt.Fprintln(c.Stdout, "# IPv6:")
+				fmt.Fprintln(c.Stdout, c.Store.LinkFor(n, host6Val, "-IPv6"))
+			}
 		}
 		fmt.Fprintln(c.Stdout, "")
 	}

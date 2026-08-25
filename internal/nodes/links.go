@@ -100,18 +100,42 @@ func (s *Store) LinkFor(n Node, host, labelSuffix string) string {
 			"?" + EncodeQuery(q) + "#" + name
 
 	case "snell":
-		// Surge 配置格式（非 URI）：
-		//   名称 = snell, host, port, psk=xxx, version=N, reuse=true, tfo=true, ecn=true
-		ver := Str(n, "version")
-		if ver == "" {
-			ver = "5"
+		// URI 格式（Shadowrocket / sing-box / Stash / Loon 等支持 snell:// 导入的客户端）
+		label := name
+		if v, _ := toInt(n["version"]); v == 6 {
+			label = name + " (Snell v6)"
+		} else {
+			label = name + " (Snell v5)"
 		}
-		label := baseName + labelSuffix
-		return label + " = snell, " + host + ", " + port +
-			", psk=" + Str(n, "psk") + ", version=" + ver +
-			", reuse=true, tfo=true, ecn=true"
+		return "snell://" + PyQuote(Str(n, "psk"), "/") + "@" + h + ":" + port + "#" + label
 	}
 	return ""
 }
 
-// Subscription 已移除（不再提供 Base64 订阅）。
+// SnellSurgeFor 生成 Snell 节点的 Surge 配置格式（非 URI）：
+//
+//	名称 = snell, host, port, psk=xxx, version=N, reuse=true, tfo=true, ecn=true
+//
+// 供 Surge（iOS/macOS）直接粘贴进配置文件的 [Proxy] 段使用。
+func (s *Store) SnellSurgeFor(n Node, host, labelSuffix string) string {
+	if Str(n, "type") != "snell" {
+		return ""
+	}
+	if host == "" {
+		host = s.ShareHost()
+	}
+	if host == "" {
+		host = "SERVER_IP"
+	}
+	baseName := Str(n, "name")
+	if baseName == "" {
+		baseName = "snell"
+	}
+	ver := Str(n, "version")
+	if ver == "" {
+		ver = "5"
+	}
+	return baseName + labelSuffix + " = snell, " + host + ", " + Str(n, "port") +
+		", psk=" + Str(n, "psk") + ", version=" + ver +
+		", reuse=true, tfo=true, ecn=true"
+}
