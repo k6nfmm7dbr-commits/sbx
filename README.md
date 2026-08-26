@@ -1,22 +1,6 @@
 # SBX
 
-sing-box 节点搭建与内核流量统计面板。自用、轻量、无多用户、无分流、无订阅转换。
-
-**v3.0.0 起：后端为 Go 单二进制 `sbx-core`，服务器不再需要 Python 运行时。**
-核心业务与运行时逻辑全部使用 Go 实现，无 Python 运行时依赖。
-
-## 架构
-
-```text
-sbx.sh（安装 / 更新 / 卸载 / 交互菜单 / 服务管理）
-   │
-   ├── sing-box          节点数据面（官方二进制）
-   └── sbx-core (Go)     控制面单二进制
-        ├─ Collector      nftables/iptables 计数器单调差分 → SQLite
-        ├─ HTTP API       /api/summary /api/live /api/daily ...（与前端契约不变）
-        ├─ Nodes          节点增删改 / 分享链接 / sing-box 配置重建
-        └─ webui          //go:embed 内嵌前端（升级二进制即升级 UI）
-```
+sing-box 节点管理与流量统计面板。后端为 Go 单二进制 `sbx-core`，无 Python 依赖。
 
 ## 安装
 
@@ -24,122 +8,114 @@ sbx.sh（安装 / 更新 / 卸载 / 交互菜单 / 服务管理）
 bash <(curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh)
 ```
 
-安装后运行 `sbx` 打开命令菜单。安装器会：
+安装完成后运行 `sbx` 进入菜单。
 
-1. 检测系统（Debian/Ubuntu、RHEL 系、Alpine）与 init（systemd/OpenRC）；
-2. 按 `uname -m` 从仓库 `dist` 分支下载对应架构的 `sbx-core`，
-   并用同一分支的 `SHA256SUMS` 做完整性校验（checksum/版本不一致即拒绝安装），
-   失败则报错退出且不破坏现有安装；开发可用 `SBX_CORE_BIN=/path/to/sbx-core` 跳过下载；
-3. 安装 sing-box（Alpine 自动选 musl 构建）；
-4. 注册并启动三个服务：`sbx-firewall`（计数规则，oneshot）、`sing-box`、`sbx-panel`。
+安装器依次完成：系统与 init 检测（Debian/Ubuntu、RHEL 系、Alpine；systemd/OpenRC）→ 按架构下载 `sbx-core` 并用 `SHA256SUMS` 校验（不符即中止，不影响已有安装）→ 安装 sing-box → 注册并启动 `sbx-firewall`、`sing-box`、`sbx-panel` 三个服务。
 
-**版本管理**：源码来自 `main`（唯一代码基线），`sbx-core` 二进制从 `dist` 分支下载、
-使用 `dist/SHA256SUMS` 校验。项目不使用 Git Tag，安装不依赖任何 Tag/Release。
+版本 `v3.0.5`。源码在 `main` 分支，二进制从 `dist` 分支分发，不使用 Tag。
 
-## 当前版本
+## 协议
 
-```text
-v3.0.5
-```
+支持 VLESS Reality、Shadowsocks 2022、Trojan、AnyTLS、Snell v5 / v6。
 
-## 节点
+Snell 需 sing-box ≥ 1.14，创建时会自动升级内核。分享链接提供两种格式：
 
-支持 VLESS Reality、Shadowsocks 2022、Trojan、AnyTLS、Snell v5 / Snell v6。
-Snell 需要 sing-box >= 1.14.0（创建 Snell 时若内核过旧会自动按现有机制升级）。
-Snell 分享链接同时提供两种格式：
+- 通用 URI（Shadowrocket / sing-box / Stash / Loon）：
 
-- **通用 URI**：`snell://psk@主机:端口#名称 (Snell vN)`，适用于 Shadowrocket / sing-box / Stash / Loon 等支持 `snell://` 导入的客户端；
-- **Surge 配置格式**：`名称 = snell, 主机, 端口, psk=..., version=N, reuse=true, tfo=true, ecn=true`，适用于 iOS/macOS Surge（粘贴进配置文件的 `[Proxy]` 段）。
-菜单两级结构与 v2.8.0 完全一致：
-主菜单（添加节点 / 节点管理 / 流量统计 / 系统设置 / 检查更新 / 卸载）；支持 IPv4/IPv6 分享链接。
-节点按 `nodes.json` 添加顺序显示；ID 单调递增永不复用（历史流量不会串节点）。
+  ```text
+  snell://psk@主机:端口#名称 (Snell v5)
+  ```
 
-## 统计口径（与 2.x 一致）
+- Surge 配置格式（粘入 `[Proxy]` 段）：
 
-- 数据来自内核 netfilter 计数器：优先 nftables named counter，回退 iptables 自定义链；
-- rx = 服务器收到（=用户上传），tx = 服务器发出（=用户下载），含包头（比客户端显示高约 2%～5%）；
-- 单调差分累加：首次见到计数器只入累计不计速率；计数器归零补记当前值不制造假峰值；
-- 规则集带世代标记（epoch），规则重建后面板自动衔接，零丢计零重复；
-- 默认每 2 秒采集，实时速率按真实 `duration_ms` 计算，samples 仅保留约 2 分钟；
-- 中国时间 UTC+8 跨天（内嵌 tzdata，无时区库的系统同样正确）。
+  ```text
+  名称 = snell, 主机, 端口, psk=xxx, version=5, reuse=true, tfo=true, ecn=true
+  ```
 
-TCP 连接读 `/proc/net/tcp[6]`，UDP 会话读 `/proc/net/udp[6]`，由采集线程缓存供 API 直接读取。
+节点按 `nodes.json` 顺序显示，ID 单调递增不复用。
+
+## 流量统计
+
+数据源为内核 netfilter 计数器（nftables named counter，回退 iptables 自定义链），非估算。
+
+- rx = 服务器接收（用户上传），tx = 服务器发送（用户下载），含包头，比客户端显示高约 2%–5%；
+- 单调差分累加：首次采集只入累计；计数器归零则补记当前值，不产生假峰值；
+- 规则集带 epoch 世代标记，重建后自动衔接，不丢计不重复；
+- 默认每 2 秒采集，速率按真实 `duration_ms` 计算，采样保留约 2 分钟；
+- 跨天按 UTC+8（内嵌时区数据）。
+
+连接数读 `/proc/net/tcp[6]`、`/proc/net/udp[6]`，由采集线程缓存。
 
 ## Web 面板
 
-三页底部导航（首页 / 每日 / 节点），令牌登录（POST 提交，登录后使用 HttpOnly Cookie）。
-前端资源已内嵌进 sbx-core，磁盘上不再有可被旧文件遮蔽的副本；
-`panel.json` 的 `web_root` 键保留解析但不再读取。
+底部三页签（首页 / 每日 / 节点），令牌登录（HttpOnly Cookie）。前端经 `go:embed` 内嵌进 `sbx-core`，升级二进制即升级界面。
 
-## 在线升级
+## 升级
 
 ```bash
-sbx --update            # 拉取新 sbx.sh + 匹配版本的 sbx-core（SHA256 校验）
+sbx --update            # 更新 sbx.sh + sbx-core（SHA256 校验）
 sbx --update --force    # 强制重装
 ```
 
-升级保留节点配置、面板端口和全部流量历史。二进制原子替换，失败自动回滚旧版。
+保留节点配置、面板端口与流量历史；二进制原子替换，失败回滚。
 
-## 常用命令
+## 命令
 
 ```bash
-sbx                     # 管理菜单
+sbx                     # 菜单
 sbx --show              # 今日/累计流量
 sbx --links             # 分享链接
 sbx --panel-url         # 面板地址
 sbx --apply-firewall    # 重建计数规则
 sbx --uninstall         # 卸载
 
-sbx-core show | daily 60 | selftest | reset node:2     # 直接调用后端
-sbx-core node list --json | links | add ...            # 节点管理
+sbx-core show | daily 60 | selftest | reset node:2
+sbx-core node list --json | links | add ...
 ```
 
 ## 支持环境
 
-Debian/Ubuntu、RHEL 系、Alpine；systemd/OpenRC。
-CPU 架构：amd64、arm64、armv7、armv6、386、s390x、riscv64（纯 Go SQLite，CGO_ENABLED=0）。
+Debian/Ubuntu、RHEL 系、Alpine；systemd/OpenRC。架构：amd64、arm64、armv7、armv6、386、s390x、riscv64（`CGO_ENABLED=0`）。
 
-依赖：curl、openssl、tar、nftables 或 iptables。**不再依赖 Python。**
+依赖：curl、openssl、tar、nftables 或 iptables。无需 Python。
 
 ## 文件
 
 ```text
-/usr/local/bin/sbx-core        Go 后端（含内嵌前端）
-/usr/local/bin/sbx             菜单入口（封装 sbx.sh）
+/usr/local/bin/sbx-core        Go 后端（含前端）
+/usr/local/bin/sbx             菜单入口
 /etc/sbx/panel.json            面板配置
-/etc/sbx/nodes.json            节点唯一数据源
+/etc/sbx/nodes.json            节点数据
 /etc/sbx/state.json            ID 游标 / 分享地址
 /etc/sbx/traffic.db            SQLite 流量库（WAL）
 /etc/sbx/nft.conf              计数规则（nftables）
 /etc/sbx/iptables.sh           计数规则（iptables 回退）
-/etc/sing-box/config.json      sing-box 配置（仅重建 tag 以 sbx-n 开头的 inbound）
-/etc/systemd/system/sbx-{panel,firewall}.service 等
+/etc/sing-box/config.json      sing-box 配置
+/etc/systemd/system/sbx-{panel,firewall}.service
 ```
 
-配置修改前执行 `sing-box check`，失败自动回滚（候选文件机制不变）。
+配置写入前执行 `sing-box check`，失败回滚（候选文件机制）。
 
 ## 开发
 
 ```text
 cmd/sbx-core/            入口
-internal/{api,database,nodes,config,traffic,connection,firewall,service}
-internal/webui/static/   前端四文件（//go:embed）
-installer-template.sh    sbx.sh 模板（cp 直出发布脚本）
+internal/                各模块（api / database / nodes / config / traffic / connection / firewall / service）
+internal/webui/static/   前端（go:embed）
+installer-template.sh    sbx.sh 模板
 scripts/build-release.sh 七架构交叉编译 + SHA256SUMS
-scripts/e2e_remote.sh    真机端到端验收（安装/流量/换代/重启/对拍/卸载）
-docs/AUDIT.md            迁移前行为审计（Go 实现的行为基线）
+scripts/e2e_remote.sh    真机验收
+docs/AUDIT.md            早期 Python 版行为审计（留档）
 ```
 
 ```bash
-go test ./... && go test -race ./...    # 单元 + 金标回归
-./scripts/build-release.sh dist         # 构建全部架构产物
+go test ./... && go test -race ./...
+./scripts/build-release.sh dist
 ```
 
-> 项目无 Python：运行时核心、节点管理、流量统计、nftables、SQLite、
-> sing-box 配置事务、Web API 全部由 Go 实现。金标夹具（`internal/*/testdata`）
-> 是 Go 测试读取的静态行为快照，不再由 Python 生成。
+核心逻辑（节点、流量、nftables、SQLite、sing-box 配置、Web API）全部由 Go 实现，仓库无 Python 文件。`internal/*/testdata` 为测试静态快照。
 
-沙箱安装（不动真实系统）：
+沙箱安装：
 
 ```bash
 SBX_ROOT=/tmp/sbx-test SBX_NO_SERVICE=1 \
