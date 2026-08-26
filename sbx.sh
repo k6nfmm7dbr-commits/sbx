@@ -604,8 +604,9 @@ fw_clear() {
 prompt_port() {
   local label="$1" def="$2" p
   while :; do
-    printf '%s端口 (%s，回车用 %s): %s' "$C_DIM" "$label" "$def" "$C_RESET" >&2
-    read -r p || true
+    printf '%s端口 (%s，回车用 %s，q 取消): %s' "$C_DIM" "$label" "$def" "$C_RESET" >&2
+    read -r p || { echo; return 1; }
+    [[ "$p" == "q" || "$p" == "Q" ]] && { echo; return 1; }
     p="${p:-$def}"
     if ! valid_port "$p"; then warn "端口需在 1-65535"; continue; fi
     if core_node port-used "$p" >/dev/null 2>&1; then warn "端口 $p 已被其它节点使用"; continue; fi
@@ -620,32 +621,35 @@ prompt_port() {
 
 prompt_name() {
   local def="$1" n
-  printf '%s节点备注 (回车用 %s): %s' "$C_DIM" "$def" "$C_RESET" >&2
-  read -r n || true
+  printf '%s节点备注 (回车用 %s，q 取消): %s' "$C_DIM" "$def" "$C_RESET" >&2
+  read -r n || { echo; return 1; }
+  [[ "$n" == "q" || "$n" == "Q" ]] && { echo; return 1; }
   echo "${n:-$def}"
 }
 
 prompt_sni() {
   local def="${1:-www.microsoft.com}" s
-  printf '%s伪装域名 SNI (回车用 %s): %s' "$C_DIM" "$def" "$C_RESET" >&2
-  read -r s || true
+  printf '%s伪装域名 SNI (回车用 %s，q 取消): %s' "$C_DIM" "$def" "$C_RESET" >&2
+  read -r s || { echo; return 1; }
+  [[ "$s" == "q" || "$s" == "Q" ]] && { echo; return 1; }
   s="${s:-$def}"
   [[ "$s" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || { warn "域名格式无效，使用 $def"; s="$def"; }
   echo "$s"
 }
 
-# 选择 Shadowsocks 2022 加密算法：1=128(默认) 2=256；非法输入重新选择。
+# 选择 Shadowsocks 2022 加密算法：1=128(默认) 2=256；q 取消。
 prompt_ss2022_method() {
   local choice
   printf '%sShadowsocks 2022 加密算法%s\n' "$C_B" "$C_RESET" >&2
   printf '  1. 2022-blake3-aes-128-gcm（默认）\n' >&2
   printf '  2. 2022-blake3-aes-256-gcm\n' >&2
   while true; do
-    printf '请选择 [1-2，默认 1]: ' >&2
-    read -r choice || true
+    printf '请选择 [1-2，默认 1，q 取消]: ' >&2
+    read -r choice || { echo; return 1; }
     case "${choice:-1}" in
       1|"") echo "2022-blake3-aes-128-gcm"; return 0 ;;
       2) echo "2022-blake3-aes-256-gcm"; return 0 ;;
+      q|Q) echo; return 1 ;;
       *) warn "无效选择，请输入 1 或 2"; ;;
     esac
   done
@@ -747,9 +751,9 @@ commit_node() {
 
 add_vless() {
   local port name sni uuid kp priv pub sid
-  port=$(prompt_port "VLESS Reality" 443)
-  name=$(prompt_name "vless-$port")
-  sni=$(prompt_sni www.microsoft.com)
+  port=$(prompt_port "VLESS Reality" 443) || return 0
+  name=$(prompt_name "vless-$port") || return 0
+  sni=$(prompt_sni www.microsoft.com) || return 0
   uuid=$(rand_uuid)
   kp=$("$SB_BIN" generate reality-keypair)
   priv=$(echo "$kp" | awk '/PrivateKey/{print $2}')
@@ -771,9 +775,9 @@ do_add_vless() {
 
 add_ss() {
   local port name method pw
-  port=$(prompt_port "Shadowsocks 2022" "$(pick_port)")
-  name=$(prompt_name "ss-$port")
-  method=$(prompt_ss2022_method)
+  method=$(prompt_ss2022_method) || return 0
+  port=$(prompt_port "Shadowsocks 2022" "$(pick_port)") || return 0
+  name=$(prompt_name "ss-$port") || return 0
   pw=$(core_node ss2022-key --method="$method") || { warn "生成 Shadowsocks 2022 密钥失败"; return 1; }
   sbx_lock do_add_ss "$port" "$name" "$method" "$pw"
   local rc=$?
@@ -790,9 +794,9 @@ do_add_ss() {
 
 add_trojan() {
   local port name sni pw
-  port=$(prompt_port "Trojan" 8443)
-  name=$(prompt_name "trojan-$port")
-  sni=$(prompt_sni www.bing.com)
+  port=$(prompt_port "Trojan" 8443) || return 0
+  name=$(prompt_name "trojan-$port") || return 0
+  sni=$(prompt_sni www.bing.com) || return 0
   ensure_certs "$sni"
   pw=$(rand_hex 12)
   sbx_lock do_add_trojan "$port" "$name" "$sni" "$pw"
@@ -810,9 +814,9 @@ do_add_trojan() {
 
 add_anytls() {
   local port name sni pw
-  port=$(prompt_port "AnyTLS" "$(pick_port)")
-  name=$(prompt_name "anytls-$port")
-  sni=$(prompt_sni www.bing.com)
+  port=$(prompt_port "AnyTLS" "$(pick_port)") || return 0
+  name=$(prompt_name "anytls-$port") || return 0
+  sni=$(prompt_sni www.bing.com) || return 0
   ensure_certs "$sni"
   pw=$(rand_hex 12)
   sbx_lock do_add_anytls "$port" "$name" "$sni" "$pw"
@@ -851,8 +855,8 @@ add_snell() {
   fi
 
   local port name psk extra
-  port=$(prompt_port "Snell v$ver" "$(pick_port)")
-  name=$(prompt_name "snell-v$ver-$port")
+  port=$(prompt_port "Snell v$ver" "$(pick_port)") || return 0
+  name=$(prompt_name "snell-v$ver-$port") || return 0
   psk=$("$CORE_BIN" secret hex 32) || { warn "生成 PSK 失败"; return 1; }
   extra=()
   if [[ "$ver" == 5 ]]; then
@@ -1038,9 +1042,9 @@ show_panel_info() {
 menu_add_node() {
   banner
   printf '%s添加节点%s\n\n' "$C_B" "$C_RESET"
-  echo "  1) VLESS + Reality   (推荐，抗封锁)"
-  echo "  2) Shadowsocks 2022  (轻量高速)"
-  echo "  3) Trojan            (自签证书)"
+  echo "  1) VLESS + Reality"
+  echo "  2) Shadowsocks 2022"
+  echo "  3) Trojan"
   echo "  4) AnyTLS"
   echo "  5) Snell"
   echo "  0) 返回"

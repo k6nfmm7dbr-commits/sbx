@@ -556,7 +556,6 @@ func (c *CLI) cmdLinks(args []string) int {
 		fmt.Fprintf(c.Stdout, "### %s (%s, 端口 %s)\n",
 			Str(n, "name"), DisplayType(n), Str(n, "port"))
 		if Str(n, "type") == "snell" {
-			fmt.Fprintf(c.Stdout, "# 通用 URI（Shadowrocket / sing-box / Stash / Loon 等）:\n")
 			fmt.Fprintln(c.Stdout, c.Store.LinkFor(n, host, ""))
 			if host6Val != "" {
 				fmt.Fprintln(c.Stdout, "# IPv6:")
