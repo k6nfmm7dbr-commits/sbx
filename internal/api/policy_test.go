@@ -41,6 +41,25 @@ func newPolicyTestServer(t *testing.T, token, nodesFile string) (*httptest.Serve
 	return ts, pol
 }
 
+func TestToI64JSONNumber(t *testing.T) {
+	cases := []struct {
+		in   any
+		want int64
+	}{
+		{json.Number("1"), 1},
+		{json.Number("42"), 42},
+		{int64(7), 7},
+		{float64(3), 3},
+		{"9", 9},
+		{nil, 0},
+	}
+	for _, c := range cases {
+		if got := toI64(c.in); got != c.want {
+			t.Errorf("toI64(%v)=%d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
 func TestPolicyEndpoints(t *testing.T) {
 	dir := t.TempDir()
 	nodesFile := filepath.Join(dir, "nodes.json")

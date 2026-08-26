@@ -111,6 +111,7 @@ function renderNodeCards(s) {
   var host = document.getElementById('node-cards');
   if (!s.nodes.length) { host.innerHTML = '<div class="empty">暂无节点，运行 sbx 菜单添加</div>'; return; }
   host.innerHTML = s.nodes.map(function (n) {
+    var total = (n.total && (n.total.rx + n.total.tx)) || 0;
     return '<div class="node-card">' +
       '<div class="node-top">' +
         '<div class="node-title">' +
@@ -124,14 +125,14 @@ function renderNodeCards(s) {
         '</div>' +
       '</div>' +
       '<div class="node-stats">' +
+        '<div class="node-stat"><span>累计流量</span><b>' + fmtBytes(total) + '</b></div>' +
         quotaLine(n) + ipLine(n) +
         '<div class="node-stat"><span>TCP 连接</span><b data-node-live="' + esc(n.id) + '" data-kind="conns">—</b></div>' +
         '<div class="node-stat"><span>UDP 会话</span><b data-node-live="' + esc(n.id) + '" data-kind="conns_udp">—</b></div>' +
       '</div>' +
       '<div class="node-foot">' +
         nodeStatus(n) +
-        '<div class="node-actions"><button class="mini-btn" data-node-id="' + esc(n.id) + '">分享</button>' +
-        '<button class="mini-btn primary" data-manage="' + esc(n.id) + '">管理</button></div>' +
+        '<div class="node-actions"><button class="mini-btn primary" data-manage="' + esc(n.id) + '">管理</button></div>' +
       '</div>' +
     '</div>';
   }).join('');
@@ -323,6 +324,7 @@ function savePolicy() {
     return r.json().then(function (d) { if (!r.ok) throw new Error(d.error || ('请求失败 ' + r.status)); return d; });
   }).then(function () {
     btn.disabled = false; btn.textContent = '保存修改';
+    closeDrawer('policy-drawer');
     toast('已保存'); loadSummary();
   }).catch(function (e) {
     btn.disabled = false; btn.textContent = '保存修改';
@@ -373,12 +375,10 @@ function showActiveIPs() {
     .catch(function (e) { if (e.message !== '未登录') { list.innerHTML = '<div class="empty">加载失败</div>'; toast(e.message); } });
 }
 
-/* 事件委托：节点卡片上的分享/管理按钮（动态渲染） */
+/* 事件委托：节点卡片上的管理按钮（动态渲染） */
 document.getElementById('node-cards').addEventListener('click', function (e) {
   var mg = e.target.closest('[data-manage]');
   if (mg) { showPolicy(mg.getAttribute('data-manage')); return; }
-  var sh = e.target.closest('[data-node-id]');
-  if (sh) { toast('分享链接请用 sbx --links 查看'); return; }
 });
 document.getElementById('drawer-close').addEventListener('click', function () { closeDrawer('policy-drawer'); });
 document.getElementById('drawer-mask').addEventListener('click', function () { closeDrawer('policy-drawer'); closeDrawer('ips-drawer'); });

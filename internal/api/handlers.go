@@ -2,6 +2,7 @@ package api
 
 import (
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -134,6 +135,9 @@ func toI64(v any) int64 {
 		return int64(t)
 	case float64:
 		return int64(t)
+	case json.Number:
+		n, _ := t.Int64()
+		return n
 	case string:
 		n, _ := strconv.ParseInt(t, 10, 64)
 		return n
