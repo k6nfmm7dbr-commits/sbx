@@ -93,14 +93,8 @@ function renderSummary(s) {
 /* ---------- 节点卡片 ---------- */
 function portText(n) { return n.port != null ? n.port : '—'; }
 function quotaLine(n) {
-  if (!n.quota_enabled) return '<div class="node-stat"><span>流量</span><b>' + fmtBytes(n.quota_used_bytes) + ' / 不限</b></div>';
-  var pct = n.quota_limit_bytes > 0 ? Math.min(100, Math.round(n.quota_used_bytes / n.quota_limit_bytes * 100)) : 0;
-  return '<div class="node-stat"><span>流量</span><b>' + fmtBytes(n.quota_used_bytes) + ' / ' + fmtBytes(n.quota_limit_bytes) + '</b></div>' +
-    '<div class="bar"><i style="width:' + pct + '%"></i></div>';
-}
-function ipLine(n) {
-  if (!n.ip_limit_enabled) return '<div class="node-stat"><span>在线 IP</span><b>' + (n.active_ip_count || 0) + ' / 不限</b></div>';
-  return '<div class="node-stat"><span>在线 IP</span><b>' + (n.active_ip_count || 0) + ' / ' + n.ip_limit_max + '</b></div>';
+  if (!n.quota_enabled) return '<div class="node-stat"><span>流量配额</span><b>' + fmtBytes(n.quota_used_bytes) + ' / 不限</b></div>';
+  return '<div class="node-stat"><span>流量配额</span><b>' + fmtBytes(n.quota_used_bytes) + ' / ' + fmtBytes(n.quota_limit_bytes) + '</b></div>';
 }
 function nodeStatus(n) {
   if (n.quota_state === 'exceeded') return '<span class="status-pill danger">流量已用尽</span>';
@@ -112,6 +106,7 @@ function renderNodeCards(s) {
   if (!s.nodes.length) { host.innerHTML = '<div class="empty">暂无节点，运行 sbx 菜单添加</div>'; return; }
   host.innerHTML = s.nodes.map(function (n) {
     var total = (n.total && (n.total.rx + n.total.tx)) || 0;
+    var ipVal = (n.active_ip_count || 0) + (n.ip_limit_enabled ? ' / ' + n.ip_limit_max : '');
     return '<div class="node-card">' +
       '<div class="node-top">' +
         '<div class="node-title">' +
@@ -126,10 +121,15 @@ function renderNodeCards(s) {
       '</div>' +
       '<div class="node-stats">' +
         '<div class="node-stat"><span>累计流量</span><b>' + fmtBytes(total) + '</b></div>' +
-        quotaLine(n) + ipLine(n) +
+        quotaLine(n) +
         '<div class="node-stat"><span>TCP 连接</span><b data-node-live="' + esc(n.id) + '" data-kind="conns">—</b></div>' +
         '<div class="node-stat"><span>UDP 会话</span><b data-node-live="' + esc(n.id) + '" data-kind="conns_udp">—</b></div>' +
       '</div>' +
+      '<button class="ip-strip" data-view-ips="' + esc(n.id) + '">' +
+        '<span class="ip-strip-label">在线 IP</span>' +
+        '<span class="ip-strip-val">' + esc(ipVal) + '</span>' +
+        '<span class="ip-strip-arrow">›</span>' +
+      '</button>' +
       '<div class="node-foot">' +
         nodeStatus(n) +
         '<div class="node-actions"><button class="mini-btn primary" data-manage="' + esc(n.id) + '">管理</button></div>' +
@@ -352,13 +352,17 @@ function resetQuota() {
     });
 }
 
-function showActiveIPs() {
-  document.getElementById('ips-node-name').textContent =
-    (policyState.summaryNode && policyState.summaryNode.name) || '';
+function showActiveIPs(nodeId) {
+  var id = nodeId != null ? String(nodeId) : policyState.nodeId;
+  var name = '';
+  var found = (state.summary && state.summary.nodes || []).filter(function (x) { return String(x.id) === id; })[0];
+  if (found) name = found.name;
+  else if (policyState.summaryNode && String(policyState.summaryNode.id) === id) name = policyState.summaryNode.name;
+  document.getElementById('ips-node-name').textContent = name;
   var list = document.getElementById('ips-list');
   list.innerHTML = '<div class="empty">加载中…</div>';
   openDrawer('ips-drawer');
-  fetch('/api/nodes/' + policyState.nodeId + '/active-ips')
+  fetch('/api/nodes/' + id + '/active-ips')
     .then(function (r) {
       if (r.status === 401) { location.replace('/login'); throw new Error('未登录'); }
       return r.json().then(function (d) { if (!r.ok) throw new Error(d.error || '请求失败'); return d; });
@@ -375,8 +379,10 @@ function showActiveIPs() {
     .catch(function (e) { if (e.message !== '未登录') { list.innerHTML = '<div class="empty">加载失败</div>'; toast(e.message); } });
 }
 
-/* 事件委托：节点卡片上的管理按钮（动态渲染） */
+/* 事件委托：节点卡片上的在线 IP 条 + 管理按钮（动态渲染） */
 document.getElementById('node-cards').addEventListener('click', function (e) {
+  var ips = e.target.closest('[data-view-ips]');
+  if (ips) { showActiveIPs(ips.getAttribute('data-view-ips')); return; }
   var mg = e.target.closest('[data-manage]');
   if (mg) { showPolicy(mg.getAttribute('data-manage')); return; }
 });
@@ -385,7 +391,6 @@ document.getElementById('drawer-mask').addEventListener('click', function () { c
 document.getElementById('pol-cancel').addEventListener('click', function () { closeDrawer('policy-drawer'); });
 document.getElementById('pol-save').addEventListener('click', savePolicy);
 document.getElementById('pol-quota-reset').addEventListener('click', resetQuota);
-document.getElementById('pol-ip-view').addEventListener('click', showActiveIPs);
 document.getElementById('ips-close').addEventListener('click', function () { closeDrawer('ips-drawer'); });
 document.getElementById('pol-quota-enable').addEventListener('change', function (e) {
   document.getElementById('pol-quota-box').classList.toggle('hidden', !e.target.checked);

@@ -207,10 +207,18 @@ select:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent
   border-radius: 9px; padding: 5px 12px; font: 650 12px var(--font); cursor: pointer;
 }
 .mini-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-.bar {
-  height: 6px; border-radius: 3px; background: #edf0f4; overflow: hidden; margin: 4px 0 8px;
+/* 在线 IP 快捷条（卡片上一眼可见，点击查看在线 IP 列表） */
+.ip-strip {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; margin-top: 12px; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: 11px;
+  background: #f8f9fc; cursor: pointer; transition: background .15s, border-color .15s;
+  font: inherit;
 }
-.bar i { display: block; height: 100%; background: linear-gradient(90deg, #6366f1, #4f46e5); }
+.ip-strip:hover { background: #f0f2f8; border-color: #d9dce3; }
+.ip-strip-label { font-size: 12.5px; color: var(--muted); flex: 1; text-align: left; }
+.ip-strip-val { font-size: 13px; font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; }
+.ip-strip-arrow { font-size: 16px; color: var(--faint); line-height: 1; }
 
 /* ---------- Drawer ---------- */
 .drawer-mask {
