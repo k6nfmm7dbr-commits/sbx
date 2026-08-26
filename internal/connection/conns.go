@@ -111,9 +111,7 @@ func sumHits(hits map[int]int, lo, hi int64) int {
 type CountResult struct {
 	Conns   map[string]Conns
 	Partial bool // 存在 /proc 文件读取失败，结果可能不完整
-}
-
-// CountForNodes 返回 {node_id_string: Conns}：
+} // CountForNodes 返回 {node_id_string: Conns}：
 // tcp 仅 TCP 类协议统计 ESTABLISHED 数，udp 仅 UDP 类协议统计已建立会话数，
 // 其余为 nil。节点端口非法时返回错误（对齐旧实现抛异常路径）。
 func CountForNodes(list []nodes.Node) (CountResult, error) {
@@ -157,4 +155,104 @@ func countForNodes(list []nodes.Node, readFile func(string) (string, error)) (Co
 		result[nodes.IDString(n)] = pair
 	}
 	return CountResult{Conns: result, Partial: tcpPartial || udpPartial}, nil
+}
+
+// ParseRemoteIPs 解析 /proc 文本，返回满足 keep 的远端 IP 集合（去重）。
+// 只取 rem_address 的 IP 部分，丢弃端口。用于「同时在线公网源 IP」统计——
+// 同一公网 IP 的多条连接只算 1 个 IP。
+func ParseRemoteIPs(text string, keep Keep) map[string]bool {
+	out := map[string]bool{}
+	lines := strings.Split(text, "\n")
+	for _, line := range lines[min(1, len(lines)):] {
+		parts := strings.Fields(line)
+		if len(parts) < 4 {
+			continue
+		}
+		rem, st := parts[2], parts[3]
+		if !keep(st, rem) {
+			continue
+		}
+		if ip := parseRemoteIP(rem); ip != "" {
+			out[ip] = true
+		}
+	}
+	return out
+}
+
+// RemoteIPsByPort 读多个 /proc 文件，聚合每个本地端口的远端 IP 集合。
+// 返回 (port -> set(ip), partial)。TCP keep 传 ESTABLISHED 判定，
+// UDP keep 传 RemConnected 判定（与 CountByPort 口径一致）。
+func RemoteIPsByPort(files []string, keep Keep, readFile func(string) (string, error)) (map[int]map[string]bool, bool) {
+	out := map[int]map[string]bool{}
+	partial := false
+	for _, path := range files {
+		text, err := readFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			partial = true
+			continue
+		}
+		lines := strings.Split(text, "\n")
+		for _, line := range lines[min(1, len(lines)):] {
+			parts := strings.Fields(line)
+			if len(parts) < 4 {
+				continue
+			}
+			local, rem, st := parts[1], parts[2], parts[3]
+			if !keep(st, rem) {
+				continue
+			}
+			i := strings.IndexByte(local, ':')
+			if i < 0 {
+				continue
+			}
+			p, err := strconv.ParseInt(local[i+1:], 16, 64)
+			if err != nil {
+				continue
+			}
+			ip := parseRemoteIP(rem)
+			if ip == "" {
+				continue
+			}
+			if out[int(p)] == nil {
+				out[int(p)] = map[string]bool{}
+			}
+			out[int(p)][ip] = true
+		}
+	}
+	return out, partial
+}
+
+// NodeRemoteIPs 返回每个节点的活跃远端 IP 集合（TCP ESTABLISHED + UDP 已连接会话）。
+// 与 CountForNodes 同一套 /proc 读取与归属逻辑，但目标是「独立公网源 IP」而非连接数。
+// readFile 为 nil 时使用真实 os.ReadFile。
+func NodeRemoteIPs(list []nodes.Node, readFile func(string) (string, error)) (map[string]map[string]bool, bool, error) {
+	if readFile == nil {
+		readFile = readOSFile
+	}
+	tcpIPs, tcpPartial := RemoteIPsByPort(tcpProcFiles, func(st, rem string) bool { return st == tcpEstablished }, readFile)
+	udpIPs, udpPartial := RemoteIPsByPort(udpProcFiles, func(_, rem string) bool { return RemConnected(rem) }, readFile)
+
+	result := make(map[string]map[string]bool, len(list))
+	for _, n := range list {
+		ranges := nodes.ParsePorts(n)
+		if len(ranges) == 0 {
+			return nil, false, fmt.Errorf("节点端口非法")
+		}
+		set := map[string]bool{}
+		for _, r := range ranges {
+			for p := int(r[0]); p <= int(r[1]); p++ {
+				for ip := range tcpIPs[p] {
+					set[ip] = true
+				}
+				for ip := range udpIPs[p] {
+					set[ip] = true
+				}
+			}
+		}
+		result[nodes.IDString(n)] = set
+	}
+	return result, tcpPartial || udpPartial, nil
 }

@@ -53,6 +53,14 @@ CREATE TABLE IF NOT EXISTS samples (
     PRIMARY KEY (ts, scope)
 );
 CREATE INDEX IF NOT EXISTS idx_samples_ts ON samples(ts);
+CREATE TABLE IF NOT EXISTS node_policy (
+    node_id                TEXT PRIMARY KEY,
+    quota_enabled          INTEGER NOT NULL DEFAULT 0,
+    quota_limit_bytes      INTEGER NOT NULL DEFAULT 0,
+    quota_reset_baseline   INTEGER NOT NULL DEFAULT 0,
+    ip_limit_enabled       INTEGER NOT NULL DEFAULT 0,
+    ip_limit_max           INTEGER NOT NULL DEFAULT 0
+);
 `
 
 // DB 包装 *sql.DB。SQLite 是单写者数据库，这里把连接数限制为 1：

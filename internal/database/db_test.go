@@ -13,7 +13,7 @@ func TestOpenCreatesSchema(t *testing.T) {
 	defer db.Close()
 
 	wantTables := map[string]bool{"meta": false, "counter_state": false,
-		"daily": false, "totals": false, "samples": false}
+		"daily": false, "totals": false, "samples": false, "node_policy": false}
 	rows, err := db.Query("SELECT name FROM sqlite_master WHERE type='table'")
 	if err != nil {
 		t.Fatal(err)

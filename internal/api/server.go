@@ -12,13 +12,14 @@ import (
 
 	"github.com/k6nfmm7dbr-commits/sbx/internal/config"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/database"
+	"github.com/k6nfmm7dbr-commits/sbx/internal/policy"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/traffic"
 )
 
 // New 构造配置好超时参数的 HTTP Server（不启动监听）。
 // 超时设置：慢头部/慢请求不会长期占用连接；写超时放宽以兼容 CSV 导出。
-func New(cfg *config.Config, db *database.DB, src traffic.LiveSource) (*Server, *http.Server) {
-	s := &Server{cfg: cfg, db: db, src: src}
+func New(cfg *config.Config, db *database.DB, src traffic.LiveSource, pol *policy.Service) (*Server, *http.Server) {
+	s := &Server{cfg: cfg, db: db, src: src, policy: pol}
 	hs := &http.Server{
 		// IPv6 监听地址必须用 net.JoinHostPort 拼接（"::" → "[::]:8080"），
 		// 不能用 cfg.Listen + ":" + port 得到非法 ":::8080"。
@@ -35,9 +36,10 @@ func New(cfg *config.Config, db *database.DB, src traffic.LiveSource) (*Server, 
 
 // Server 持有面板运行依赖。
 type Server struct {
-	cfg *config.Config
-	db  *database.DB
-	src traffic.LiveSource
+	cfg    *config.Config
+	db     *database.DB
+	src    traffic.LiveSource
+	policy *policy.Service
 }
 
 func (s *Server) recoverMiddleware(next http.Handler) http.Handler {
@@ -69,7 +71,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		s.handleGet(w, r, route)
 	case http.MethodPost:
+		// 仅策略的 quota/reset 需要 POST；其余 /api 路径维持旧行为（404 文本）。
+		if strings.HasPrefix(route, "/api/nodes/") && isPolicyPostRoute(route) {
+			s.handleAPI(w, r, route)
+			return
+		}
 		s.handlePost(w, r, route)
+	case http.MethodPut:
+		if strings.HasPrefix(route, "/api/") {
+			s.handleAPI(w, r, route)
+			return
+		}
+		s.sendText(w, r, http.StatusNotFound, "not found")
 	default:
 		s.sendText(w, r, http.StatusNotFound, "not found")
 	}
