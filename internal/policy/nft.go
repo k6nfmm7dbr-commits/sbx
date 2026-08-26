@@ -161,6 +161,9 @@ func (s *Service) applyEnforcement(ctx context.Context, quotaBlocked map[string]
 	if err := fsx.WriteFileAtomic(path, []byte(script), 0o644); err != nil {
 		return err
 	}
+	if s.nftApply != nil {
+		return s.nftApply(ctx, path)
+	}
 	rc, _, errMsg := firewall.RunCmd(ctx, "nft", "-f", path)
 	if rc != 0 {
 		return fmt.Errorf("nft 策略规则应用失败: %s", strings.TrimSpace(errMsg))

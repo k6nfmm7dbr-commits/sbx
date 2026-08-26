@@ -68,6 +68,9 @@ type Service struct {
 
 	udpTTL time.Duration
 	now    func() time.Time
+
+	// nftApply 执行 nft 脚本（测试可替换为 no-op，规避 CI 无 nft 权限）。
+	nftApply func(ctx context.Context, scriptPath string) error
 }
 
 // New 构造策略服务。
@@ -82,6 +85,7 @@ func New(db *sql.DB, appDir, nftConf string) *Service {
 		appliedIPLimit: map[string]map[string]bool{},
 		udpTTL:         120 * time.Second,
 		now:            time.Now,
+		nftApply:       nil, // nil 表示用真实 nft 执行
 	}
 }
 
@@ -89,6 +93,11 @@ func (s *Service) nodesPath() string { return s.appDir + "/nodes.json" }
 
 // SetClock 注入时钟（测试用）。
 func (s *Service) SetClock(fn func() time.Time) { s.now = fn }
+
+// SetNFTApply 注入 nft 脚本执行函数（测试用，规避无 netlink 权限的环境）。
+func (s *Service) SetNFTApply(fn func(ctx context.Context, scriptPath string) error) {
+	s.nftApply = fn
+}
 
 // SetUDPTTL 覆盖 UDP slot 释放 TTL（测试用）。
 func (s *Service) SetUDPTTL(d time.Duration) { s.udpTTL = d }

@@ -20,6 +20,8 @@ func newTestService(t *testing.T) *Service {
 	}
 	t.Cleanup(func() { db.Close() })
 	s := New(db.DB, dir, filepath.Join(dir, "policy.nft"))
+	// 单元测试不依赖真实 nft（CI runner 无 netlink 权限）；仅验证脚本生成与状态机。
+	s.nftApply = func(ctx context.Context, scriptPath string) error { return nil }
 	return s
 }
 

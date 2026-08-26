@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -33,6 +34,7 @@ func newPolicyTestServer(t *testing.T, token, nodesFile string) (*httptest.Serve
 		Token: token, Interval: 2, TZ: "UTC",
 	}
 	pol := policy.New(db.DB, dir, filepath.Join(dir, "policy.nft"))
+	pol.SetNFTApply(func(ctx context.Context, p string) error { return nil })
 	s, _ := New(cfg, db, &fakeSource{backend: "nft"}, pol)
 	ts := httptest.NewServer(s)
 	t.Cleanup(func() { ts.Close(); db.Close() })
