@@ -12,7 +12,13 @@ bash <(curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/
 
 安装器依次完成：系统与 init 检测（Debian/Ubuntu、RHEL 系、Alpine；systemd/OpenRC）→ 按架构下载 `sbx-core` 并用 `SHA256SUMS` 校验（不符即中止，不影响已有安装）→ 安装 sing-box → 注册并启动 `sbx-firewall`、`sing-box`、`sbx-panel` 三个服务。
 
-版本 `v3.0.5`。源码在 `main` 分支，二进制从 `dist` 分支分发，不使用 Tag。
+## 当前版本
+
+```text
+v3.0.5
+```
+
+源码在 `main` 分支，二进制从 `dist` 分支分发，不使用 Tag。
 
 ## 协议
 
@@ -49,6 +55,15 @@ Snell 需 sing-box ≥ 1.14，创建时会自动升级内核。分享链接提�
 ## Web 面板
 
 底部三页签（首页 / 每日 / 节点），令牌登录（HttpOnly Cookie）。前端经 `go:embed` 内嵌进 `sbx-core`，升级二进制即升级界面。
+
+## 节点策略
+
+在 Web 面板 → 节点卡片 → 管理，可为每个节点独立设置流量配额与同时在线 IP 上限（不进 `sbx` CLI 菜单）。
+
+- **流量配额**：基于现有内核 byte counter 累计（GiB/TiB），达限只阻断目标节点端口；提高额度自动恢复；「重置已用流量」只清零额度使用量，不删除历史累计。
+- **同时在线 IP**：按公网源 IP 统计（NAT 下多设备算一个），支持 TCP/UDP、IPv4/IPv6；达限阻止新 IP，不随机踢已在线 IP，UDP slot 超时（120s）自动释放。
+
+两种策略默认「不限」，旧节点升级后行为不变。
 
 ## 升级
 
@@ -100,7 +115,7 @@ Debian/Ubuntu、RHEL 系、Alpine；systemd/OpenRC。架构：amd64、arm64、ar
 
 ```text
 cmd/sbx-core/            入口
-internal/                各模块（api / database / nodes / config / traffic / connection / firewall / service）
+internal/                各模块（api / database / nodes / config / traffic / connection / firewall / service / policy）
 internal/webui/static/   前端（go:embed）
 installer-template.sh    sbx.sh 模板
 scripts/build-release.sh 七架构交叉编译 + SHA256SUMS

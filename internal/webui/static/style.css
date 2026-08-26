@@ -190,6 +190,109 @@ select:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent
 }
 .toast.show { opacity: 1; }
 
+/* ---------- 节点策略（Quota / IP Limit） ---------- */
+.status-pill {
+  font-size: 11px; font-weight: 650; padding: 3px 9px; border-radius: 999px;
+}
+.status-pill.ok { color: var(--up); background: var(--up-bg); }
+.status-pill.danger { color: #c0392b; background: #fdecea; }
+.status-pill.warn { color: #b26a00; background: #fff4e0; }
+.node-foot {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-top: 11px; padding-top: 11px; border-top: 1px dashed var(--line);
+}
+.node-actions { display: flex; gap: 6px; }
+.mini-btn {
+  border: 1px solid var(--line); background: #fff; color: var(--ink);
+  border-radius: 9px; padding: 5px 12px; font: 650 12px var(--font); cursor: pointer;
+}
+.mini-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.bar {
+  height: 6px; border-radius: 3px; background: #edf0f4; overflow: hidden; margin: 4px 0 8px;
+}
+.bar i { display: block; height: 100%; background: linear-gradient(90deg, #6366f1, #4f46e5); }
+
+/* ---------- Drawer ---------- */
+.drawer-mask {
+  position: fixed; inset: 0; z-index: 40; background: rgba(0,0,0,.35);
+  opacity: 0; pointer-events: none; transition: opacity .2s;
+}
+.drawer-mask.on { opacity: 1; pointer-events: auto; }
+.drawer {
+  position: fixed; left: 50%; bottom: 0; transform: translate(-50%, 100%);
+  width: min(560px, 100%); max-height: 88vh; z-index: 45;
+  background: var(--card); border-radius: 20px 20px 0 0;
+  box-shadow: 0 -8px 40px rgba(20,24,40,.18);
+  display: flex; flex-direction: column;
+  padding-bottom: env(safe-area-inset-bottom);
+  transition: transform .25s cubic-bezier(.3,.8,.3,1);
+}
+.drawer.on { transform: translate(-50%, 0); }
+.drawer-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  padding: 16px 18px 12px; border-bottom: 1px solid var(--line);
+}
+.drawer-title { font-size: 16px; font-weight: 750; }
+.drawer-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.drawer-close {
+  border: 0; background: #f1f2f5; color: var(--muted); width: 30px; height: 30px;
+  border-radius: 10px; font-size: 14px; cursor: pointer;
+}
+.drawer-body { padding: 14px 18px; overflow-y: auto; }
+.form-block { margin-bottom: 20px; }
+.form-label { font-size: 13px; font-weight: 700; margin-bottom: 10px; color: var(--ink); }
+.form-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.form-key { font-size: 13px; color: var(--muted); flex: 1; }
+.form-val { font-size: 13px; font-variant-numeric: tabular-nums; }
+.quota-box { display: flex; gap: 8px; margin: 2px 0 8px; }
+.num-input {
+  flex: 1; padding: 10px 12px; border: 1px solid var(--line); border-radius: 11px;
+  font: 15px var(--font); color: var(--ink); outline: none;
+}
+.num-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.unit-select { padding: 10px 12px; border: 1px solid var(--line); border-radius: 11px; background: #fff; font: 600 13px var(--font); color: var(--ink); }
+.unit-txt { font-size: 13px; color: var(--muted); }
+.link-btn {
+  border: 0; background: none; color: var(--accent); font: 650 13px var(--font);
+  cursor: pointer; padding: 0; margin-top: 4px;
+}
+.form-error {
+  background: #fdecea; color: #c0392b; border-radius: 10px; padding: 9px 12px;
+  font-size: 12.5px; margin-top: 6px;
+}
+.hidden { display: none; }
+.drawer-foot {
+  display: flex; gap: 10px; padding: 12px 18px; border-top: 1px solid var(--line);
+}
+.btn-ghost, .btn-primary {
+  flex: 1; padding: 12px; border-radius: 12px; font: 700 14px var(--font); cursor: pointer;
+}
+.btn-ghost { border: 1px solid var(--line); background: #fff; color: var(--ink); }
+.btn-primary { border: 0; background: linear-gradient(135deg, #6366f1, #4f46e5); color: #fff; }
+.btn-primary:disabled { opacity: .5; }
+
+/* 开关 */
+.switch { position: relative; display: inline-block; width: 44px; height: 26px; flex-shrink: 0; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.slider {
+  position: absolute; inset: 0; background: #d8dbe2; border-radius: 999px; transition: .2s;
+}
+.slider:before {
+  content: ""; position: absolute; left: 3px; top: 3px; width: 20px; height: 20px;
+  background: #fff; border-radius: 50%; transition: .2s; box-shadow: 0 1px 3px rgba(0,0,0,.2);
+}
+.switch input:checked + .slider { background: var(--accent); }
+.switch input:checked + .slider:before { transform: translateX(18px); }
+
+/* 在线 IP 列表 */
+.ips-list { display: flex; flex-direction: column; gap: 8px; }
+.ip-item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: 11px;
+}
+.ip-addr { font-size: 13.5px; font-variant-numeric: tabular-nums; font-weight: 600; }
+.ip-tag { font-size: 10.5px; font-weight: 650; color: var(--accent); background: var(--accent-soft); border-radius: 6px; padding: 2px 7px; }
+
 /* ---------- 登录页 ---------- */
 .login-body { display: grid; place-items: center; min-height: 100vh; padding: 20px; }
 .login {

@@ -92,6 +92,83 @@
   <button class="tab" data-view="daily"><span class="ico">▤</span>每日</button>
   <button class="tab" data-view="node"><span class="ico">◎</span>节点</button>
 </nav>
+
+<!-- 节点策略管理 Drawer -->
+<div id="drawer-mask" class="drawer-mask"></div>
+<div id="policy-drawer" class="drawer" role="dialog" aria-modal="true" aria-label="节点管理">
+  <div class="drawer-head">
+    <div>
+      <div class="drawer-title">节点管理</div>
+      <div id="drawer-node-name" class="drawer-sub"></div>
+    </div>
+    <button id="drawer-close" class="drawer-close" aria-label="关闭">✕</button>
+  </div>
+  <div class="drawer-body">
+    <section class="form-block">
+      <div class="form-label">流量限制</div>
+      <div class="form-row">
+        <span class="form-key">当前已用</span>
+        <b id="pol-quota-used" class="form-val">—</b>
+      </div>
+      <div class="form-row">
+        <label class="switch">
+          <input type="checkbox" id="pol-quota-enable">
+          <span class="slider"></span>
+        </label>
+        <span class="form-key">限制流量</span>
+      </div>
+      <div id="pol-quota-box" class="quota-box hidden">
+        <input type="number" id="pol-quota-val" class="num-input" min="1" step="1" inputmode="decimal" placeholder="500">
+        <select id="pol-quota-unit" class="unit-select">
+          <option value="GiB">GiB</option>
+          <option value="TiB">TiB</option>
+        </select>
+      </div>
+      <button id="pol-quota-reset" class="link-btn">重置已用流量</button>
+    </section>
+
+    <section class="form-block">
+      <div class="form-label">同时在线 IP</div>
+      <div class="form-row">
+        <span class="form-key">当前在线</span>
+        <b id="pol-ip-active" class="form-val">—</b>
+      </div>
+      <div class="form-row">
+        <label class="switch">
+          <input type="checkbox" id="pol-ip-enable">
+          <span class="slider"></span>
+        </label>
+        <span class="form-key">限制 IP 数量</span>
+      </div>
+      <div id="pol-ip-box" class="hidden">
+        <input type="number" id="pol-ip-max" class="num-input" min="1" step="1" inputmode="numeric" placeholder="3">
+        <span class="unit-txt">个</span>
+      </div>
+      <button id="pol-ip-view" class="link-btn">查看当前在线 IP</button>
+    </section>
+
+    <div id="pol-error" class="form-error hidden"></div>
+  </div>
+  <div class="drawer-foot">
+    <button id="pol-cancel" class="btn-ghost">取消</button>
+    <button id="pol-save" class="btn-primary">保存修改</button>
+  </div>
+</div>
+
+<!-- 在线 IP 列表 Drawer -->
+<div id="ips-drawer" class="drawer" role="dialog" aria-modal="true" aria-label="在线 IP">
+  <div class="drawer-head">
+    <div>
+      <div class="drawer-title">在线 IP</div>
+      <div id="ips-node-name" class="drawer-sub"></div>
+    </div>
+    <button id="ips-close" class="drawer-close" aria-label="关闭">✕</button>
+  </div>
+  <div class="drawer-body">
+    <div id="ips-list" class="ips-list"></div>
+  </div>
+</div>
+
 <div id="toast" class="toast"></div>
 <script src="app.js"></script>
 </body>

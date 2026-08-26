@@ -16,6 +16,7 @@ import (
 	"github.com/k6nfmm7dbr-commits/sbx/internal/api"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/config"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/database"
+	"github.com/k6nfmm7dbr-commits/sbx/internal/policy"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/traffic"
 )
 
@@ -51,9 +52,12 @@ func Serve() int {
 
 	collector := traffic.NewCollector(cfg, db)
 
+	// 策略服务（Quota / IP Limit）：与采集器并行运行，复用同一 SQLite。
+	policySvc := policy.New(db.DB, config.AppDir(), cfg.NftConf)
+
 	addr := net.JoinHostPort(cfg.Listen, fmt.Sprint(cfg.Port))
 
-	_, hs := api.New(cfg, db, collector)
+	_, hs := api.New(cfg, db, collector, policySvc)
 
 	ln, lerr := net.Listen("tcp", addr)
 	if lerr != nil {
@@ -66,7 +70,12 @@ func Serve() int {
 	defer stop()
 
 	collCtx, collCancel := context.WithCancel(context.Background())
+	defer collCancel()
 	go collector.Run(collCtx)
+
+	polCtx, polCancel := context.WithCancel(context.Background())
+	defer polCancel()
+	go policySvc.Run(polCtx)
 
 	slog.Info("面板已启动 http://" + addr + "  后端=" + collector.BackendName() +
 		"  采集间隔=" + fmt.Sprint(cfg.Interval) + "s")
@@ -79,13 +88,13 @@ func Serve() int {
 	case err := <-serveErr:
 		if err != nil && err != http.ErrServerClosed {
 			slog.Error("HTTP 服务异常退出", "err", err)
-			collCancel()
 			return 1
 		}
 	}
 
 	// 收尾顺序（不可暴力中断）：先停采集并等它在途事务落库，
 	// 再排空 HTTP，最后关闭数据库。
+	polCancel()
 	collCancel()
 	select {
 	case <-collector.Done():

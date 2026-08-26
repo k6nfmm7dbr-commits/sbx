@@ -49,7 +49,7 @@ func newTestServer(t *testing.T, token string, src traffic.LiveSource,
 		Backend:   "nft", Listen: "127.0.0.1", Port: 8080,
 		Token: token, Interval: 2, TZ: "UTC",
 	}
-	s, _ := New(cfg, db, src)
+	s, _ := New(cfg, db, src, nil)
 	ts := httptest.NewServer(s)
 	t.Cleanup(func() { ts.Close(); db.Close() })
 	return ts, db, dir
@@ -374,7 +374,7 @@ func TestIPv6AddrJoin(t *testing.T) {
 	// api.New 用 net.JoinHostPort 拼接 Addr，IPv6 不应产生非法 ":::8080"
 	for _, listen := range []string{"127.0.0.1", "0.0.0.0", "::1", "::"} {
 		cfg := &config.Config{Listen: listen, Port: 8080, Backend: "nft"}
-		s, hs := New(cfg, nil, &fakeSource{backend: "nft"})
+		s, hs := New(cfg, nil, &fakeSource{backend: "nft"}, nil)
 		_ = s
 		if hs.Addr == "" {
 			t.Fatalf("listen=%q Addr 为空", listen)

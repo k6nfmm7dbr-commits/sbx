@@ -35,6 +35,7 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request, route string)
 			s.sendJSON(w, r, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
+		s.attachPolicyToSummary(sum)
 		s.sendJSON(w, r, http.StatusOK, sum)
 
 	case "/api/live":
@@ -84,11 +85,81 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request, route string)
 		s.handleExport(w, r)
 
 	default:
+		// 策略子路由：/api/nodes/<id>/{policy|quota/reset|active-ips}
+		if handled := s.tryPolicyRoute(w, r, route); handled {
+			return
+		}
 		s.sendJSON(w, r, http.StatusNotFound, map[string]string{"error": "not found"})
 	}
 }
 
-// handleExport 输出全量 daily 的 CSV（与旧实现逐字节同构）。
+// isPolicyPostRoute 判断路由是否是需要 POST 的策略子路由（quota/reset）。
+func isPolicyPostRoute(route string) bool {
+	return strings.HasSuffix(route, "/quota/reset")
+}
+
+// attachPolicyToSummary 把策略状态合并进 summary 的节点列表（供前端卡片展示）。
+func (s *Server) attachPolicyToSummary(sum *traffic.Summary) {
+	if s.policy == nil {
+		return
+	}
+	states, _ := s.policy.Snapshot()
+	for i := range sum.Nodes {
+		id := strconv.FormatInt(toI64(sum.Nodes[i].ID), 10)
+		st, ok := states[id]
+		if !ok {
+			continue
+		}
+		sum.Nodes[i].QuotaEnabled = st.QuotaEnabled
+		sum.Nodes[i].QuotaLimit = st.QuotaLimit
+		sum.Nodes[i].QuotaUsed = st.QuotaUsed
+		// 未启用时 state 留空（配合 omitempty 不输出），启用时才有 ok/exceeded。
+		if st.QuotaEnabled {
+			sum.Nodes[i].QuotaState = st.QuotaState
+		}
+		sum.Nodes[i].IPLimitOn = st.IPLimitOn
+		sum.Nodes[i].IPLimitMax = st.IPLimitMax
+		sum.Nodes[i].ActiveIPs = st.ActiveIPs
+		if st.IPLimitOn {
+			sum.Nodes[i].IPLimitState = st.IPLimitState
+		}
+	}
+}
+
+func toI64(v any) int64 {
+	switch t := v.(type) {
+	case int64:
+		return t
+	case int:
+		return int64(t)
+	case float64:
+		return int64(t)
+	case string:
+		n, _ := strconv.ParseInt(t, 10, 64)
+		return n
+	default:
+		return 0
+	}
+}
+func (s *Server) tryPolicyRoute(w http.ResponseWriter, r *http.Request, route string) bool {
+	prefix := "/api/nodes/"
+	if !strings.HasPrefix(route, prefix) {
+		return false
+	}
+	rest := route[len(prefix):]
+	// rest 形如 "<id>/policy" 或 "<id>/quota/reset" 或 "<id>/active-ips"
+	slash := strings.IndexByte(rest, '/')
+	if slash < 0 {
+		return false
+	}
+	idStr := rest[:slash]
+	sub := rest[slash+1:]
+	if sub != "policy" && sub != "quota/reset" && sub != "active-ips" {
+		return false
+	}
+	s.handlePolicyAPI(w, r, idStr, sub)
+	return true
+}
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	rows, err := queryExportRows(s.db.DB)
 	if err != nil {
