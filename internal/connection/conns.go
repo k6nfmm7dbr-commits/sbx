@@ -229,30 +229,60 @@ func RemoteIPsByPort(files []string, keep Keep, readFile func(string) (string, e
 // 与 CountForNodes 同一套 /proc 读取与归属逻辑，但目标是「独立公网源 IP」而非连接数。
 // readFile 为 nil 时使用真实 os.ReadFile。
 func NodeRemoteIPs(list []nodes.Node, readFile func(string) (string, error)) (map[string]map[string]bool, bool, error) {
+	split, partial, err := NodeRemoteIPsSplit(list, readFile)
+	if err != nil {
+		return nil, false, err
+	}
+	result := make(map[string]map[string]bool, len(split))
+	for id, rs := range split {
+		set := make(map[string]bool, len(rs.TCP)+len(rs.UDP))
+		for ip := range rs.TCP {
+			set[ip] = true
+		}
+		for ip := range rs.UDP {
+			set[ip] = true
+		}
+		result[id] = set
+	}
+	return result, partial, nil
+}
+
+// RemoteIPSet 是某节点 TCP 与 UDP 各自的活跃远端 IP 集合。
+// TCP 来自 /proc/net/tcp 的 ESTABLISHED 状态（socket 关闭即消失，是可靠的
+// 实时在线信号）；UDP 来自 /proc/net/udp 的已连接会话（rem 地址可能残留，
+// 上层需用 last_seen TTL 判定）。
+type RemoteIPSet struct {
+	TCP map[string]bool
+	UDP map[string]bool
+}
+
+// NodeRemoteIPsSplit 返回每个节点的 TCP/UDP 分离的活跃远端 IP 集合。
+// 供 IP Limit 追踪器区分「TCP 断开立即释放」与「UDP 靠 TTL 释放」。
+func NodeRemoteIPsSplit(list []nodes.Node, readFile func(string) (string, error)) (map[string]RemoteIPSet, bool, error) {
 	if readFile == nil {
 		readFile = readOSFile
 	}
 	tcpIPs, tcpPartial := RemoteIPsByPort(tcpProcFiles, func(st, rem string) bool { return st == tcpEstablished }, readFile)
 	udpIPs, udpPartial := RemoteIPsByPort(udpProcFiles, func(_, rem string) bool { return RemConnected(rem) }, readFile)
 
-	result := make(map[string]map[string]bool, len(list))
+	result := make(map[string]RemoteIPSet, len(list))
 	for _, n := range list {
 		ranges := nodes.ParsePorts(n)
 		if len(ranges) == 0 {
 			return nil, false, fmt.Errorf("节点端口非法")
 		}
-		set := map[string]bool{}
+		rs := RemoteIPSet{TCP: map[string]bool{}, UDP: map[string]bool{}}
 		for _, r := range ranges {
 			for p := int(r[0]); p <= int(r[1]); p++ {
 				for ip := range tcpIPs[p] {
-					set[ip] = true
+					rs.TCP[ip] = true
 				}
 				for ip := range udpIPs[p] {
-					set[ip] = true
+					rs.UDP[ip] = true
 				}
 			}
 		}
-		result[nodes.IDString(n)] = set
+		result[nodes.IDString(n)] = rs
 	}
 	return result, tcpPartial || udpPartial, nil
 }

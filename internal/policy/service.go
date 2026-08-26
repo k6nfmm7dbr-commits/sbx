@@ -22,6 +22,9 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/k6nfmm7dbr-commits/sbx/internal/connection"
+	"github.com/k6nfmm7dbr-commits/sbx/internal/nodes"
 )
 
 // State 是单个节点的策略状态快照（面向 API / UI）。
@@ -58,8 +61,10 @@ type Service struct {
 	ready   bool
 	lastErr string
 
-	// IP Tracker 运行态：nodeID -> ip -> lastSeen（UnixNano）。
-	// 只有「已获 slot」的 IP 才在这里；active 数即 len(slots)。
+	// IP Tracker 运行态：nodeID -> ip -> UDP lastSeen（UnixNano）。
+	// TCP 的在线状态直接用「本轮 /proc/net/tcp ESTABLISHED 是否出现」判断
+	// （断开即消失，实时）；UDP 无生命周期，靠 lastSeen TTL 判定。
+	// 只有「已获 slot」的 IP 才在这里。
 	slots map[string]map[string]int64
 
 	// 已应用的 enforcement 快照（避免每次 reconcile 无谓重写 nft）。
@@ -71,6 +76,9 @@ type Service struct {
 
 	// nftApply 执行 nft 脚本（测试可替换为 no-op，规避 CI 无 nft 权限）。
 	nftApply func(ctx context.Context, scriptPath string) error
+
+	// remoteIPs 读取各节点 TCP/UDP 活跃 IP（测试可注入，默认读 /proc）。
+	remoteIPs func(list []nodes.Node) (map[string]connection.RemoteIPSet, bool, error)
 }
 
 // New 构造策略服务。
@@ -102,6 +110,11 @@ func (s *Service) SetNFTApply(fn func(ctx context.Context, scriptPath string) er
 // SetUDPTTL 覆盖 UDP slot 释放 TTL（测试用）。
 func (s *Service) SetUDPTTL(d time.Duration) { s.udpTTL = d }
 
+// SetRemoteIPs 注入 TCP/UDP 活跃 IP 读取函数（测试用）。
+func (s *Service) SetRemoteIPs(fn func(list []nodes.Node) (map[string]connection.RemoteIPSet, bool, error)) {
+	s.remoteIPs = fn
+}
+
 // Snapshot 返回策略状态快照。ready=false 表示尚未完成首次 reconcile。
 func (s *Service) Snapshot() (map[string]State, bool) {
 	s.mu.RLock()
@@ -120,7 +133,7 @@ func (s *Service) LastError() string {
 	return s.lastErr
 }
 
-// ActiveIPs 返回某节点当前在线公网 IP 列表（已获 slot 的 IP，按 lastSeen 倒序）。
+// ActiveIPs 返回某节点当前在线公网 IP 列表（按最后活跃时间倒序）。
 func (s *Service) ActiveIPs(nodeID string) []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

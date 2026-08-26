@@ -127,7 +127,7 @@ function renderNodeCards(s) {
       '</div>' +
       '<button class="ip-strip" data-view-ips="' + esc(n.id) + '">' +
         '<span class="ip-strip-label">在线 IP</span>' +
-        '<span class="ip-strip-val">' + esc(ipVal) + '</span>' +
+        '<span class="ip-strip-val" data-node-ips="' + esc(n.id) + '">' + esc(ipVal) + '</span>' +
         '<span class="ip-strip-arrow">›</span>' +
       '</button>' +
       '<div class="node-foot">' +
@@ -175,6 +175,13 @@ function renderLive(v) {
     else if (kind === 'conns_udp') el.textContent = (typeof n.conns_udp === 'number') ? n.conns_udp : '—';
     else if (kind === 'rate-up') el.textContent = live ? '↑ ' + fmtRate(n.rate.rx) : '—';
     else if (kind === 'rate-down') el.textContent = live ? '↓ ' + fmtRate(n.rate.tx) : '—';
+  });
+  // 在线 IP 数（高频刷新：TCP 断开后立即回落）
+  document.querySelectorAll('[data-node-ips]').forEach(function (el) {
+    var id = el.getAttribute('data-node-ips'), n = byId[id];
+    if (!n) return;
+    var val = (typeof n.active_ip_count === 'number') ? n.active_ip_count : 0;
+    el.textContent = n.ip_limit_enabled ? (val + ' / ' + n.ip_limit_max) : val;
   });
 }
 

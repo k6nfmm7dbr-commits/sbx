@@ -2,6 +2,8 @@ package connection
 
 import (
 	"testing"
+
+	"github.com/k6nfmm7dbr-commits/sbx/internal/nodes"
 )
 
 func TestParseRemoteIP(t *testing.T) {
@@ -59,5 +61,31 @@ func TestRemoteIPsByPort(t *testing.T) {
 	set := out[8080] // 0x1F90 = 8080
 	if len(set) != 1 || !set["8.8.8.8"] {
 		t.Fatalf("端口 8080 应只有 8.8.8.8 一个 IP, got %v", set)
+	}
+}
+
+func TestNodeRemoteIPsSplit(t *testing.T) {
+	files := map[string]string{
+		"/proc/net/tcp": `  sl local_address rem_address   st tx_queue rx_queue
+   0: 0100007F:1F90 08080808:8AE4 01 00000000:00000000
+`,
+		"/proc/net/udp": `  sl local_address rem_address   st tx_queue rx_queue
+   0: 00000000:007B 08080808:0035 07 00000000:00000000
+`,
+		"/proc/net/tcp6": "",
+		"/proc/net/udp6": "",
+	}
+	reader := readFake(files)
+	list := []nodes.Node{{"id": int64(1), "type": "shadowsocks", "port": int64(8080)}}
+	split, partial, err := NodeRemoteIPsSplit(list, reader)
+	if err != nil || partial {
+		t.Fatalf("err=%v partial=%v", err, partial)
+	}
+	rs := split["1"]
+	if !rs.TCP["8.8.8.8"] {
+		t.Errorf("TCP 应含 8.8.8.8: %v", rs.TCP)
+	}
+	if rs.UDP["8.8.8.8"] {
+		t.Errorf("UDP 不应含 8.8.8.8（UDP fixture 端口是 123 非 8080）: %v", rs.UDP)
 	}
 }

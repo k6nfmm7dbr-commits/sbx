@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/k6nfmm7dbr-commits/sbx/internal/connection"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/database"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/nodes"
 )
@@ -199,6 +201,77 @@ func TestMigrationDefaults(t *testing.T) {
 	}
 	if c.QuotaEnabled || c.IPLimitEnabled {
 		t.Fatalf("旧节点升级后应默认全不限, got quota=%v ip=%v", c.QuotaEnabled, c.IPLimitEnabled)
+	}
+}
+
+func TestTCPDisconnectImmediateRelease(t *testing.T) {
+	s := newTestService(t)
+	seedNode(t, s, 1, "vless", 443)
+	ctx := context.Background()
+	if err := s.UpsertConfig(ctx, Config{NodeID: "1", IPLimitEnabled: true, IPLimitMax: 2}); err != nil {
+		t.Fatal(err)
+	}
+
+	cur := map[string]connection.RemoteIPSet{
+		"1": {TCP: map[string]bool{"9.9.9.9": true}, UDP: map[string]bool{}},
+	}
+	s.SetRemoteIPs(func(list []nodes.Node) (map[string]connection.RemoteIPSet, bool, error) {
+		return cur, false, nil
+	})
+
+	// 第一轮：TCP 在线
+	if err := s.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := s.Snapshot()
+	if st["1"].ActiveIPs != 1 {
+		t.Fatalf("第一轮应 1 个在线 IP, got %d", st["1"].ActiveIPs)
+	}
+
+	// 第二轮：TCP 断开（cur.TCP 清空）——必须立即释放，不等 120s TTL
+	cur["1"] = connection.RemoteIPSet{TCP: map[string]bool{}, UDP: map[string]bool{}}
+	if err := s.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st, _ = s.Snapshot()
+	if st["1"].ActiveIPs != 0 {
+		t.Fatalf("TCP 断开后应立即 0 个在线 IP, got %d", st["1"].ActiveIPs)
+	}
+}
+
+func TestUDPTTLRelease(t *testing.T) {
+	s := newTestService(t)
+	seedNode(t, s, 1, "shadowsocks", 443)
+	ctx := context.Background()
+	if err := s.UpsertConfig(ctx, Config{NodeID: "1", IPLimitEnabled: true, IPLimitMax: 2}); err != nil {
+		t.Fatal(err)
+	}
+	s.SetUDPTTL(120 * time.Second)
+
+	cur := map[string]connection.RemoteIPSet{
+		"1": {TCP: map[string]bool{}, UDP: map[string]bool{"8.8.8.8": true}},
+	}
+	s.SetRemoteIPs(func(list []nodes.Node) (map[string]connection.RemoteIPSet, bool, error) {
+		return cur, false, nil
+	})
+
+	if err := s.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := s.Snapshot()
+	if st["1"].ActiveIPs != 1 {
+		t.Fatalf("UDP 在线应 1 个, got %d", st["1"].ActiveIPs)
+	}
+
+	// UDP 断开但未超 TTL：仍在线
+	cur["1"] = connection.RemoteIPSet{TCP: map[string]bool{}, UDP: map[string]bool{}}
+	s.SetClock(func() time.Time { return time.Now().Add(60 * time.Second) })
+	if err := s.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st, _ = s.Snapshot()
+	if st["1"].ActiveIPs != 1 {
+		t.Fatalf("UDP 断开 60s 内应仍在线, got %d", st["1"].ActiveIPs)
 	}
 }
 

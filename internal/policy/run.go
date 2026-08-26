@@ -16,7 +16,8 @@ func (s *Service) Run(ctx context.Context) {
 		slog.Info("策略系统就绪")
 	}
 
-	interval := 5 * time.Second
+	// 与 traffic collector 同频（2s），让 TCP 断开后在线 IP 数尽快回落。
+	interval := 2 * time.Second
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {

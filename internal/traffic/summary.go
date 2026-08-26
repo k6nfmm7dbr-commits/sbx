@@ -191,6 +191,10 @@ type LiveNode struct {
 	Rate     Rate `json:"rate"`
 	ConnsTCP *int `json:"conns_tcp"`
 	ConnsUDP *int `json:"conns_udp"`
+	// 在线 IP 数与 IP 限制（由 API 层填充，供前端高频刷新节点卡片的在线 IP 显示）。
+	ActiveIPs  int  `json:"active_ip_count,omitempty"`
+	IPLimitOn  bool `json:"ip_limit_enabled,omitempty"`
+	IPLimitMax int  `json:"ip_limit_max,omitempty"`
 }
 
 // Live 对齐 build_live 返回结构：只算当前速率 + 连接数的高频轻量端点。

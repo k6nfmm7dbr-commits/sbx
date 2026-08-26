@@ -20,8 +20,13 @@ func (s *Service) reconcile(ctx context.Context) error {
 		return err
 	}
 
-	// IP Tracker：读 /proc 提取各节点当前活跃公网源 IP（TCP + UDP）。
-	curIPs, _, err := connection.NodeRemoteIPs(nodeList, nil)
+	// IP Tracker：读 /proc 提取各节点当前活跃公网源 IP（TCP/UDP 分离）。
+	var curSplit map[string]connection.RemoteIPSet
+	if s.remoteIPs != nil {
+		curSplit, _, err = s.remoteIPs(nodeList)
+	} else {
+		curSplit, _, err = connection.NodeRemoteIPsSplit(nodeList, nil)
+	}
 	if err != nil {
 		return err
 	}
@@ -61,58 +66,46 @@ func (s *Service) reconcile(ctx context.Context) error {
 		}
 
 		// ---- IP slot 更新 ----
+		// slots 只存 UDP lastSeen（UnixNano）。TCP 在线状态完全由本轮
+		// cur.TCP 决定——ESTABLISHED 断开即从 /proc 消失，无需 TTL，
+		// 因此 TCP IP 绝不写进 slots（否则会被误当作 UDP 活跃而滞留 120s）。
 		slots := s.slots[id]
 		if slots == nil {
 			slots = map[string]int64{}
 			s.slots[id] = slots
 		}
 		nowNs := s.now().UnixNano()
-		cur := curIPs[id]
+		udpTTLNs := s.udpTTL.Nanoseconds()
+		cur := curSplit[id]
 
-		// 1) touch：仍在线（在 /proc 里）的 slot IP 刷新 lastSeen。
-		for ip := range cur {
-			if _, ok := slots[ip]; ok {
-				slots[ip] = nowNs
-			}
+		// 1) touch：UDP 活跃的 IP 刷新 lastSeen。
+		for ip := range cur.UDP {
+			slots[ip] = nowNs
 		}
-		// 2) purge：离线超过 TTL 的 slot 释放。
+		// 2) purge：UDP lastSeen 超 TTL 的释放。
 		for ip, last := range slots {
-			if cur[ip] {
-				continue
-			}
-			if nowNs-last > s.udpTTL.Nanoseconds() {
+			if nowNs-last > udpTTLNs {
 				delete(slots, ip)
 			}
 		}
-		// 3) admit：新 IP 在 max 允许范围内才授予 slot。
-		max := cfg.IPLimitMax
-		if cfg.IPLimitEnabled && max >= 1 {
-			for ip := range cur {
-				if _, ok := slots[ip]; ok {
-					continue
-				}
-				if len(slots) < max {
-					slots[ip] = nowNs
-				}
-			}
-		} else {
-			// 未启用 IP limit：所有当前 IP 都视为活跃（仅作展示，不限制）。
-			// 这里仍把 cur 里的 IP 放进 slots 以便 ActiveIPs 展示，但无 enforcement。
-			for ip := range cur {
-				if _, ok := slots[ip]; !ok {
-					slots[ip] = nowNs
-				}
-			}
+
+		// 3) 在线集合 = 本轮 TCP ∪ 未超 TTL 的 UDP。
+		online := map[string]bool{}
+		for ip := range cur.TCP {
+			online[ip] = true
+		}
+		for ip := range slots {
+			online[ip] = true
 		}
 
-		active := len(slots)
+		active := len(online)
 		st.ActiveIPs = active
 
 		if cfg.IPLimitEnabled {
 			st.IPLimitState = "ok"
-			if max >= 1 && active >= max {
+			if cfg.IPLimitMax >= 1 && active >= cfg.IPLimitMax {
 				st.IPLimitState = "exceeded"
-				ipBlocked[id] = cloneIPSet(slots)
+				ipBlocked[id] = online
 			}
 		}
 
@@ -144,11 +137,3 @@ func (s *Service) reconcile(ctx context.Context) error {
 
 // Reconcile 公开同步入口：API 保存策略后立即调用，使 nft 生效。
 func (s *Service) Reconcile(ctx context.Context) error { return s.reconcile(ctx) }
-
-func cloneIPSet(m map[string]int64) map[string]bool {
-	out := make(map[string]bool, len(m))
-	for ip := range m {
-		out[ip] = true
-	}
-	return out
-}

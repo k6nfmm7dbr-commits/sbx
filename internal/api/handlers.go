@@ -45,6 +45,7 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request, route string)
 			s.sendJSON(w, r, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
+		s.attachPolicyToLive(live)
 		s.sendJSON(w, r, http.StatusOK, live)
 
 	case "/api/daily":
@@ -143,6 +144,23 @@ func toI64(v any) int64 {
 		return n
 	default:
 		return 0
+	}
+}
+
+// attachPolicyToLive 把策略状态（在线 IP 数 + IP 限制）合并进 live 的节点列表，
+// 供前端 2s 高频轮询刷新节点卡片的「在线 IP」显示。
+func (s *Server) attachPolicyToLive(live *traffic.Live) {
+	if s.policy == nil {
+		return
+	}
+	states, _ := s.policy.Snapshot()
+	for i := range live.Nodes {
+		id := strconv.FormatInt(toI64(live.Nodes[i].ID), 10)
+		if st, ok := states[id]; ok {
+			live.Nodes[i].ActiveIPs = st.ActiveIPs
+			live.Nodes[i].IPLimitOn = st.IPLimitOn
+			live.Nodes[i].IPLimitMax = st.IPLimitMax
+		}
 	}
 }
 func (s *Server) tryPolicyRoute(w http.ResponseWriter, r *http.Request, route string) bool {
