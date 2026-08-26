@@ -28,7 +28,8 @@ jobs:
 
       - name: sbx.sh 与模板同步检查（防 drift）
         run: |
-          python3 build.py >/dev/null
+          # build.py 已移除（Go 化后无 Python），等价动作：模板拷贝为发布脚本
+          cp installer-template.sh sbx.sh && chmod 755 sbx.sh
           git diff --exit-code -- sbx.sh installer-template.sh || {
             echo "::error::发布脚本与模板不同步"; exit 1;
           }

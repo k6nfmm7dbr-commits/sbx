@@ -29,7 +29,7 @@ func loadGoldenSummary(t *testing.T) (summary, live map[string]any) {
 	t.Helper()
 	data, err := os.ReadFile("testdata/golden/summary_live.json")
 	if err != nil {
-		t.Fatalf("读取金标失败（先运行 tests/gen_goldens.py）: %v", err)
+		t.Fatalf("读取金标失败（internal/traffic/testdata/golden 静态快照）: %v", err)
 	}
 	var doc struct {
 		Summary map[string]any `json:"summary"`

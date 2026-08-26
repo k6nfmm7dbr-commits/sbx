@@ -2,10 +2,6 @@
 /etc/sbx/
 /etc/sing-box/
 
-# Python
-__pycache__/
-*.pyc
-
 # 本地测试产物
 /tmp/
 *.db

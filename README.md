@@ -3,8 +3,7 @@
 sing-box 节点搭建与内核流量统计面板。自用、轻量、无多用户、无分流、无订阅转换。
 
 **v3.0.0 起：后端为 Go 单二进制 `sbx-core`，服务器不再需要 Python 运行时。**
-`src/` 下的 Python 文件仅作参考实现与回归测试对照（reference/test only），
-不参与生产运行。
+核心业务与运行时逻辑全部使用 Go 实现，无 Python 运行时依赖。
 
 ## 架构
 
@@ -123,12 +122,9 @@ CPU 架构：amd64、arm64、armv7、armv6、386、s390x、riscv64（纯 Go SQLi
 
 ```text
 cmd/sbx-core/            入口
-internal/{api,collector→traffic,database,nodes,config,traffic,connection,firewall,service}
+internal/{api,database,nodes,config,traffic,connection,firewall,service}
 internal/webui/static/   前端四文件（//go:embed）
-installer-template.sh    sbx.sh 模板（python3 build.py 直出发布脚本）
-src/panel.py, src/nodes_tool.py   Python 参考实现（仅用于回归对拍，不再部署）
-tests/gen_goldens.py     用参考实现生成金标夹具（Go 测试对其对拍）
-tests/run_all.py         旧 Python 回归套件（55 项）
+installer-template.sh    sbx.sh 模板（cp 直出发布脚本）
 scripts/build-release.sh 七架构交叉编译 + SHA256SUMS
 scripts/e2e_remote.sh    真机端到端验收（安装/流量/换代/重启/对拍/卸载）
 docs/AUDIT.md            迁移前行为审计（Go 实现的行为基线）
@@ -136,10 +132,12 @@ docs/AUDIT.md            迁移前行为审计（Go 实现的行为基线）
 
 ```bash
 go test ./... && go test -race ./...    # 单元 + 金标回归
-python3 tests/gen_goldens.py            # 再生金标（CI 中校验无漂移）
-python3 build.py                        # 生成发布版 sbx.sh
 ./scripts/build-release.sh dist         # 构建全部架构产物
 ```
+
+> 项目无 Python：运行时核心、节点管理、流量统计、nftables、SQLite、
+> sing-box 配置事务、Web API 全部由 Go 实现。金标夹具（`internal/*/testdata`）
+> 是 Go 测试读取的静态行为快照，不再由 Python 生成。
 
 沙箱安装（不动真实系统）：
 

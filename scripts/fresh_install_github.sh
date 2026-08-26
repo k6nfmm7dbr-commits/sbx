@@ -13,24 +13,20 @@ grep -q "sbx-core 安装完成" /tmp/gh-install.log && grep -qE "下载 sbx-core
 /usr/local/bin/sbx-core version | grep -q "v3.0.5"; ck "core 版本 v3.0.5" $?
 systemctl is-active --quiet sbx-panel; ck "面板服务 active" $?
 systemctl is-active --quiet sing-box; ck "sing-box active" $?
-PORT=$(python3 -c "import json;print(json.load(open('/etc/sbx/panel.json'))['port'])")
+PORT=$(jq -r '.port' /etc/sbx/panel.json)
 curl -fsS "http://127.0.0.1:$PORT/healthz" | grep -q '"ok":true'; ck "API 健康" $?
 
 echo "== 菜单添加节点（真实用户路径） =="
 printf '1\n2\n28388\ngh-e2e\n\n\n0\n0\n' | env NO_COLOR=1 bash /usr/local/bin/sbx >/tmp/gh-menu.log 2>&1
 ck "菜单加节点退出码 0" $?
-python3 -c "
-import json
-n=json.load(open('/etc/sbx/nodes.json'))
-assert len(n)==1 and int(n[0]['port'])==28388, n"; ck "节点落库正确" $?
+jq -e 'length==1 and .[0].port==28388' /etc/sbx/nodes.json >/dev/null 2>&1
+ck "节点落库正确" $?
 
 sleep 3
-curl -fsS --max-time 10 "http://127.0.0.1:$PORT/api/live?token=$(python3 -c "import json;print(json.load(open('/etc/sbx/panel.json'))['token'])")" | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-assert d['healthy'] is True, d
-assert any(x['id']==1 for x in d['nodes']), d
-print('live ok, nodes:', [x['id'] for x in d['nodes']], 'healthy:', d['healthy'])"; ck "/api/live healthy 且含节点" $?
+TOKEN=$(jq -r '.token' /etc/sbx/panel.json)
+curl -fsS --max-time 10 "http://127.0.0.1:$PORT/api/live?token=$TOKEN" | jq -e '
+  .healthy==true and any(.nodes[]; .id==1)' >/dev/null 2>&1
+ck "/api/live healthy 且含节点" $?
 
 echo "== 清理卸载 =="
 echo y | env NO_COLOR=1 bash /usr/local/bin/sbx --uninstall >/tmp/gh-uninstall.log 2>&1

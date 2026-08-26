@@ -23,12 +23,12 @@ sleep 2
 systemctl is-active --quiet sing-box; ck "sing-box active" $?
 systemctl is-active --quiet sbx-panel; ck "sbx-panel active" $?
 systemctl is-enabled --quiet sbx-panel >/dev/null 2>&1 || systemctl is-enabled --quiet sbx-panel; ck "sbx-panel 开机自启" $?
-FP=$(python3 -c "import json;print(json.load(open('/etc/sbx/panel.json'))['port'])")
+FP=$(jq -r '.port' /etc/sbx/panel.json)
 ss -Hlnt | grep -q ":$FP "; ck "面板端口($FP)监听中" $?
 
 section "3. 命令行冒烟"
-PORT=$(python3 -c "import json;print(json.load(open('/etc/sbx/panel.json'))['port'])")
-TOKEN=$(python3 -c "import json;print(json.load(open('/etc/sbx/panel.json'))['token'])")
+PORT=$(jq -r '.port' /etc/sbx/panel.json)
+TOKEN=$(jq -r '.token' /etc/sbx/panel.json)
 curl -fsS "http://127.0.0.1:$PORT/healthz" | grep -q '"ok":true'; ck "面板 API 健康" $?
 sbx --version | grep -q "3.0.5"; ck "sbx --version" $?
 sbx --show >/dev/null 2>&1; ck "sbx --show" $?

@@ -149,7 +149,7 @@ type metaRowG struct {
 func TestGoldenTrafficScenarios(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("testdata", "golden", "traffic_scenarios.json"))
 	if err != nil {
-		t.Fatalf("读取金标夹具失败（先运行 tests/gen_goldens.py）: %v", err)
+		t.Fatalf("读取金标夹具失败（internal/traffic/testdata/golden 静态快照）: %v", err)
 	}
 	var gf goldenFile
 	if err := json.Unmarshal(data, &gf); err != nil {

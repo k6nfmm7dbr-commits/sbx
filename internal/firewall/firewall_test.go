@@ -11,7 +11,7 @@ import (
 	"github.com/k6nfmm7dbr-commits/sbx/internal/nodes"
 )
 
-// loadRuleNodes 与 tests/gen_goldens.py 的 rules_text() 使用同一节点集。
+// loadRuleNodes 使用固定的节点集（与金标夹具 internal/firewall/testdata 对应）。
 func loadRuleNodes() []nodes.Node {
 	var out []nodes.Node
 	data, err := os.ReadFile(filepath.Join("testdata", "gen_nft.golden"))

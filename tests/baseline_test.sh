@@ -33,7 +33,6 @@ for wf in "$ROOT"/.github/workflows/*.yml; do
   grep -qE '^\s*tags:' "$wf"; [[ $? -ne 0 ]]; ck "$(basename "$wf") 无 tag trigger" 0 $?
   grep -qE 'git tag |git push.*--tags|push.*refs/tags' "$wf"; [[ $? -ne 0 ]]; ck "$(basename "$wf") 无 git tag 操作" 0 $?
 done
-grep -q 'git tag' "$ROOT/build.py" 2>/dev/null; [[ $? -ne 0 ]]; ck "build.py 无 tag 操作" 0 $?
 grep -rn 'git tag\|git describe' "$ROOT"/scripts/*.sh 2>/dev/null | grep -v '^\s*#' | grep -q .; [[ $? -ne 0 ]]; ck "scripts 无 git tag/describe 依赖" 0 $?
 
 # ---- D. checksum mismatch → fail-closed ----

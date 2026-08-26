@@ -44,7 +44,7 @@ type linkCase struct {
 func TestLinksGolden(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("testdata", "link_fixtures.json"))
 	if err != nil {
-		t.Fatalf("读取链接金标失败（先运行 tests/gen_goldens.py）: %v", err)
+		t.Fatalf("读取链接金标失败（internal/nodes/testdata/link_fixtures.json 静态快照）: %v", err)
 	}
 	var doc struct {
 		Cases []linkCase `json:"cases"`
