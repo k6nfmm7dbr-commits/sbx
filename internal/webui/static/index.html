@@ -105,7 +105,7 @@
   <section class="view" id="view-daily">
     <div class="panel glass">
       <div class="panel-head"><h2>每日流量趋势</h2><span class="hint">最近 60 天</span></div>
-      <div class="table-scroll"><table id="daily-table"></table></div>
+      <div id="daily-table"></div>
     </div>
   </section>
 
@@ -116,7 +116,7 @@
         <h2>节点详情</h2>
         <select id="node-select" aria-label="选择节点"></select>
       </div>
-      <div class="table-scroll"><table id="node-daily-table"></table></div>
+      <div id="node-daily-table"></div>
     </div>
   </section>
 
@@ -157,21 +157,20 @@
         <div><b>流量配额</b><small>超出后仅阻断该节点端口</small></div>
         <input type="checkbox" id="pol-quota-enable" class="sw-input"><span class="sw" aria-hidden="true"></span>
       </label>
+      <div class="field summary-field">
+        <small>当前已用</small>
+        <output id="pol-quota-used">—</output>
+      </div>
       <div id="pol-quota-box" class="box hidden">
-        <div class="field">
-          <small>已用额度</small>
-          <output id="pol-quota-used">—</output>
-        </div>
         <div class="field row">
-          <input type="number" id="pol-quota-val" min="0" step="any" inputmode="decimal" placeholder="额度数值">
+          <input type="number" id="pol-quota-val" min="1" step="1" inputmode="decimal" placeholder="500">
           <select id="pol-quota-unit">
-            <option value="MiB">MiB</option>
             <option value="GiB" selected>GiB</option>
             <option value="TiB">TiB</option>
           </select>
         </div>
-        <button type="button" class="ghost-btn" id="pol-quota-reset">重置当前使用量（保留历史）</button>
       </div>
+      <button type="button" class="ghost-btn" id="pol-quota-reset">重置当前使用量（保留历史）</button>
     </section>
 
     <section class="sect">
@@ -179,11 +178,11 @@
         <div><b>IP 数量限制</b><small>达上限后阻止新 IP 接入</small></div>
         <input type="checkbox" id="pol-ip-enable" class="sw-input"><span class="sw" aria-hidden="true"></span>
       </label>
+      <div class="field summary-field">
+        <small>当前在线 IP</small>
+        <output id="pol-ip-active">—</output>
+      </div>
       <div id="pol-ip-box" class="box hidden">
-        <div class="field">
-          <small>当前在线 IP</small>
-          <output id="pol-ip-active">—</output>
-        </div>
         <div class="field row">
           <input type="number" id="pol-ip-max" min="1" step="1" inputmode="numeric" placeholder="最大同时在线数">
         </div>
