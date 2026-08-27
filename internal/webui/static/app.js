@@ -1,7 +1,7 @@
 /* SBX 流量面板 —— 前端逻辑（无外部依赖） */
 'use strict';
 
-var state = { days: 60, nodeId: null, summary: null, live: null };
+var state = { days: 60, nodeId: null, summary: null, live: null, serverOffsetMs: 0, tz: '' };
 
 var inflight = {};
 function api(path, params) {
@@ -82,6 +82,8 @@ function kickEase() {
 /* ---------- 渲染：概览（低频 summary） ---------- */
 function renderSummary(s) {
   state.summary = s;
+  state.tz = s.tz || state.tz;
+  syncServerClock(s.now);
   easeTo('kpi-today-total', s.today.rx + s.today.tx, fmtBytes);
   easeTo('kpi-all-total', s.total.rx + s.total.tx, fmtBytes);
   setText('kpi-nodes', s.nodes.length);
@@ -94,9 +96,15 @@ function renderSummary(s) {
 function portText(n) { return n.port != null ? n.port : '—'; }
 function quotaLine(n) {
   if (!n.quota_enabled) return '<div class="node-stat"><span>流量配额</span><b>' + fmtBytes(n.quota_used_bytes) + ' / 不限</b></div>';
-  return '<div class="node-stat"><span>流量配额</span><b>' + fmtBytes(n.quota_used_bytes) + ' / ' + fmtBytes(n.quota_limit_bytes) + '</b></div>';
+  var remain = typeof n.quota_remaining_bytes === 'number' ? n.quota_remaining_bytes : Math.max(0, n.quota_limit_bytes - n.quota_used_bytes);
+  return '<div class="node-stat"><span>本期用量</span><b>' + fmtBytes(n.quota_used_bytes) + ' / ' + fmtBytes(n.quota_limit_bytes) + '</b><small>剩余 ' + fmtBytes(remain) + '</small></div>';
 }
-// 下次重置剩余时间的可读描述（每秒由 renderLive 高频刷新数字）。
+function accessText(n) {
+  if (n.access_state === 'quota_blocked') return '已暂停接入';
+  if (n.quota_enabled) return '节点可连接';
+  return '不限流量';
+}
+// 下次自动归零剩余时间（由实时接口高频刷新）。
 function formatCountdown(secs) {
   if (secs == null || !(secs > 0)) return '—';
   var d = Math.floor(secs / 86400);
@@ -108,121 +116,137 @@ function formatCountdown(secs) {
   return pad2(m) + ':' + pad2(s);
 }
 function pad2(x) { return (x < 10 ? '0' : '') + x; }
-// 下次重置的绝对本地时间（如 9月21日 00:00:00 + 剩 24天）。
+// 用 API 的服务器时钟校准倒计时，避免用户设备时间不准导致剩余时间漂移。
+function syncServerClock(serverUnix) {
+  if (typeof serverUnix === 'number' && serverUnix > 0) {
+    state.serverOffsetMs = serverUnix * 1000 - Date.now();
+  }
+}
+function serverNowUnix() { return Math.floor((Date.now() + state.serverOffsetMs) / 1000); }
+// 下次归零绝对时间 + 服务器校准倒计时。
 function formatResetFuture(ts) {
   var d = new Date(ts * 1000);
-  var secs = ts - Math.floor(Date.now() / 1000);
-  var date = (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+  var secs = ts - serverNowUnix();
+  var date;
+  try {
+    var parts = new Intl.DateTimeFormat('zh-CN', {
+      timeZone: state.tz || undefined, month: 'numeric', day: 'numeric',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'
+    }).formatToParts(d);
+    var p = {}; parts.forEach(function (x) { if (x.type !== 'literal') p[x.type] = x.value; });
+    date = p.month + '月' + p.day + '日 ' + p.hour + ':' + p.minute + ':' + p.second;
+  } catch (e) {
+    date = (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+  }
   return date + '（剩 ' + formatCountdown(secs) + '）';
 }
 function resetLine(n) {
-  if (!n.reset_enabled) return '';
-  var secs = n.reset_next_at ? (n.reset_next_at - Math.floor(Date.now() / 1000)) : null;
-  // 已到期但 reconcile 尚未跑完的短暂窗口 → 显示「待执行」而不是负数/—。
+  if (!n.quota_enabled || !n.reset_enabled) return '';
+  var secs = n.reset_next_at ? (n.reset_next_at - serverNowUnix()) : null;
   var txt = (secs != null && secs <= 0) ? '待执行' : formatCountdown(secs);
-  return '<div class="node-stat"><span>下次重置</span><b data-node-reset="' + esc(n.id) + '">' + txt + '</b></div>';
+  if (n.access_state === 'quota_blocked') return '<div class="node-stat reset-stat blocked"><span>自动恢复</span><b>' + esc(resetRuleOf(n)) + '</b>' +
+    '<small data-node-reset="' + esc(n.id) + '">配额归零后恢复 · ' + txt + '</small></div>';
+  return '<div class="node-stat reset-stat"><span>自动归零</span><b>' + esc(resetRuleOf(n)) + '</b>' +
+    '<small data-node-reset="' + esc(n.id) + '">' + txt + '</small></div>';
 }
-/* 定时重置「起始时间」：格式 日:时:分（如 21:00:00 = 每月 21 日 00:00 整）。 */
+function resetRuleOf(n) {
+  if (!(n && n.reset_day >= 1)) return '未设置';
+  return '每月 ' + n.reset_day + ' 日 ' + String(n.reset_time || '00:00:00');
+}
+/* 每月自动归零计划：D:HH:MM:SS（30 日 / 24 时 / 60 分 / 60 秒）。 */
 function parseResetSpec(spec) {
-  var m = /^(\d{1,2}):(\d{1,2}):(\d{1,2})$/.exec(String(spec || '').trim());
+  var m = /^(\d{1,2}):(\d{2}):(\d{2}):(\d{2})$/.exec(String(spec || '').trim());
   if (!m) return null;
-  var day = parseInt(m[1], 10), hh = parseInt(m[2], 10), mm = parseInt(m[3], 10);
-  if (!(day >= 1 && day <= 30) || hh > 23 || mm > 59) return null;
-  return { day: day, time: pad2(hh) + ':' + pad2(mm) + ':00' };
+  var day = parseInt(m[1], 10), hh = parseInt(m[2], 10);
+  var mm = parseInt(m[3], 10), ss = parseInt(m[4], 10);
+  if (!(day >= 1 && day <= 30) || hh > 23 || mm > 59 || ss > 59) return null;
+  return { day: day, hour: hh, minute: mm, second: ss, time: pad2(hh) + ':' + pad2(mm) + ':' + pad2(ss) };
 }
 function resetSpecOf(n) {
   if (!(n.reset_day >= 1)) return '';
   var t = String(n.reset_time || '00:00:00').split(':');
-  return n.reset_day + ':' + (t[0] || '00') + ':' + (t[1] || '00');
+  return n.reset_day + ':' + pad2(parseInt(t[0], 10) || 0) + ':' + pad2(parseInt(t[1], 10) || 0) + ':' + pad2(parseInt(t[2], 10) || 0);
 }
 function friendlyReset(spec) {
   var p = parseResetSpec(spec);
-  return p ? ('每月 ' + p.day + ' 日 ' + p.time.slice(0, 5)) : '';
+  return p ? (p.day + ' 日 ' + p.time) : '';
 }
-function updateResetHint(spec) {
-  var el = document.getElementById('pol-reset-hint');
-  if (!el) return;
-  if (!String(spec || '').trim()) { el.textContent = '选择每月自动重置的日期与时刻'; return; }
-  var p = parseResetSpec(spec);
-  el.textContent = p ? ('每月 ' + p.day + ' 日 ' + p.time.slice(0, 5) + ' 自动重置')
-                     : '范围：日 1~30、时 00~23、分 00~59';
-}
-// applyResetSpec 同步按钮回显 + data-spec + 提示文案。
 function applyResetSpec(spec) {
+  var p = parseResetSpec(spec);
   var btn = document.getElementById('pol-reset-spec');
-  if (btn) btn.setAttribute('data-spec', spec || '');
-  var v = document.getElementById('pol-reset-spec-value');
-  if (v) v.textContent = friendlyReset(spec) || '选择日期与时刻';
-  updateResetHint(spec);
-}
-// setResetDependent 处理「定时重置依附于流量配额」的置灰/禁用联动。
-function setResetDependent(quotaOn) {
-  var row = document.getElementById('pol-reset-row');
-  var box = document.getElementById('pol-reset-box');
-  var cb = document.getElementById('pol-reset-enable');
-  var dep = document.getElementById('pol-reset-depend');
-  if (row) row.classList.toggle('disabled', !quotaOn);
-  if (cb) cb.disabled = !quotaOn;
-  if (dep) dep.classList.toggle('hidden', !!quotaOn);
-  if (!quotaOn) {
-    if (cb) cb.checked = false;
-    if (box) box.classList.add('hidden');
-  }
+  if (btn) btn.setAttribute('data-spec', p ? spec : '');
+  setText('pol-reset-spec-value', p ? friendlyReset(spec) : '请选择');
+  setText('pol-reset-rule', p ? ('每月 ' + p.day + ' 日 ' + p.time) : '每月 —');
+  setText('pol-reset-hint', p ? '按面板时区执行，精确到秒' : '完整支持 30 日 × 24 时 × 60 分 × 60 秒');
 }
 
-/* ---------- 起始时间滚轮选择器 ---------- */
-var resetPicker = { day: 21, hour: 0, min: 0, built: false };
+/* ---------- 每月归零时间滚轮：日 / 时 / 分 / 秒 ---------- */
+var resetPicker = { day: 1, hour: 0, minute: 0, second: 0, built: false, raf: {} };
 function buildWheel(col, lo, hi) {
   var sc = document.querySelector('[data-col="' + col + '"]');
   sc.innerHTML = '';
   var frag = document.createDocumentFragment();
-  function spacer() { var d = document.createElement('div'); d.className = 'wheel-item'; d.style.visibility = 'hidden'; return d; }
+  function spacer() { var d = document.createElement('div'); d.className = 'wheel-item spacer'; return d; }
   frag.appendChild(spacer()); frag.appendChild(spacer());
-  for (var v = lo; v <= hi; v++) { var d = document.createElement('div'); d.className = 'wheel-item'; d.dataset.v = v; d.textContent = pad2(v); frag.appendChild(d); }
+  for (var v = lo; v <= hi; v++) {
+    var d = document.createElement('div');
+    d.className = 'wheel-item'; d.dataset.v = v;
+    d.textContent = pad2(v); frag.appendChild(d);
+  }
   frag.appendChild(spacer()); frag.appendChild(spacer());
   sc.appendChild(frag);
-  sc.addEventListener('scroll', function () { onWheelScroll(col); });
+  sc.addEventListener('scroll', function () {
+    cancelAnimationFrame(resetPicker.raf[col]);
+    resetPicker.raf[col] = requestAnimationFrame(function () { onWheelScroll(col); });
+  }, { passive: true });
 }
 function onWheelScroll(col) {
   var sc = document.querySelector('[data-col="' + col + '"]');
   var items = sc.querySelectorAll('.wheel-item[data-v]');
-  var n = items.length; if (!n) return;
-  var idx = Math.max(0, Math.min(n - 1, Math.round(sc.scrollTop / 40)));
+  var idx = Math.max(0, Math.min(items.length - 1, Math.round(sc.scrollTop / 40)));
   resetPicker[col] = parseInt(items[idx].dataset.v, 10);
-  for (var i = 0; i < n; i++) items[i].classList.toggle('sel', i === idx);
+  for (var i = 0; i < items.length; i++) items[i].classList.toggle('sel', i === idx);
+  updatePickerPreview();
 }
-function positionWheel(col, idx) {
+function positionWheel(col, value) {
   var sc = document.querySelector('[data-col="' + col + '"]');
-  var n = sc.querySelectorAll('.wheel-item[data-v]').length;
-  idx = Math.max(0, Math.min(n - 1, idx));
-  sc.scrollTop = idx * 40;
+  var idx = col === 'day' ? value - 1 : value;
+  sc.scrollTop = Math.max(0, idx) * 40;
   onWheelScroll(col);
 }
+function updatePickerPreview() {
+  setText('reset-picker-preview', '第 ' + resetPicker.day + ' 日 ' + pad2(resetPicker.hour) + ':' + pad2(resetPicker.minute) + ':' + pad2(resetPicker.second));
+}
 function openResetPicker() {
-  if (!resetPicker.built) { buildWheel('day', 1, 30); buildWheel('hour', 0, 23); buildWheel('min', 0, 59); resetPicker.built = true; }
-  var spec = document.getElementById('pol-reset-spec').getAttribute('data-spec') || '21:00:00';
-  var p = parseResetSpec(spec) || { day: 21, time: '00:00:00' };
-  resetPicker.day = p.day;
-  resetPicker.hour = parseInt(p.time.slice(0, 2), 10);
-  resetPicker.min = parseInt(p.time.slice(3, 5), 10);
-  positionWheel('day', resetPicker.day - 1);
-  positionWheel('hour', resetPicker.hour);
-  positionWheel('min', resetPicker.min);
+  if (!resetPicker.built) {
+    buildWheel('day', 1, 30); buildWheel('hour', 0, 23);
+    buildWheel('minute', 0, 59); buildWheel('second', 0, 59);
+    resetPicker.built = true;
+  }
+  var spec = document.getElementById('pol-reset-spec').getAttribute('data-spec') || '1:00:00:00';
+  var p = parseResetSpec(spec) || { day: 1, hour: 0, minute: 0, second: 0 };
+  resetPicker.day = p.day; resetPicker.hour = p.hour;
+  resetPicker.minute = p.minute; resetPicker.second = p.second;
+  positionWheel('day', p.day); positionWheel('hour', p.hour);
+  positionWheel('minute', p.minute); positionWheel('second', p.second);
+  updatePickerPreview();
   document.getElementById('reset-picker-mask').classList.add('on');
   document.getElementById('reset-picker').classList.add('on');
+  document.body.classList.add('picker-open');
 }
 function closeResetPicker() {
   document.getElementById('reset-picker-mask').classList.remove('on');
   document.getElementById('reset-picker').classList.remove('on');
+  document.body.classList.remove('picker-open');
 }
 function confirmResetPicker() {
-  applyResetSpec(resetPicker.day + ':' + pad2(resetPicker.hour) + ':' + pad2(resetPicker.min));
+  applyResetSpec(resetPicker.day + ':' + pad2(resetPicker.hour) + ':' + pad2(resetPicker.minute) + ':' + pad2(resetPicker.second));
   closeResetPicker();
 }
 function nodeStatus(n) {
-  if (n.quota_state === 'exceeded') return '<span class="status-pill danger">流量已用尽</span>';
-  if (n.ip_limit_state === 'exceeded') return '<span class="status-pill warn">IP 已达上限</span>';
-  return '<span class="status-pill ok">正常</span>';
+  if (n.access_state === 'quota_blocked' || n.quota_state === 'exceeded') return '<span class="status-pill danger" data-node-status="' + esc(n.id) + '">已暂停接入</span>';
+  if (n.ip_limit_state === 'exceeded') return '<span class="status-pill warn" data-node-status="' + esc(n.id) + '">IP 已达上限</span>';
+  return '<span class="status-pill ok" data-node-status="' + esc(n.id) + '">' + accessText(n) + '</span>';
 }
 function renderNodeCards(s) {
   var host = document.getElementById('node-cards');
@@ -245,8 +269,8 @@ function renderNodeCards(s) {
       '<div class="node-stats">' +
         '<div class="node-stat"><span>累计流量</span><b>' + fmtBytes(total) + '</b></div>' +
         quotaLine(n) +
-        '<div class="node-stat"><span>TCP 连接</span><b data-node-live="' + esc(n.id) + '" data-kind="conns">—</b></div>' +
-        '<div class="node-stat"><span>UDP 会话</span><b data-node-live="' + esc(n.id) + '" data-kind="conns_udp">—</b></div>' +
+        '<div class="node-stat"><span>节点接入</span><b data-node-access="' + esc(n.id) + '">' + esc(accessText(n)) + '</b></div>' +
+        '<div class="node-stat"><span>TCP / UDP</span><b><span data-node-live="' + esc(n.id) + '" data-kind="conns">—</span> / <span data-node-live="' + esc(n.id) + '" data-kind="conns_udp">—</span></b></div>' +
         resetLine(n) +
       '</div>' +
       '<button class="ip-strip" data-view-ips="' + esc(n.id) + '">' +
@@ -278,6 +302,7 @@ function renderNodeSelect(s) {
 /* ---------- 渲染：实时（高频 live） ---------- */
 function renderLive(v) {
   state.live = v;
+  syncServerClock(v.now);
   var healthy = v.healthy, live = v.rate_known !== false;
   setText('status-txt', healthy ? '实时监控中' : (v.error ? '采集异常' : '等待采集'));
   document.getElementById('pulse').className = 'pulse' + (live ? '' : ' stale');
@@ -307,12 +332,25 @@ function renderLive(v) {
     var val = (typeof n.active_ip_count === 'number') ? n.active_ip_count : 0;
     el.textContent = n.ip_limit_enabled ? (val + ' / ' + n.ip_limit_max) : val;
   });
-  // 下次重置倒计时（每秒刷新，精确到秒）
+  // 节点接入状态由后端配额状态权威决定（与 nft 阻断同源）。
+  document.querySelectorAll('[data-node-access]').forEach(function (el) {
+    var id = el.getAttribute('data-node-access'), n = byId[id];
+    if (!n) return;
+    el.textContent = n.access_state === 'quota_blocked' ? '已暂停接入' : (n.quota_enabled ? '节点可连接' : '不限流量');
+  });
+  document.querySelectorAll('[data-node-status]').forEach(function (el) {
+    var id = el.getAttribute('data-node-status'), n = byId[id];
+    if (!n) return;
+    var blocked = n.access_state === 'quota_blocked';
+    el.className = 'status-pill ' + (blocked ? 'danger' : 'ok');
+    el.textContent = blocked ? '已暂停接入' : (n.quota_enabled ? '节点可连接' : '不限流量');
+  });
+  // 自动归零倒计时（服务器时钟校准，实时接口高频刷新）
   document.querySelectorAll('[data-node-reset]').forEach(function (el) {
     var id = el.getAttribute('data-node-reset'), n = byId[id];
     if (!n || !n.reset_enabled || !n.reset_next_at) return;
-    var secs = n.reset_next_at - Math.floor(Date.now() / 1000);
-    el.textContent = secs <= 0 ? '待执行' : formatCountdown(secs);
+    var secs = n.reset_next_at - serverNowUnix();
+    el.textContent = secs <= 0 ? '待执行' : ((n.access_state === 'quota_blocked' ? '归零后恢复 · ' : '剩余 ') + formatCountdown(secs));
   });
 }
 
@@ -395,18 +433,19 @@ function showPolicy(nodeId) {
   policyState.summaryNode = n;
   document.getElementById('drawer-node-name').textContent = n.name;
   document.getElementById('pol-quota-used').textContent = fmtBytes(n.quota_used_bytes || 0);
+  document.getElementById('pol-access-state').textContent = accessText(n);
   document.getElementById('pol-ip-active').textContent = (n.active_ip_count || 0);
   document.getElementById('pol-quota-enable').checked = !!n.quota_enabled;
   document.getElementById('pol-ip-enable').checked = !!n.ip_limit_enabled;
   document.getElementById('pol-quota-box').classList.toggle('hidden', !n.quota_enabled);
   document.getElementById('pol-ip-box').classList.toggle('hidden', !n.ip_limit_enabled);
-  // 定时重置（依附于流量配额；配额关闭时整张卡片置灰禁用）
+  // 每月自动归零是流量配额内部的计费周期。
   var quotaOn = !!n.quota_enabled;
-  setResetDependent(quotaOn);
-  document.getElementById('pol-reset-enable').checked = quotaOn && !!n.reset_enabled;
-  document.getElementById('pol-reset-box').classList.toggle('hidden', !(quotaOn && n.reset_enabled));
+  var resetOn = quotaOn && !!n.reset_enabled;
+  document.getElementById('pol-reset-enable').checked = resetOn;
+  document.getElementById('pol-reset-box').classList.toggle('hidden', !resetOn);
   applyResetSpec(resetSpecOf(n));
-  document.getElementById('pol-reset-next').textContent = (quotaOn && n.reset_enabled && n.reset_next_at)
+  document.getElementById('pol-reset-next').textContent = (resetOn && n.reset_next_at)
     ? formatResetFuture(n.reset_next_at) : '—';
   if (n.quota_enabled && n.quota_limit_bytes > 0) {
     var g = n.quota_limit_bytes / (1024 * 1024 * 1024);
@@ -453,7 +492,7 @@ function savePolicy() {
   var resetOn = quotaOn && document.getElementById('pol-reset-enable').checked;
   var parsed = parseResetSpec(document.getElementById('pol-reset-spec').getAttribute('data-spec'));
   if (resetOn && !parsed) {
-    showPolError('请先选择起始时间（每月几号几点）');
+    showPolError('请设置完整的每月归零时间（日、时、分、秒）');
     return;
   }
 
@@ -550,8 +589,10 @@ document.getElementById('pol-quota-reset').addEventListener('click', resetQuota)
 document.getElementById('ips-close').addEventListener('click', function () { closeDrawer('ips-drawer'); });
 document.getElementById('pol-quota-enable').addEventListener('change', function (e) {
   document.getElementById('pol-quota-box').classList.toggle('hidden', !e.target.checked);
-  // 配额开关联动：关闭配额时定时重置置灰禁用，开启时解除。
-  setResetDependent(e.target.checked);
+  if (!e.target.checked) {
+    document.getElementById('pol-reset-enable').checked = false;
+    document.getElementById('pol-reset-box').classList.add('hidden');
+  }
 });
 document.getElementById('pol-ip-enable').addEventListener('change', function (e) {
   document.getElementById('pol-ip-box').classList.toggle('hidden', !e.target.checked);

@@ -25,13 +25,13 @@ func TestParseResetTime(t *testing.T) {
 		in   string
 		want int
 	}{
-		{"00:00", 0},
-		{"08:00", 28800},
-		{"23:59", 86340},
+		{"00:00", -1},
+		{"08:00", -1},
+		{"23:59", -1},
 		{"00:00:00", 0},
 		{"08:00:00", 28800},
 		{"23:59:59", 86399},
-		// 非法：段数错 / 范围错 / 非数字
+		// 非法：缺秒 / 段数错 / 范围错 / 非数字
 		{"8:00", -1}, {"8:00:00", -1}, {"24:00", -1}, {"23:60", -1},
 		{"23:59:60", -1}, {"", -1}, {"ab:cd", -1}, {"12:00:00:00", -1}, {"12-00", -1},
 	}
@@ -66,6 +66,12 @@ func TestNextResetMonthlyDay21(t *testing.T) {
 func TestNextResetSameMonth(t *testing.T) {
 	now := at(2026, time.August, 10, 8, 0, 0)
 	equalUnix(t, "next", NextResetAt(now, 21, 9*3600+30*60, cst), at(2026, time.August, 21, 9, 30, 0))
+}
+
+func TestNextResetKeepsExactSecond(t *testing.T) {
+	now := at(2026, time.August, 10, 8, 0, 0)
+	tod := 9*3600 + 30*60 + 47
+	equalUnix(t, "next", NextResetAt(now, 21, tod, cst), at(2026, time.August, 21, 9, 30, 47))
 }
 
 // 严格大于 now：now 恰好等于配置时刻时返回下个月。
@@ -109,12 +115,12 @@ func TestAdvanceNextPastRecoversToCalendarDay(t *testing.T) {
 func TestScheduleInvariants(t *testing.T) {
 	base := at(2026, time.January, 31, 23, 59, 59).Unix()
 	for i := 0; i < 24; i++ {
-		nx := AdvanceNext(base, 21, 9*3600+30*60, cst)
+		nx := AdvanceNext(base, 21, 9*3600+30*60+37, cst)
 		if nx <= base {
 			t.Fatalf("第 %d 次推进未前进: %d -> %d", i, base, nx)
 		}
 		g := time.Unix(nx, 0).In(cst)
-		if g.Day() != 21 || g.Hour() != 9 || g.Minute() != 30 || g.Second() != 0 {
+		if g.Day() != 21 || g.Hour() != 9 || g.Minute() != 30 || g.Second() != 37 {
 			t.Fatalf("推进后相位漂移: %s", g)
 		}
 		base = nx

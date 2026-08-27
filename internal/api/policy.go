@@ -114,7 +114,7 @@ func (s *Server) putPolicy(w http.ResponseWriter, r *http.Request, nodeID string
 	cur.IPLimitMax = req.IPLimitMax
 
 	// 定时重置：仅当显式传了字段才修改（缺省保留原值）。
-	// 时刻收 HH:MM / HH:MM:SS 两种宽度，入库前规范化为 HH:MM:SS（秒固定 00）。
+	// 时刻严格使用 HH:MM:SS，完整保留时/分/秒。
 	resetChanged := false
 	if req.ResetEnabled != nil && *req.ResetEnabled != cur.ResetEnabled {
 		cur.ResetEnabled = *req.ResetEnabled
@@ -128,7 +128,7 @@ func (s *Server) putPolicy(w http.ResponseWriter, r *http.Request, nodeID string
 		secs := policy.ParseResetTime(*req.ResetTime)
 		if secs < 0 {
 			s.sendJSON(w, r, http.StatusBadRequest,
-				map[string]string{"error": "重置时刻需为 HH:MM 或 HH:MM:SS"})
+				map[string]string{"error": "重置时刻需为 HH:MM:SS"})
 			return
 		}
 		if canon := policy.SecondsToTimeOfDay(secs); canon != cur.ResetTime {
@@ -147,14 +147,15 @@ func (s *Server) putPolicy(w http.ResponseWriter, r *http.Request, nodeID string
 				map[string]string{"error": "开启定时重置前需先开启流量配额"})
 			return
 		}
-		// 配额被关闭而重置未显式再开启 → 防御性关闭（保留日/时刻配置，下次开启配额可再用）。
+		// 配额被关闭而重置未显式再开启 → 防御性关闭。
+		// 保留日期/时分秒配置，下次开启配额时可继续使用。
 		cur.ResetEnabled = false
 		cur.ResetNextAt = 0
 	}
 	// 开启定时重置且（刚开启 / 日或时刻变了 / 从未算过）→ 重算下次触发时间。
 	if cur.ResetEnabled && cur.QuotaEnabled && (cur.ResetNextAt == 0 || resetChanged) {
 		cur.ResetNextAt = policy.NextResetAt(s.policy.Now(), cur.ResetDay,
-			policy.ParseResetTime(cur.ResetTime), nil)
+			policy.ParseResetTime(cur.ResetTime), s.policy.Location())
 	} else if !cur.ResetEnabled {
 		// 关闭时清空下次时间，避免残留误导。
 		cur.ResetNextAt = 0
@@ -201,17 +202,19 @@ func (s *Server) activeIPs(w http.ResponseWriter, r *http.Request, nodeID string
 
 func policyStateDefault() policy.State {
 	return policy.State{
-		QuotaEnabled: false,
-		QuotaLimit:   0,
-		QuotaUsed:    0,
-		QuotaState:   "unlimited",
-		IPLimitOn:    false,
-		IPLimitMax:   0,
-		ActiveIPs:    0,
-		IPLimitState: "unlimited",
-		ResetEnabled: false,
-		ResetDay:     1,
-		ResetTime:    "00:00:00",
-		ResetNextAt:  0,
+		QuotaEnabled:   false,
+		QuotaLimit:     0,
+		QuotaUsed:      0,
+		QuotaRemaining: 0,
+		QuotaState:     "unlimited",
+		AccessState:    policy.AccessStateUnlimited,
+		IPLimitOn:      false,
+		IPLimitMax:     0,
+		ActiveIPs:      0,
+		IPLimitState:   "unlimited",
+		ResetEnabled:   false,
+		ResetDay:       1,
+		ResetTime:      "00:00:00",
+		ResetNextAt:    0,
 	}
 }

@@ -173,42 +173,49 @@
         <div><b>流量配额</b><small>超出后仅阻断该节点端口</small></div>
         <input type="checkbox" id="pol-quota-enable" class="sw-input"><span class="sw" aria-hidden="true"></span>
       </label>
-      <div class="field summary-field">
-        <small>当前已用</small>
-        <output id="pol-quota-used">—</output>
+      <div class="field summary-field quota-summary">
+        <div><small>当前已用</small><output id="pol-quota-used">—</output></div>
+        <div><small>节点接入</small><output id="pol-access-state">—</output></div>
       </div>
-      <div id="pol-quota-box" class="box hidden">
-        <div class="field row">
-          <input type="number" id="pol-quota-val" min="1" step="1" inputmode="decimal" placeholder="500">
-          <select id="pol-quota-unit">
-            <option value="GiB" selected>GiB</option>
-            <option value="TiB">TiB</option>
-          </select>
+        <div id="pol-quota-box" class="quota-plan hidden">
+          <div class="quota-grid">
+            <div class="field">
+              <small>每期额度</small>
+              <div class="field row">
+                <input type="number" id="pol-quota-val" min="1" step="1" inputmode="decimal" placeholder="500">
+                <select id="pol-quota-unit">
+                  <option value="GiB" selected>GiB</option>
+                  <option value="TiB">TiB</option>
+                </select>
+              </div>
+            </div>
+            <div class="quota-reset-head">
+              <div>
+                <b>每月自动归零</b>
+                <small>按日、时、分、秒重新开始计算本期用量</small>
+              </div>
+              <label class="compact-switch" aria-label="每月自动归零">
+                <input type="checkbox" id="pol-reset-enable" class="sw-input"><span class="sw" aria-hidden="true"></span>
+              </label>
+            </div>
+            <div id="pol-reset-box" class="reset-plan hidden">
+              <button type="button" id="pol-reset-spec" class="schedule-button" data-spec="">
+                <span>
+                  <small>归零时间</small>
+                  <b id="pol-reset-spec-value">请选择</b>
+                </span>
+                <span class="schedule-edit">设置 ›</span>
+              </button>
+              <div class="schedule-facts">
+                <div><small>执行规则</small><b id="pol-reset-rule">每月 —</b></div>
+                <div><small>下次归零</small><b id="pol-reset-next">—</b></div>
+              </div>
+              <small class="schedule-note" id="pol-reset-hint">完整支持 30 日 × 24 时 × 60 分 × 60 秒</small>
+            </div>
+          </div>
+          <button type="button" class="ghost-btn" id="pol-quota-reset">立即归零本期用量（累计历史不变）</button>
         </div>
-      </div>
-      <button type="button" class="ghost-btn" id="pol-quota-reset">重置当前使用量（保留历史）</button>
-    </section>
-
-    <section class="sect">
-      <label class="switch-row" id="pol-reset-row">
-        <div><b>定时重置流量</b><small>每月固定时间自动把本期已用流量归零（保留历史）</small></div>
-        <input type="checkbox" id="pol-reset-enable" class="sw-input" disabled><span class="sw" aria-hidden="true"></span>
-      </label>
-      <div class="field summary-field">
-        <small>下次重置</small>
-        <output id="pol-reset-next">—</output>
-        <small class="hint hidden" id="pol-reset-depend">需先开启流量配额，才能定时归零已用流量</small>
-      </div>
-      <div id="pol-reset-box" class="box hidden">
-        <div class="field">
-          <small>起始时间（每月几日几点）</small>
-          <button type="button" id="pol-reset-spec" class="picker-field" data-spec="">
-            <span id="pol-reset-spec-value">选择日期与时刻</span><span class="chev">›</span>
-          </button>
-          <small class="hint" id="pol-reset-hint">选择每月自动重置的日期与时刻</small>
-        </div>
-      </div>
-    </section>
+      </section>
 
     <div class="err" id="pol-error"></div>
   </div>
@@ -235,28 +242,44 @@
 
 <div id="toast" role="status"></div>
 
-<!-- ===== 起始时间滚轮选择器 ===== -->
+<!-- ===== 每月归零时间选择器 ===== -->
 <div class="picker-mask" id="reset-picker-mask"></div>
-<div class="picker-sheet" id="reset-picker" role="dialog" aria-modal="true">
+<div class="picker-sheet" id="reset-picker" role="dialog" aria-modal="true" aria-labelledby="reset-picker-title">
   <header class="picker-head">
-    <button type="button" class="btn ghost" id="reset-picker-cancel">取消</button>
-    <b>起始时间</b>
-    <button type="button" class="btn primary" id="reset-picker-ok">确定</button>
+    <button type="button" class="picker-action cancel" id="reset-picker-cancel">取消</button>
+    <div>
+      <b id="reset-picker-title">每月归零时间</b>
+      <small>30 日 · 24 时 · 60 分 · 60 秒</small>
+    </div>
+    <button type="button" class="picker-action done" id="reset-picker-ok">完成</button>
   </header>
+  <div class="picker-preview">
+    <small>每月执行</small>
+    <b id="reset-picker-preview">第 1 日 00:00:00</b>
+  </div>
   <div class="wheel-group">
     <div class="wheel-col">
+      <small class="wheel-label">日期</small>
       <div class="wheel"><div class="wheel-band"></div><div class="wheel-scroll" data-col="day"></div></div>
       <small class="wheel-unit">日</small>
     </div>
     <div class="wheel-col">
+      <small class="wheel-label">小时</small>
       <div class="wheel"><div class="wheel-band"></div><div class="wheel-scroll" data-col="hour"></div></div>
       <small class="wheel-unit">时</small>
     </div>
     <div class="wheel-col">
-      <div class="wheel"><div class="wheel-band"></div><div class="wheel-scroll" data-col="min"></div></div>
+      <small class="wheel-label">分钟</small>
+      <div class="wheel"><div class="wheel-band"></div><div class="wheel-scroll" data-col="minute"></div></div>
       <small class="wheel-unit">分</small>
     </div>
+    <div class="wheel-col">
+      <small class="wheel-label">秒钟</small>
+      <div class="wheel"><div class="wheel-band"></div><div class="wheel-scroll" data-col="second"></div></div>
+      <small class="wheel-unit">秒</small>
+    </div>
   </div>
+  <p class="picker-footnote">第 29、30 日遇到二月时，将在当月最后一天执行。</p>
 </div>
 
 <script src="app.js"></script>

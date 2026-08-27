@@ -118,6 +118,8 @@ func (s *Server) attachPolicyToSummary(sum *traffic.Summary) {
 		// 未启用时 state 留空（配合 omitempty 不输出），启用时才有 ok/exceeded。
 		if st.QuotaEnabled {
 			sum.Nodes[i].QuotaState = st.QuotaState
+			sum.Nodes[i].QuotaRemaining = st.QuotaRemaining
+			sum.Nodes[i].AccessState = st.AccessState
 		}
 		sum.Nodes[i].IPLimitOn = st.IPLimitOn
 		sum.Nodes[i].IPLimitMax = st.IPLimitMax
@@ -125,11 +127,12 @@ func (s *Server) attachPolicyToSummary(sum *traffic.Summary) {
 		if st.IPLimitOn {
 			sum.Nodes[i].IPLimitState = st.IPLimitState
 		}
-		// 定时重置：配额开启时才下发（依附于配额才有「归零」语义）。
+		// 归零日期/时分秒始终下发，关闭配额后仍保留用户上次方案；
+		// 只有真正启用「配额 + 自动归零」时才下发 enabled / next_at。
+		sum.Nodes[i].ResetDay = st.ResetDay
+		sum.Nodes[i].ResetTime = st.ResetTime
 		if st.ResetEnabled && st.QuotaEnabled {
 			sum.Nodes[i].ResetEnabled = true
-			sum.Nodes[i].ResetDay = st.ResetDay
-			sum.Nodes[i].ResetTime = st.ResetTime
 			sum.Nodes[i].ResetNextAt = st.ResetNextAt
 		}
 	}
@@ -167,6 +170,9 @@ func (s *Server) attachPolicyToLive(live *traffic.Live) {
 			live.Nodes[i].ActiveIPs = st.ActiveIPs
 			live.Nodes[i].IPLimitOn = st.IPLimitOn
 			live.Nodes[i].IPLimitMax = st.IPLimitMax
+			live.Nodes[i].QuotaEnabled = st.QuotaEnabled
+			live.Nodes[i].QuotaRemaining = st.QuotaRemaining
+			live.Nodes[i].AccessState = st.AccessState
 			if st.ResetEnabled && st.QuotaEnabled {
 				live.Nodes[i].ResetEnabled = true
 				live.Nodes[i].ResetNextAt = st.ResetNextAt

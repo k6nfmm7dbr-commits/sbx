@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/k6nfmm7dbr-commits/sbx/internal/config"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/database"
@@ -57,6 +58,51 @@ func TestToI64JSONNumber(t *testing.T) {
 		if got := toI64(c.in); got != c.want {
 			t.Errorf("toI64(%v)=%d, want %d", c.in, got, c.want)
 		}
+	}
+}
+
+func TestPolicyResetScheduleSecondPrecision(t *testing.T) {
+	dir := t.TempDir()
+	nodesFile := filepath.Join(dir, "nodes.json")
+	writeTemp(t, nodesFile, `[{"id":1,"type":"vless","port":443,"name":"n1"}]`)
+	ts, pol := newPolicyTestServer(t, testToken, nodesFile)
+	pol.SetLocation(time.FixedZone("UTC+8", 8*3600))
+	pol.SetClock(func() time.Time {
+		return time.Date(2026, time.August, 10, 8, 0, 0, 0, time.FixedZone("UTC+8", 8*3600))
+	})
+
+	// 配额 + 自动归零一次保存；秒=47 必须完整保留并进入 next_at。
+	good := `{"quota_enabled":true,"quota_limit_bytes":1073741824,"reset_enabled":true,"reset_day":21,"reset_time":"09:30:47"}`
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/nodes/1/policy", strings.NewReader(good))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got policy.State
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		resp.Body.Close()
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	wantNext := time.Date(2026, time.August, 21, 9, 30, 47, 0, time.FixedZone("UTC+8", 8*3600)).Unix()
+	if resp.StatusCode != http.StatusOK || got.ResetTime != "09:30:47" || got.ResetNextAt != wantNext {
+		t.Fatalf("秒级归零计划错误: status=%d state=%+v want_next=%d", resp.StatusCode, got, wantNext)
+	}
+
+	// 缺少秒字段必须拒绝，避免悄悄补 00 造成用户误解。
+	bad := `{"quota_enabled":true,"quota_limit_bytes":1073741824,"reset_enabled":true,"reset_day":21,"reset_time":"09:30"}`
+	req, _ = http.NewRequest(http.MethodPut, ts.URL+"/api/nodes/1/policy", strings.NewReader(bad))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("缺秒 HH:MM 应 400, got %d", resp.StatusCode)
 	}
 }
 

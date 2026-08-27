@@ -31,7 +31,14 @@ import (
 // 定时重置校验错误。
 var (
 	errInvalidResetDay  = errors.New("重置日必须在 1~30 之间")
-	errInvalidResetTime = errors.New("重置时刻需为 HH:MM 或 HH:MM:SS")
+	errInvalidResetTime = errors.New("重置时刻需为 HH:MM:SS")
+)
+
+// 节点接入状态（由流量配额策略权威计算，并与 nft 阻断使用同一判定）。
+const (
+	AccessStateUnlimited    = "unlimited"     // 未启用配额，策略不限制接入
+	AccessStateOpen         = "open"          // 配额开启且仍有剩余
+	AccessStateQuotaBlocked = "quota_blocked" // 配额用尽，节点端口被策略阻断
 )
 
 // State 是单个节点的策略状态快照（面向 API / UI）。
@@ -40,6 +47,10 @@ type State struct {
 	QuotaLimit   int64  `json:"quota_limit_bytes"`
 	QuotaUsed    int64  `json:"quota_used_bytes"`
 	QuotaState   string `json:"quota_state"` // unlimited / ok / exceeded
+	// QuotaRemaining 是本期剩余额度；未启用配额时为 0。
+	QuotaRemaining int64 `json:"quota_remaining_bytes"`
+	// AccessState 是配额策略对节点接入的权威状态，与 nft 阻断判定同源。
+	AccessState  string `json:"access_state"` // unlimited / open / quota_blocked
 	IPLimitOn    bool   `json:"ip_limit_enabled"`
 	IPLimitMax   int    `json:"ip_limit_max"`
 	ActiveIPs    int    `json:"active_ip_count"`
@@ -49,7 +60,7 @@ type State struct {
 	ResetEnabled bool `json:"reset_enabled"`
 	// ResetDay 每月第几日（1~30）。
 	ResetDay int `json:"reset_day"`
-	// ResetTime "HH:MM:SS"（秒固定 00）。
+	// ResetTime "HH:MM:SS"（时/分/秒完整配置）。
 	ResetTime string `json:"reset_time"`
 	// ResetNextAt 下次重置 Unix 秒。
 	ResetNextAt int64 `json:"reset_next_at"`
@@ -142,11 +153,19 @@ func (s *Service) SetUDPTTL(d time.Duration) { s.udpTTL = d }
 // SetLocation 覆盖定时重置的本地时区（测试用）。
 func (s *Service) SetLocation(loc *time.Location) { s.location = loc }
 
+// Location 返回定时重置使用的面板时区；未注入时回退 time.Local。
+func (s *Service) Location() *time.Location {
+	if s.location != nil {
+		return s.location
+	}
+	return time.Local
+}
+
 // Now 返回当前时间（注入时钟）。
 func (s *Service) Now() time.Time { return s.now() }
 
 // ValidateReset 校验定时重置配置合法性。
-// 关闭时无约束；开启时要求日 1~30、时刻为 HH:MM 或 HH:MM:SS。
+// 关闭时无约束；开启时要求日 1~30、时刻严格为 HH:MM:SS。
 func (s *Service) ValidateReset(c Config) error {
 	if !c.ResetEnabled {
 		return nil

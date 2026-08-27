@@ -314,6 +314,9 @@ func TestQuotaExceededReconcile(t *testing.T) {
 	if st["1"].QuotaState != "exceeded" {
 		t.Fatalf("limit<used 应 exceeded, got %s", st["1"].QuotaState)
 	}
+	if st["1"].AccessState != AccessStateQuotaBlocked || st["1"].QuotaRemaining != 0 {
+		t.Fatalf("配额用尽必须暂停节点接入且剩余为 0: %+v", st["1"])
+	}
 }
 
 // TestAutoResetAtDue 锁定：定时重置到期后，reconcile 会把 baseline 抬到当前
@@ -344,6 +347,12 @@ func TestAutoResetAtDue(t *testing.T) {
 	st, _ := s.Snapshot()
 	if st["1"].QuotaUsed != 0 {
 		t.Fatalf("到期应已重置 used=0, got %d", st["1"].QuotaUsed)
+	}
+	if st["1"].AccessState != AccessStateOpen || st["1"].QuotaRemaining != 1000 {
+		t.Fatalf("自动归零后应立即恢复节点接入并恢复全部额度: %+v", st["1"])
+	}
+	if st["1"].QuotaState != "ok" {
+		t.Fatalf("自动归零后配额状态应恢复为 ok: %+v", st["1"])
 	}
 	if st["1"].ResetNextAt <= now.Unix() {
 		t.Fatalf("重置后下次时间应 > now, got %d", st["1"].ResetNextAt)

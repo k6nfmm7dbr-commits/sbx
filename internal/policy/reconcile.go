@@ -82,6 +82,7 @@ func (s *Service) reconcile(ctx context.Context) error {
 			QuotaLimit:   cfg.QuotaLimitBytes,
 			QuotaUsed:    used,
 			QuotaState:   "unlimited",
+			AccessState:  AccessStateUnlimited,
 			IPLimitOn:    cfg.IPLimitEnabled,
 			IPLimitMax:   cfg.IPLimitMax,
 			IPLimitState: "unlimited",
@@ -92,8 +93,15 @@ func (s *Service) reconcile(ctx context.Context) error {
 		}
 		if cfg.QuotaEnabled {
 			st.QuotaState = "ok"
+			st.AccessState = AccessStateOpen
+			remaining := cfg.QuotaLimitBytes - used
+			if remaining > 0 {
+				st.QuotaRemaining = remaining
+			}
 			if cfg.QuotaLimitBytes > 0 && used >= cfg.QuotaLimitBytes {
 				st.QuotaState = "exceeded"
+				st.AccessState = AccessStateQuotaBlocked
+				st.QuotaRemaining = 0
 				quotaBlocked[id] = true
 			}
 		}
