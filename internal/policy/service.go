@@ -46,10 +46,13 @@ type State struct {
 	IPLimitState string `json:"ip_limit_state"` // unlimited / ok / exceeded
 
 	// 定时重置（每月固定日自动重置）：用户可开关。
-	ResetEnabled bool   `json:"reset_enabled"`
-	ResetDay     int    `json:"reset_day"`    // 每月第几日（1~30）
-	ResetTime    string `json:"reset_time"`    // "HH:MM:SS"（秒固定 00）
-	ResetNextAt  int64  `json:"reset_next_at"` // 下次重置 Unix 秒
+	ResetEnabled bool `json:"reset_enabled"`
+	// ResetDay 每月第几日（1~30）。
+	ResetDay int `json:"reset_day"`
+	// ResetTime "HH:MM:SS"（秒固定 00）。
+	ResetTime string `json:"reset_time"`
+	// ResetNextAt 下次重置 Unix 秒。
+	ResetNextAt int64 `json:"reset_next_at"`
 }
 
 // Config 是持久化的策略配置（node_policy 表一行）。

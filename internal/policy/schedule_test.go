@@ -91,8 +91,9 @@ func TestNextResetClampShortMonth(t *testing.T) {
 func TestAdvanceNextAnchoredToConfiguredDay(t *testing.T) {
 	feb := NextResetAt(at(2026, time.February, 10, 0, 0, 0), 30, 0, cst) // 2026-02-28
 	equalUnix(t, "mar", AdvanceNext(feb, 30, 0, cst), at(2026, time.March, 30, 0, 0, 0))
-	// 常规推进：9-21 → 10-21，时刻保持
-	sep := NextResetAt(at(2026, time.September, 22, 0, 0, 0), 21, 8*3600, cst)
+	// 常规推进：9-21 08:00 → 10-21 08:00，时刻保持
+	sep := NextResetAt(at(2026, time.September, 20, 0, 0, 0), 21, 8*3600, cst) // 9-21 08:00
+	equalUnix(t, "sep", sep, at(2026, time.September, 21, 8, 0, 0))
 	equalUnix(t, "oct", AdvanceNext(sep, 21, 8*3600, cst), at(2026, time.October, 21, 8, 0, 0))
 }
 
