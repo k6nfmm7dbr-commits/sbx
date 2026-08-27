@@ -189,6 +189,31 @@
       </div>
     </section>
 
+    <section class="sect">
+      <label class="switch-row">
+        <div><b>定时重置流量</b><small>到期自动把本期已用流量归零（保留历史）</small></div>
+        <input type="checkbox" id="pol-reset-enable" class="sw-input"><span class="sw" aria-hidden="true"></span>
+      </label>
+      <div class="field summary-field">
+        <small>下次重置</small>
+        <output id="pol-reset-next">—</output>
+      </div>
+      <div id="pol-reset-box" class="box hidden">
+        <div class="field row">
+          <select id="pol-reset-period">
+            <option value="hourly">每小时</option>
+            <option value="daily">每天</option>
+            <option value="weekly">每周</option>
+            <option value="monthly" selected>每月</option>
+          </select>
+        </div>
+        <div class="field">
+          <small>重置时刻（精确到秒）</small>
+          <input type="time" step="1" id="pol-reset-time" value="00:00:00">
+        </div>
+      </div>
+    </section>
+
     <div class="err" id="pol-error"></div>
   </div>
 

@@ -125,6 +125,13 @@ func (s *Server) attachPolicyToSummary(sum *traffic.Summary) {
 		if st.IPLimitOn {
 			sum.Nodes[i].IPLimitState = st.IPLimitState
 		}
+		// 定时重置：开启时下发周期/时刻/下次时间（供节点卡片倒计时）。
+		if st.ResetEnabled {
+			sum.Nodes[i].ResetEnabled = true
+			sum.Nodes[i].ResetPeriod = st.ResetPeriod
+			sum.Nodes[i].ResetTime = st.ResetTime
+			sum.Nodes[i].ResetNextAt = st.ResetNextAt
+		}
 	}
 }
 
@@ -160,6 +167,10 @@ func (s *Server) attachPolicyToLive(live *traffic.Live) {
 			live.Nodes[i].ActiveIPs = st.ActiveIPs
 			live.Nodes[i].IPLimitOn = st.IPLimitOn
 			live.Nodes[i].IPLimitMax = st.IPLimitMax
+			if st.ResetEnabled {
+				live.Nodes[i].ResetEnabled = true
+				live.Nodes[i].ResetNextAt = st.ResetNextAt
+			}
 		}
 	}
 }

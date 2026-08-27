@@ -96,6 +96,30 @@ function quotaLine(n) {
   if (!n.quota_enabled) return '<div class="node-stat"><span>流量配额</span><b>' + fmtBytes(n.quota_used_bytes) + ' / 不限</b></div>';
   return '<div class="node-stat"><span>流量配额</span><b>' + fmtBytes(n.quota_used_bytes) + ' / ' + fmtBytes(n.quota_limit_bytes) + '</b></div>';
 }
+// 下次重置剩余时间的可读描述（每秒由 renderLive 高频刷新数字）。
+function formatCountdown(secs) {
+  if (secs == null || !(secs > 0)) return '—';
+  var d = Math.floor(secs / 86400);
+  var h = Math.floor((secs % 86400) / 3600);
+  var m = Math.floor((secs % 3600) / 60);
+  var s = secs % 60;
+  if (d > 0) return d + '天 ' + pad2(h) + ':' + pad2(m) + ':' + pad2(s);
+  if (h > 0) return pad2(h) + ':' + pad2(m) + ':' + pad2(s);
+  return pad2(m) + ':' + pad2(s);
+}
+function pad2(x) { return (x < 10 ? '0' : '') + x; }
+// 下次重置的绝对本地时间（如 8月28日 08:00:00 + 剩 5天）。
+function formatResetFuture(ts) {
+  var d = new Date(ts * 1000);
+  var secs = ts - Math.floor(Date.now() / 1000);
+  var date = (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+  return date + '（剩 ' + formatCountdown(secs) + '）';
+}
+function resetLine(n) {
+  if (!n.reset_enabled) return '';
+  var secs = n.reset_next_at ? (n.reset_next_at - Math.floor(Date.now() / 1000)) : null;
+  return '<div class="node-stat"><span>下次重置</span><b data-node-reset="' + esc(n.id) + '">' + formatCountdown(secs) + '</b></div>';
+}
 function nodeStatus(n) {
   if (n.quota_state === 'exceeded') return '<span class="status-pill danger">流量已用尽</span>';
   if (n.ip_limit_state === 'exceeded') return '<span class="status-pill warn">IP 已达上限</span>';
@@ -124,6 +148,7 @@ function renderNodeCards(s) {
         quotaLine(n) +
         '<div class="node-stat"><span>TCP 连接</span><b data-node-live="' + esc(n.id) + '" data-kind="conns">—</b></div>' +
         '<div class="node-stat"><span>UDP 会话</span><b data-node-live="' + esc(n.id) + '" data-kind="conns_udp">—</b></div>' +
+        resetLine(n) +
       '</div>' +
       '<button class="ip-strip" data-view-ips="' + esc(n.id) + '">' +
         '<span class="ip-strip-label">在线 IP</span>' +
@@ -182,6 +207,12 @@ function renderLive(v) {
     if (!n) return;
     var val = (typeof n.active_ip_count === 'number') ? n.active_ip_count : 0;
     el.textContent = n.ip_limit_enabled ? (val + ' / ' + n.ip_limit_max) : val;
+  });
+  // 下次重置倒计时（每秒刷新，精确到秒）
+  document.querySelectorAll('[data-node-reset]').forEach(function (el) {
+    var id = el.getAttribute('data-node-reset'), n = byId[id];
+    if (!n || !n.reset_enabled || !n.reset_next_at) return;
+    el.textContent = formatCountdown(n.reset_next_at - Math.floor(Date.now() / 1000));
   });
 }
 
@@ -269,6 +300,13 @@ function showPolicy(nodeId) {
   document.getElementById('pol-ip-enable').checked = !!n.ip_limit_enabled;
   document.getElementById('pol-quota-box').classList.toggle('hidden', !n.quota_enabled);
   document.getElementById('pol-ip-box').classList.toggle('hidden', !n.ip_limit_enabled);
+  // 定时重置
+  document.getElementById('pol-reset-enable').checked = !!n.reset_enabled;
+  document.getElementById('pol-reset-box').classList.toggle('hidden', !n.reset_enabled);
+  if (n.reset_period) document.getElementById('pol-reset-period').value = n.reset_period;
+  document.getElementById('pol-reset-time').value = n.reset_time || '00:00:00';
+  document.getElementById('pol-reset-next').textContent = (n.reset_enabled && n.reset_next_at)
+    ? formatResetFuture(n.reset_next_at) : '—';
   if (n.quota_enabled && n.quota_limit_bytes > 0) {
     var g = n.quota_limit_bytes / (1024 * 1024 * 1024);
     var unit = 'GiB';
@@ -310,15 +348,22 @@ function savePolicy() {
   var quotaVal = document.getElementById('pol-quota-val').value;
   var quotaUnit = document.getElementById('pol-quota-unit').value;
   var ipMax = document.getElementById('pol-ip-max').value;
+  var resetOn = document.getElementById('pol-reset-enable').checked;
+  var resetPeriod = document.getElementById('pol-reset-period').value;
+  var resetTime = document.getElementById('pol-reset-time').value || '00:00:00';
 
   var body = {
     quota_enabled: quotaOn,
     quota_limit_bytes: quotaOn ? unitToBytes(quotaVal, quotaUnit) : 0,
     ip_limit_enabled: ipOn,
-    ip_limit_max: ipOn ? Number(ipMax) : 0
+    ip_limit_max: ipOn ? Number(ipMax) : 0,
+    reset_enabled: resetOn,
+    reset_period: resetPeriod,
+    reset_time: resetTime
   };
   if (quotaOn && body.quota_limit_bytes <= 0) { showPolError('流量额度必须大于 0'); return; }
   if (ipOn && !(body.ip_limit_max >= 1)) { showPolError('最大 IP 数必须 ≥ 1'); return; }
+  if (resetOn && !/^\d{2}:\d{2}:\d{2}$/.test(resetTime)) { showPolError('重置时刻需为 HH:MM:SS'); return; }
 
   var btn = document.getElementById('pol-save');
   btn.disabled = true; btn.textContent = '保存中…';
@@ -404,4 +449,7 @@ document.getElementById('pol-quota-enable').addEventListener('change', function 
 });
 document.getElementById('pol-ip-enable').addEventListener('change', function (e) {
   document.getElementById('pol-ip-box').classList.toggle('hidden', !e.target.checked);
+});
+document.getElementById('pol-reset-enable').addEventListener('change', function (e) {
+  document.getElementById('pol-reset-box').classList.toggle('hidden', !e.target.checked);
 });

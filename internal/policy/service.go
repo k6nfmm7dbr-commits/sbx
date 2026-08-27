@@ -19,12 +19,19 @@ package policy
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/k6nfmm7dbr-commits/sbx/internal/connection"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/nodes"
+)
+
+// 定时重置校验错误。
+var (
+	errInvalidResetPeriod = errors.New("reset_period 必须为 hourly/daily/weekly/monthly")
+	errInvalidResetTime   = errors.New("reset_time 必须为 HH:MM:SS")
 )
 
 // State 是单个节点的策略状态快照（面向 API / UI）。
@@ -37,6 +44,12 @@ type State struct {
 	IPLimitMax   int    `json:"ip_limit_max"`
 	ActiveIPs    int    `json:"active_ip_count"`
 	IPLimitState string `json:"ip_limit_state"` // unlimited / ok / exceeded
+
+	// 定时重置（计划任务）：用户可开关，精确到秒，月按 30 天。
+	ResetEnabled bool   `json:"reset_enabled"`
+	ResetPeriod  string `json:"reset_period"`  // hourly / daily / weekly / monthly
+	ResetTime    string `json:"reset_time"`    // "HH:MM:SS"
+	ResetNextAt  int64  `json:"reset_next_at"` // 下次重置 Unix 秒
 }
 
 // Config 是持久化的策略配置（node_policy 表一行）。
@@ -47,6 +60,12 @@ type Config struct {
 	QuotaResetBaseline int64
 	IPLimitEnabled     bool
 	IPLimitMax         int
+
+	// 定时重置。
+	ResetEnabled bool
+	ResetPeriod  string
+	ResetTime    string
+	ResetNextAt  int64
 }
 
 // Service 是策略核心：读配置、算 used、追踪 IP slot、生成并应用 nft 规则。
@@ -76,8 +95,9 @@ type Service struct {
 	appliedQuota   map[string]bool
 	appliedIPLimit map[string]map[string]bool // nodeID -> ip set
 
-	udpTTL time.Duration
-	now    func() time.Time
+	udpTTL   time.Duration
+	now      func() time.Time
+	location *time.Location // 定时重置的本地时区（nil = time.Local）
 
 	// nftApply 执行 nft 脚本（测试可替换为 no-op，规避 CI 无 nft 权限）。
 	nftApply func(ctx context.Context, scriptPath string) error
@@ -115,6 +135,27 @@ func (s *Service) SetNFTApply(fn func(ctx context.Context, scriptPath string) er
 
 // SetUDPTTL 覆盖 UDP slot 释放 TTL（测试用）。
 func (s *Service) SetUDPTTL(d time.Duration) { s.udpTTL = d }
+
+// SetLocation 覆盖定时重置的本地时区（测试用）。
+func (s *Service) SetLocation(loc *time.Location) { s.location = loc }
+
+// Now 返回当前时间（注入时钟）。
+func (s *Service) Now() time.Time { return s.now() }
+
+// ValidateReset 校验定时重置配置合法性。
+// 关闭时无约束；开启时要求周期合法、时刻格式为 HH:MM:SS。
+func (s *Service) ValidateReset(c Config) error {
+	if !c.ResetEnabled {
+		return nil
+	}
+	if !validPeriod(c.ResetPeriod) {
+		return errInvalidResetPeriod
+	}
+	if TimeOfDayToSeconds(c.ResetTime) < 0 {
+		return errInvalidResetTime
+	}
+	return nil
+}
 
 // SetRemoteIPs 注入 TCP/UDP 活跃 IP 读取函数（测试用）。
 func (s *Service) SetRemoteIPs(fn func(list []nodes.Node) (map[string]connection.RemoteIPSet, bool, error)) {
@@ -170,7 +211,8 @@ func (s *Service) ActiveIPs(nodeID string) []string {
 func (s *Service) loadConfigs(ctx context.Context) (map[string]Config, error) {
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT node_id,quota_enabled,quota_limit_bytes,quota_reset_baseline,"+
-			"ip_limit_enabled,ip_limit_max FROM node_policy")
+			"ip_limit_enabled,ip_limit_max,reset_enabled,reset_period,reset_time,reset_next_at "+
+			"FROM node_policy")
 	if err != nil {
 		return nil, err
 	}
@@ -178,13 +220,14 @@ func (s *Service) loadConfigs(ctx context.Context) (map[string]Config, error) {
 	out := map[string]Config{}
 	for rows.Next() {
 		var c Config
-		var qe, ile int
+		var qe, ile, re int
 		if err := rows.Scan(&c.NodeID, &qe, &c.QuotaLimitBytes, &c.QuotaResetBaseline,
-			&ile, &c.IPLimitMax); err != nil {
+			&ile, &c.IPLimitMax, &re, &c.ResetPeriod, &c.ResetTime, &c.ResetNextAt); err != nil {
 			return nil, err
 		}
 		c.QuotaEnabled = qe != 0
 		c.IPLimitEnabled = ile != 0
+		c.ResetEnabled = re != 0
 		out[c.NodeID] = c
 	}
 	return out, rows.Err()
@@ -207,12 +250,13 @@ func (s *Service) lifetimeBytes(ctx context.Context, nodeID string) (int64, erro
 // GetConfig 读单个节点策略配置（不存在时返回默认「全不限」）。
 func (s *Service) GetConfig(ctx context.Context, nodeID string) (Config, error) {
 	var c Config
-	var qe, ile int
+	var qe, ile, re int
 	err := s.db.QueryRowContext(ctx,
 		"SELECT node_id,quota_enabled,quota_limit_bytes,quota_reset_baseline,"+
-			"ip_limit_enabled,ip_limit_max FROM node_policy WHERE node_id=?",
+			"ip_limit_enabled,ip_limit_max,reset_enabled,reset_period,reset_time,reset_next_at "+
+			"FROM node_policy WHERE node_id=?",
 		nodeID).Scan(&c.NodeID, &qe, &c.QuotaLimitBytes, &c.QuotaResetBaseline,
-		&ile, &c.IPLimitMax)
+		&ile, &c.IPLimitMax, &re, &c.ResetPeriod, &c.ResetTime, &c.ResetNextAt)
 	if err == sql.ErrNoRows {
 		return Config{NodeID: nodeID}, nil
 	}
@@ -221,28 +265,38 @@ func (s *Service) GetConfig(ctx context.Context, nodeID string) (Config, error) 
 	}
 	c.QuotaEnabled = qe != 0
 	c.IPLimitEnabled = ile != 0
+	c.ResetEnabled = re != 0
 	return c, nil
 }
 
 // UpsertConfig 写回（或更新）节点策略配置。
 func (s *Service) UpsertConfig(ctx context.Context, c Config) error {
-	qe, ile := 0, 0
+	qe, ile, re := 0, 0, 0
 	if c.QuotaEnabled {
 		qe = 1
 	}
 	if c.IPLimitEnabled {
 		ile = 1
 	}
+	if c.ResetEnabled {
+		re = 1
+	}
 	_, err := s.db.ExecContext(ctx,
 		"INSERT INTO node_policy(node_id,quota_enabled,quota_limit_bytes,"+
-			"quota_reset_baseline,ip_limit_enabled,ip_limit_max) "+
-			"VALUES(?,?,?,?,?,?) "+
+			"quota_reset_baseline,ip_limit_enabled,ip_limit_max,"+
+			"reset_enabled,reset_period,reset_time,reset_next_at) "+
+			"VALUES(?,?,?,?,?,?,?,?,?,?) "+
 			"ON CONFLICT(node_id) DO UPDATE SET quota_enabled=excluded.quota_enabled,"+
 			"quota_limit_bytes=excluded.quota_limit_bytes,"+
 			"quota_reset_baseline=excluded.quota_reset_baseline,"+
 			"ip_limit_enabled=excluded.ip_limit_enabled,"+
-			"ip_limit_max=excluded.ip_limit_max",
-		c.NodeID, qe, c.QuotaLimitBytes, c.QuotaResetBaseline, ile, c.IPLimitMax)
+			"ip_limit_max=excluded.ip_limit_max,"+
+			"reset_enabled=excluded.reset_enabled,"+
+			"reset_period=excluded.reset_period,"+
+			"reset_time=excluded.reset_time,"+
+			"reset_next_at=excluded.reset_next_at",
+		c.NodeID, qe, c.QuotaLimitBytes, c.QuotaResetBaseline, ile, c.IPLimitMax,
+		re, c.ResetPeriod, c.ResetTime, c.ResetNextAt)
 	return err
 }
 

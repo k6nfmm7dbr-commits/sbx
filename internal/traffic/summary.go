@@ -86,6 +86,11 @@ type SummaryNode struct {
 	IPLimitMax   int    `json:"ip_limit_max,omitempty"`
 	ActiveIPs    int    `json:"active_ip_count,omitempty"`
 	IPLimitState string `json:"ip_limit_state,omitempty"`
+	// 定时重置（计划任务）。
+	ResetEnabled bool   `json:"reset_enabled,omitempty"`
+	ResetPeriod  string `json:"reset_period,omitempty"`
+	ResetTime    string `json:"reset_time,omitempty"`
+	ResetNextAt  int64  `json:"reset_next_at,omitempty"`
 }
 
 // Summary 对齐 build_summary 返回结构。
@@ -195,6 +200,9 @@ type LiveNode struct {
 	ActiveIPs  int  `json:"active_ip_count,omitempty"`
 	IPLimitOn  bool `json:"ip_limit_enabled,omitempty"`
 	IPLimitMax int  `json:"ip_limit_max,omitempty"`
+	// 定时重置下次时间（由 API 层填充，供前端倒计时）。
+	ResetEnabled bool  `json:"reset_enabled,omitempty"`
+	ResetNextAt  int64 `json:"reset_next_at,omitempty"`
 }
 
 // Live 对齐 build_live 返回结构：只算当前速率 + 连接数的高频轻量端点。

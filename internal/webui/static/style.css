@@ -110,15 +110,6 @@ button { -webkit-tap-highlight-color: transparent; }
   overflow: hidden;
   padding: 21px 22px 18px;
 }
-.hero::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 22px;
-  width: 40px;
-  height: 2px;
-  background: var(--accent);
-}
 .hero-label {
   display: flex;
   align-items: center;
@@ -290,7 +281,7 @@ td b { color: var(--text); font-weight: 640; }
 .empty { padding: 25px 10px; color: var(--text-3); font-size: 12.5px; text-align: center; }
 
 /* Fields */
-select, input[type="number"], input[type="password"], input[type="text"] {
+select, input[type="number"], input[type="password"], input[type="text"], input[type="time"] {
   width: 100%;
   padding: 10px 11px;
   outline: 0;
@@ -408,7 +399,6 @@ select { padding-right: 31px; background-image: linear-gradient(45deg,transparen
   .conn-chip { max-width: 145px; }
   .wrap { padding: 14px 13px calc(84px + env(safe-area-inset-bottom)); }
   .hero { padding: 19px 17px 16px; }
-  .hero::after { left: 17px; }
   .hero-rate { font-size: clamp(36px,11vw,48px); }
   .panel { padding: 14px; }
   .hint { display: none; }

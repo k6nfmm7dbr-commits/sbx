@@ -52,8 +52,9 @@ func Serve() int {
 
 	collector := traffic.NewCollector(cfg, db)
 
-	// 策略服务（Quota / IP Limit）：与采集器并行运行，复用同一 SQLite。
+	// 策略服务（Quota / IP Limit / 定时重置）：与采集器并行运行，复用同一 SQLite。
 	policySvc := policy.New(db.DB, config.AppDir(), cfg.NftConf)
+	policySvc.SetLocation(traffic.Location(cfg.TZ))
 
 	addr := net.JoinHostPort(cfg.Listen, fmt.Sprint(cfg.Port))
 

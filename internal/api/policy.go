@@ -73,6 +73,11 @@ type putPolicyRequest struct {
 	QuotaLimitBytes int64 `json:"quota_limit_bytes"`
 	IPLimitEnabled  bool  `json:"ip_limit_enabled"`
 	IPLimitMax      int   `json:"ip_limit_max"`
+
+	// 定时重置（可选，缺省视为不修改）。
+	ResetEnabled *bool   `json:"reset_enabled"`
+	ResetPeriod  *string `json:"reset_period"`
+	ResetTime    *string `json:"reset_time"`
 }
 
 func (s *Server) putPolicy(w http.ResponseWriter, r *http.Request, nodeID string) {
@@ -107,6 +112,33 @@ func (s *Server) putPolicy(w http.ResponseWriter, r *http.Request, nodeID string
 	cur.QuotaLimitBytes = req.QuotaLimitBytes
 	cur.IPLimitEnabled = req.IPLimitEnabled
 	cur.IPLimitMax = req.IPLimitMax
+
+	// 定时重置：仅当显式传了字段才修改（缺省保留原值）。
+	resetChanged := false
+	if req.ResetEnabled != nil && *req.ResetEnabled != cur.ResetEnabled {
+		cur.ResetEnabled = *req.ResetEnabled
+		resetChanged = true
+	}
+	if req.ResetPeriod != nil && *req.ResetPeriod != cur.ResetPeriod {
+		cur.ResetPeriod = *req.ResetPeriod
+		resetChanged = true
+	}
+	if req.ResetTime != nil && *req.ResetTime != cur.ResetTime {
+		cur.ResetTime = *req.ResetTime
+		resetChanged = true
+	}
+	if err := s.policy.ValidateReset(cur); err != nil {
+		s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	// 开启定时重置且（刚开启 / 周期或时刻变了 / 从未算过）→ 重算下次触发时间。
+	if cur.ResetEnabled && (cur.ResetNextAt == 0 || resetChanged) {
+		cur.ResetNextAt = policy.NextResetAt(s.policy.Now(), cur.ResetPeriod,
+			policy.TimeOfDayToSeconds(cur.ResetTime), nil)
+	} else if !cur.ResetEnabled {
+		// 关闭时清空下次时间，避免残留误导。
+		cur.ResetNextAt = 0
+	}
 
 	if err := s.policy.UpsertConfig(r.Context(), cur); err != nil {
 		s.sendJSON(w, r, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -157,5 +189,9 @@ func policyStateDefault() policy.State {
 		IPLimitMax:   0,
 		ActiveIPs:    0,
 		IPLimitState: "unlimited",
+		ResetEnabled: false,
+		ResetPeriod:  "",
+		ResetTime:    "00:00:00",
+		ResetNextAt:  0,
 	}
 }

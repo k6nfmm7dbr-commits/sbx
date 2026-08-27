@@ -59,7 +59,11 @@ CREATE TABLE IF NOT EXISTS node_policy (
     quota_limit_bytes      INTEGER NOT NULL DEFAULT 0,
     quota_reset_baseline   INTEGER NOT NULL DEFAULT 0,
     ip_limit_enabled       INTEGER NOT NULL DEFAULT 0,
-    ip_limit_max           INTEGER NOT NULL DEFAULT 0
+    ip_limit_max           INTEGER NOT NULL DEFAULT 0,
+    reset_enabled          INTEGER NOT NULL DEFAULT 0,
+    reset_period           TEXT    NOT NULL DEFAULT '',
+    reset_time             TEXT    NOT NULL DEFAULT '',
+    reset_next_at          INTEGER NOT NULL DEFAULT 0
 );
 `
 
@@ -133,6 +137,31 @@ func (d *DB) migrate() error {
 	if _, err := tx.Exec("UPDATE samples SET valid=0 WHERE duration_ms<=0"); err != nil {
 		return err
 	}
+	// node_policy 定时重置列（v3.0.6+）：旧库补齐四列。
+	npCols, err := tableColumns(tx, "node_policy")
+	if err != nil {
+		return err
+	}
+	if _, ok := npCols["reset_enabled"]; !ok {
+		if _, err := tx.Exec("ALTER TABLE node_policy ADD COLUMN reset_enabled INTEGER NOT NULL DEFAULT 0"); err != nil {
+			return err
+		}
+	}
+	if _, ok := npCols["reset_period"]; !ok {
+		if _, err := tx.Exec("ALTER TABLE node_policy ADD COLUMN reset_period TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+	}
+	if _, ok := npCols["reset_time"]; !ok {
+		if _, err := tx.Exec("ALTER TABLE node_policy ADD COLUMN reset_time TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+	}
+	if _, ok := npCols["reset_next_at"]; !ok {
+		if _, err := tx.Exec("ALTER TABLE node_policy ADD COLUMN reset_next_at INTEGER NOT NULL DEFAULT 0"); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
 }
 
@@ -142,7 +171,12 @@ type querier interface {
 }
 
 func sampleColumns(q querier) (map[string]bool, error) {
-	rows, err := q.Query("PRAGMA table_info(samples)")
+	return tableColumns(q, "samples")
+}
+
+// tableColumns 返回指定表的列名集合（迁移用：判断是否已有某列）。
+func tableColumns(q querier, table string) (map[string]bool, error) {
+	rows, err := q.Query("PRAGMA table_info(" + table + ")")
 	if err != nil {
 		return nil, err
 	}

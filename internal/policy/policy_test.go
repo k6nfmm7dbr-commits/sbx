@@ -316,6 +316,43 @@ func TestQuotaExceededReconcile(t *testing.T) {
 	}
 }
 
+// TestAutoResetAtDue 锁定：定时重置到期后，reconcile 会把 baseline 抬到当前
+// lifetime（used 归零）并推进下一次时间。
+func TestAutoResetAtDue(t *testing.T) {
+	s := newTestService(t)
+	seedNode(t, s, 1, "vless", 443)
+	seedTotals(t, s, "1", 600, 400) // lifetime = 1000
+	ctx := context.Background()
+
+	// 先用一个已过期的下次时间戳，模拟「到期了」。
+	now := s.now()
+	cfg := Config{
+		NodeID:          "1",
+		QuotaEnabled:    true,
+		QuotaLimitBytes: 1000,
+		ResetEnabled:    true,
+		ResetPeriod:     "daily",
+		ResetTime:       "00:00:00",
+		ResetNextAt:     now.Unix() - 10, // 已过期
+	}
+	if err := s.UpsertConfig(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.reconcile(ctx); err != nil {
+		t.Fatalf("到期 reconcile 不应失败: %v", err)
+	}
+	st, _ := s.Snapshot()
+	if st["1"].QuotaUsed != 0 {
+		t.Fatalf("到期应已重置 used=0, got %d", st["1"].QuotaUsed)
+	}
+	if st["1"].ResetNextAt <= now.Unix() {
+		t.Fatalf("重置后下次时间应 > now, got %d", st["1"].ResetNextAt)
+	}
+	if st["1"].ResetEnabled != true || st["1"].ResetPeriod != "daily" {
+		t.Fatalf("重置后配置应保留: %+v", st["1"])
+	}
+}
+
 func TestGenPolicyNFT(t *testing.T) {
 	list := []nodes.Node{{"id": int64(1), "type": "vless", "port": int64(443)}}
 	script := genPolicyNFT(map[int64]bool{443: true}, nil, list)

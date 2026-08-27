@@ -49,6 +49,19 @@ func (s *Service) reconcile(ctx context.Context) error {
 		id := nodes.IDString(n)
 		cfg := cfgs[id]
 
+		// ---- 定时重置：到期立即把 baseline 抬到当前 lifetime，并推进下次时间 ----
+		if cfg.ResetEnabled && validPeriod(cfg.ResetPeriod) && cfg.ResetNextAt > 0 && nowNs/1e9 >= cfg.ResetNextAt {
+			life, lerr := s.lifetimeBytes(ctx, id)
+			if lerr != nil {
+				return lerr
+			}
+			cfg.QuotaResetBaseline = life
+			cfg.ResetNextAt = AdvanceNextPast(cfg.ResetNextAt, cfg.ResetPeriod, nowNs/1e9)
+			if uerr := s.UpsertConfig(ctx, cfg); uerr != nil {
+				return uerr
+			}
+		}
+
 		life, err := s.lifetimeBytes(ctx, id)
 		if err != nil {
 			return err
@@ -66,6 +79,10 @@ func (s *Service) reconcile(ctx context.Context) error {
 			IPLimitOn:    cfg.IPLimitEnabled,
 			IPLimitMax:   cfg.IPLimitMax,
 			IPLimitState: "unlimited",
+			ResetEnabled: cfg.ResetEnabled,
+			ResetPeriod:  cfg.ResetPeriod,
+			ResetTime:    cfg.ResetTime,
+			ResetNextAt:  cfg.ResetNextAt,
 		}
 		if cfg.QuotaEnabled {
 			st.QuotaState = "ok"
