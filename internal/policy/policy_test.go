@@ -275,6 +275,47 @@ func TestUDPTTLRelease(t *testing.T) {
 	}
 }
 
+// TestActiveIPsIncludesTCP 锁定「查看在线 IP」列表要包含 TCP 在线 IP（移动网络主要是 TCP）。
+func TestActiveIPsIncludesTCP(t *testing.T) {
+	s := newTestService(t)
+	seedNode(t, s, 1, "vless", 443)
+	ctx := context.Background()
+
+	cur := map[string]connection.RemoteIPSet{
+		"1": {TCP: map[string]bool{"9.9.9.9": true, "8.8.8.8": true}, UDP: map[string]bool{}},
+	}
+	s.SetRemoteIPs(func(list []nodes.Node) (map[string]connection.RemoteIPSet, bool, error) {
+		return cur, false, nil
+	})
+	if err := s.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	ips := s.ActiveIPs("1")
+	if len(ips) != 2 {
+		t.Fatalf("ActiveIPs 应含 2 个 TCP IP, got %v", ips)
+	}
+}
+
+// TestQuotaExceededReconcile 锁定 quota limit < used 时 reconcile 正常（不 crash，状态 exceeded）。
+func TestQuotaExceededReconcile(t *testing.T) {
+	s := newTestService(t)
+	seedNode(t, s, 1, "vless", 443)
+	seedTotals(t, s, "1", 600, 400) // lifetime = 1000
+	ctx := context.Background()
+	// limit=100 < used=1000 → exceeded
+	if err := s.UpsertConfig(ctx, Config{NodeID: "1", QuotaEnabled: true, QuotaLimitBytes: 100}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.reconcile(ctx); err != nil {
+		t.Fatalf("quota 达限 reconcile 不应失败: %v", err)
+	}
+	st, _ := s.Snapshot()
+	if st["1"].QuotaState != "exceeded" {
+		t.Fatalf("limit<used 应 exceeded, got %s", st["1"].QuotaState)
+	}
+}
+
 func TestGenPolicyNFT(t *testing.T) {
 	list := []nodes.Node{{"id": int64(1), "type": "vless", "port": int64(443)}}
 	script := genPolicyNFT(map[int64]bool{443: true}, nil, list)

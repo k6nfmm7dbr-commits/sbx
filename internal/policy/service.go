@@ -50,24 +50,29 @@ type Config struct {
 }
 
 // Service 是策略核心：读配置、算 used、追踪 IP slot、生成并应用 nft 规则。
-// 并发模型：单 goroutine 周期运行 reconcile；Snapshot 经 RWMutex 读缓存。
+// 并发模型：
+//   - reconcile 由 runMu 串行化（Run goroutine 周期调用 + API 保存时同步调用，
+//     两者可能并发 → 必须串行，否则并发写 map 会 fatal error 崩溃）；
+//   - states/slots/online/applied 由 mu 保护（Snapshot/ActiveIPs 只读走 RLock）。
 type Service struct {
 	db      *sql.DB
 	appDir  string
 	nftConf string
 
-	mu      sync.RWMutex
+	runMu   sync.Mutex   // 串行化 reconcile
+	mu      sync.RWMutex // 保护下列内存态
 	states  map[string]State
 	ready   bool
 	lastErr string
 
-	// IP Tracker 运行态：nodeID -> ip -> UDP lastSeen（UnixNano）。
-	// TCP 的在线状态直接用「本轮 /proc/net/tcp ESTABLISHED 是否出现」判断
-	// （断开即消失，实时）；UDP 无生命周期，靠 lastSeen TTL 判定。
-	// 只有「已获 slot」的 IP 才在这里。
-	slots map[string]map[string]int64
+	// IP Tracker 运行态（都在 mu 保护下）：
+	//   slots  —— nodeID -> ip -> UDP lastSeen（UnixNano），只存 UDP，用于 TTL 判定；
+	//   online —— nodeID -> ip -> lastSeen，当前「在线 IP」快照（TCP+UDP 合并，
+	//             TCP 断开立即消失，UDP 靠 TTL），供 ActiveIPs / active 数 / nft 用。
+	slots  map[string]map[string]int64
+	online map[string]map[string]int64
 
-	// 已应用的 enforcement 快照（避免每次 reconcile 无谓重写 nft）。
+	// 已应用的 enforcement 快照（避免每轮 reconcile 无谓重写 nft）。
 	appliedQuota   map[string]bool
 	appliedIPLimit map[string]map[string]bool // nodeID -> ip set
 
@@ -89,6 +94,7 @@ func New(db *sql.DB, appDir, nftConf string) *Service {
 		nftConf:        nftConf,
 		states:         map[string]State{},
 		slots:          map[string]map[string]int64{},
+		online:         map[string]map[string]int64{},
 		appliedQuota:   map[string]bool{},
 		appliedIPLimit: map[string]map[string]bool{},
 		udpTTL:         120 * time.Second,
@@ -133,11 +139,11 @@ func (s *Service) LastError() string {
 	return s.lastErr
 }
 
-// ActiveIPs 返回某节点当前在线公网 IP 列表（按最后活跃时间倒序）。
+// ActiveIPs 返回某节点当前在线公网 IP 列表（读 online 快照，含 TCP+UDP，按最后活跃时间倒序）。
 func (s *Service) ActiveIPs(nodeID string) []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	m := s.slots[nodeID]
+	m := s.online[nodeID]
 	type kv struct {
 		ip   string
 		last int64
@@ -267,11 +273,16 @@ func (s *Service) DeleteNode(ctx context.Context, nodeID string) error {
 	if _, err := s.db.ExecContext(ctx, "DELETE FROM node_policy WHERE node_id=?", nodeID); err != nil {
 		return err
 	}
+	// 与 reconcile 串行：直接改内存 map 必须与周期 reconcile 互斥。
+	s.runMu.Lock()
 	s.mu.Lock()
 	delete(s.states, nodeID)
 	delete(s.slots, nodeID)
+	delete(s.online, nodeID)
 	delete(s.appliedQuota, nodeID)
 	delete(s.appliedIPLimit, nodeID)
 	s.mu.Unlock()
+	s.runMu.Unlock()
+	// reconcile 会重建 nft（该节点已不在 list，规则自然清除）。
 	return s.reconcile(ctx)
 }

@@ -10,10 +10,16 @@ import (
 // reconcile 执行一轮策略同步：
 //  1. 读节点列表与策略配置；
 //  2. 算每个节点的 quota used；
-//  3. 读 /proc 更新 IP slot（授予新 slot、TTL 释放离线 slot）；
+//  3. 读 /proc 更新 IP slot 与在线 IP 快照（TCP 立即、UDP TTL）；
 //  4. 决定需 enforcement 的节点集合；
 //  5. 生成并应用 nft 规则（变化时才重写）。
+//
+// 并发安全：runMu 串行化所有 reconciler 调用（Run goroutine 周期调用与
+// API 保存/重置时的同步调用可能并发），否则并发写 map 会 fatal error。
 func (s *Service) reconcile(ctx context.Context) error {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+
 	nodeList := nodes.LoadPanelNodes(s.nodesPath())
 	cfgs, err := s.loadConfigs(ctx)
 	if err != nil {
@@ -31,7 +37,11 @@ func (s *Service) reconcile(ctx context.Context) error {
 		return err
 	}
 
+	nowNs := s.now().UnixNano()
+	udpTTLNs := s.udpTTL.Nanoseconds()
+
 	newStates := map[string]State{}
+	newOnline := map[string]map[string]int64{}
 	quotaBlocked := map[string]bool{}
 	ipBlocked := map[string]map[string]bool{}
 
@@ -66,16 +76,11 @@ func (s *Service) reconcile(ctx context.Context) error {
 		}
 
 		// ---- IP slot 更新 ----
-		// slots 只存 UDP lastSeen（UnixNano）。TCP 在线状态完全由本轮
-		// cur.TCP 决定——ESTABLISHED 断开即从 /proc 消失，无需 TTL，
-		// 因此 TCP IP 绝不写进 slots（否则会被误当作 UDP 活跃而滞留 120s）。
-		slots := s.slots[id]
-		if slots == nil {
-			slots = map[string]int64{}
-			s.slots[id] = slots
+		// slots 只存 UDP lastSeen；TCP 在线由本轮 cur.TCP 直接决定（断开即消失）。
+		if s.slots[id] == nil {
+			s.slots[id] = map[string]int64{}
 		}
-		nowNs := s.now().UnixNano()
-		udpTTLNs := s.udpTTL.Nanoseconds()
+		slots := s.slots[id]
 		cur := curSplit[id]
 
 		// 1) touch：UDP 活跃的 IP 刷新 lastSeen。
@@ -89,14 +94,15 @@ func (s *Service) reconcile(ctx context.Context) error {
 			}
 		}
 
-		// 3) 在线集合 = 本轮 TCP ∪ 未超 TTL 的 UDP。
-		online := map[string]bool{}
+		// 3) 构建 online 快照 = 本轮 TCP ∪ 未超 TTL 的 UDP。
+		online := map[string]int64{}
 		for ip := range cur.TCP {
-			online[ip] = true
+			online[ip] = nowNs
 		}
-		for ip := range slots {
-			online[ip] = true
+		for ip, last := range slots {
+			online[ip] = last
 		}
+		newOnline[id] = online
 
 		active := len(online)
 		st.ActiveIPs = active
@@ -105,17 +111,22 @@ func (s *Service) reconcile(ctx context.Context) error {
 			st.IPLimitState = "ok"
 			if cfg.IPLimitMax >= 1 && active >= cfg.IPLimitMax {
 				st.IPLimitState = "exceeded"
-				ipBlocked[id] = online
+				ipBlocked[id] = cloneIPSets(online)
 			}
 		}
 
 		newStates[id] = st
 	}
 
-	// 清理已删除节点的 slot。
+	// 清理已删除节点的运行时状态。
 	for id := range s.slots {
 		if _, ok := newStates[id]; !ok {
 			delete(s.slots, id)
+		}
+	}
+	for id := range s.online {
+		if _, ok := newStates[id]; !ok {
+			delete(s.online, id)
 		}
 	}
 
@@ -126,6 +137,7 @@ func (s *Service) reconcile(ctx context.Context) error {
 
 	s.mu.Lock()
 	s.states = newStates
+	s.online = newOnline
 	s.ready = true
 	s.lastErr = ""
 	s.appliedQuota = quotaBlocked
@@ -137,3 +149,12 @@ func (s *Service) reconcile(ctx context.Context) error {
 
 // Reconcile 公开同步入口：API 保存策略后立即调用，使 nft 生效。
 func (s *Service) Reconcile(ctx context.Context) error { return s.reconcile(ctx) }
+
+// cloneIPSets 把 online 快照（ip -> lastSeen）转成 allow set（ip -> true）。
+func cloneIPSets(m map[string]int64) map[string]bool {
+	out := make(map[string]bool, len(m))
+	for ip := range m {
+		out[ip] = true
+	}
+	return out
+}
