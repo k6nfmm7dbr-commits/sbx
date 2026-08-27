@@ -47,7 +47,11 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, route string
 			Path:     "/",
 			MaxAge:   604800,
 			HttpOnly: true,
-			SameSite: http.SameSiteStrictMode,
+			// Lax 而非 Strict：iOS Safari 从外部链接/书签/回访直接打开面板时，
+			// Strict 会让 Cookie 不随顶级导航发送，表现就像“没记住登录”。
+			// Lax 仍能阻止跨站 POST/隐式子请求携带 Cookie（防 CSRF），
+			// 但允许顶级 GET 导航携带，兼顾安全与“同设备免重复登录”。
+			SameSite: http.SameSiteLaxMode,
 		}
 		// 仅当用户显式配置 secure_cookie（前端套了 HTTPS 反代）时才加 Secure，
 		// 不能无条件 Secure=true，否则纯 HTTP 直连登录会失效。

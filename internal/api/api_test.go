@@ -197,7 +197,7 @@ func TestStaticPagesAndLoginFlow(t *testing.T) {
 		}
 	}
 	if cookie == nil || !cookie.HttpOnly || cookie.MaxAge != 604800 ||
-		cookie.Path != "/" || cookie.SameSite != http.SameSiteStrictMode {
+		cookie.Path != "/" || cookie.SameSite != http.SameSiteLaxMode {
 		t.Errorf("会话 Cookie 属性异常: %+v", cookie)
 	}
 
