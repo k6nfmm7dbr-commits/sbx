@@ -50,8 +50,9 @@ func (s *Service) reconcile(ctx context.Context) error {
 		cfg := cfgs[id]
 
 		// ---- 定时重置：到期立即把 baseline 抬到当前 lifetime，并推进下次时间 ----
-		// day 非法（旧数据/异常配置）时跳过自动重置，宁可不动也不乱归零。
-		if cfg.ResetEnabled && cfg.ResetNextAt > 0 && ValidResetDay(cfg.ResetDay) && nowNs/1e9 >= cfg.ResetNextAt {
+		// 重置依附于配额：配额关闭时不做自动重置；day 非法（旧数据/异常配置）也跳过，
+		// 宁可不动也不乱归零。
+		if cfg.QuotaEnabled && cfg.ResetEnabled && cfg.ResetNextAt > 0 && ValidResetDay(cfg.ResetDay) && nowNs/1e9 >= cfg.ResetNextAt {
 			tod := ParseResetTime(cfg.ResetTime)
 			if tod < 0 {
 				tod = 0

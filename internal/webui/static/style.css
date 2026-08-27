@@ -358,6 +358,31 @@ select { padding-right: 31px; background-image: linear-gradient(45deg,transparen
 .btn:active { transform: translateY(1px); }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
 
+/* 开关禁用态（定时重置依附于流量配额） */
+.switch-row.disabled { opacity: .45; cursor: not-allowed; }
+.switch-row.disabled .sw { border-color: var(--line-2); }
+
+/* 起始时间选择器入口 */
+.picker-field { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; padding: 9px 12px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--surface-3); color: var(--text); font-size: 14px; font-weight: 600; cursor: pointer; text-align: left; }
+.picker-field .chev { color: var(--text-3); font-size: 16px; }
+
+/* 滚轮选择器 */
+.picker-mask { position: fixed; inset: 0; background: rgba(0,0,0,.5); opacity: 0; pointer-events: none; transition: opacity .2s ease; z-index: 80; }
+.picker-mask.on { opacity: 1; pointer-events: auto; }
+.picker-sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 90; padding-bottom: env(safe-area-inset-bottom); border-top: 1px solid var(--line); border-radius: 18px 18px 0 0; background: var(--surface-2); box-shadow: 0 -20px 60px rgba(0,0,0,.5); transform: translateY(105%); transition: transform .22s ease; }
+.picker-sheet.on { transform: translateY(0); }
+.picker-head { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.picker-head b { text-align: center; font-size: 13px; }
+.wheel-group { display: flex; justify-content: center; gap: 8px; padding: 14px 12px 22px; }
+.wheel-col { display: flex; flex-direction: column; align-items: center; gap: 7px; }
+.wheel { position: relative; width: 78px; height: 200px; overflow: hidden; border-radius: 10px; }
+.wheel-band { position: absolute; top: 80px; left: 0; right: 0; height: 40px; background: var(--surface-3); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); z-index: 1; pointer-events: none; }
+.wheel-scroll { height: 100%; overflow-y: auto; scroll-snap-type: y mandatory; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+.wheel-scroll::-webkit-scrollbar { display: none; }
+.wheel-item { height: 40px; line-height: 40px; text-align: center; scroll-snap-align: center; color: var(--text-3); font-size: 16px; font-variant-numeric: tabular-nums; }
+.wheel-item.sel { color: var(--text); font-size: 18px; font-weight: 700; }
+.wheel-unit { font-size: 11px; color: var(--text-3); }
+
 /* IP list */
 .ips-list { display: grid; gap: 7px; }
 .ip-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }

@@ -135,13 +135,89 @@ function resetSpecOf(n) {
   var t = String(n.reset_time || '00:00:00').split(':');
   return n.reset_day + ':' + (t[0] || '00') + ':' + (t[1] || '00');
 }
+function friendlyReset(spec) {
+  var p = parseResetSpec(spec);
+  return p ? ('每月 ' + p.day + ' 日 ' + p.time.slice(0, 5)) : '';
+}
 function updateResetHint(spec) {
   var el = document.getElementById('pol-reset-hint');
   if (!el) return;
-  if (!String(spec || '').trim()) { el.textContent = ''; return; }
+  if (!String(spec || '').trim()) { el.textContent = '选择每月自动重置的日期与时刻'; return; }
   var p = parseResetSpec(spec);
   el.textContent = p ? ('每月 ' + p.day + ' 日 ' + p.time.slice(0, 5) + ' 自动重置')
                      : '范围：日 1~30、时 00~23、分 00~59';
+}
+// applyResetSpec 同步按钮回显 + data-spec + 提示文案。
+function applyResetSpec(spec) {
+  var btn = document.getElementById('pol-reset-spec');
+  if (btn) btn.setAttribute('data-spec', spec || '');
+  var v = document.getElementById('pol-reset-spec-value');
+  if (v) v.textContent = friendlyReset(spec) || '选择日期与时刻';
+  updateResetHint(spec);
+}
+// setResetDependent 处理「定时重置依附于流量配额」的置灰/禁用联动。
+function setResetDependent(quotaOn) {
+  var row = document.getElementById('pol-reset-row');
+  var box = document.getElementById('pol-reset-box');
+  var cb = document.getElementById('pol-reset-enable');
+  var dep = document.getElementById('pol-reset-depend');
+  if (row) row.classList.toggle('disabled', !quotaOn);
+  if (cb) cb.disabled = !quotaOn;
+  if (dep) dep.classList.toggle('hidden', !!quotaOn);
+  if (!quotaOn) {
+    if (cb) cb.checked = false;
+    if (box) box.classList.add('hidden');
+  }
+}
+
+/* ---------- 起始时间滚轮选择器 ---------- */
+var resetPicker = { day: 21, hour: 0, min: 0, built: false };
+function buildWheel(col, lo, hi) {
+  var sc = document.querySelector('[data-col="' + col + '"]');
+  sc.innerHTML = '';
+  var frag = document.createDocumentFragment();
+  function spacer() { var d = document.createElement('div'); d.className = 'wheel-item'; d.style.visibility = 'hidden'; return d; }
+  frag.appendChild(spacer()); frag.appendChild(spacer());
+  for (var v = lo; v <= hi; v++) { var d = document.createElement('div'); d.className = 'wheel-item'; d.dataset.v = v; d.textContent = pad2(v); frag.appendChild(d); }
+  frag.appendChild(spacer()); frag.appendChild(spacer());
+  sc.appendChild(frag);
+  sc.addEventListener('scroll', function () { onWheelScroll(col); });
+}
+function onWheelScroll(col) {
+  var sc = document.querySelector('[data-col="' + col + '"]');
+  var items = sc.querySelectorAll('.wheel-item[data-v]');
+  var n = items.length; if (!n) return;
+  var idx = Math.max(0, Math.min(n - 1, Math.round(sc.scrollTop / 40)));
+  resetPicker[col] = parseInt(items[idx].dataset.v, 10);
+  for (var i = 0; i < n; i++) items[i].classList.toggle('sel', i === idx);
+}
+function positionWheel(col, idx) {
+  var sc = document.querySelector('[data-col="' + col + '"]');
+  var n = sc.querySelectorAll('.wheel-item[data-v]').length;
+  idx = Math.max(0, Math.min(n - 1, idx));
+  sc.scrollTop = idx * 40;
+  onWheelScroll(col);
+}
+function openResetPicker() {
+  if (!resetPicker.built) { buildWheel('day', 1, 30); buildWheel('hour', 0, 23); buildWheel('min', 0, 59); resetPicker.built = true; }
+  var spec = document.getElementById('pol-reset-spec').getAttribute('data-spec') || '21:00:00';
+  var p = parseResetSpec(spec) || { day: 21, time: '00:00:00' };
+  resetPicker.day = p.day;
+  resetPicker.hour = parseInt(p.time.slice(0, 2), 10);
+  resetPicker.min = parseInt(p.time.slice(3, 5), 10);
+  positionWheel('day', resetPicker.day - 1);
+  positionWheel('hour', resetPicker.hour);
+  positionWheel('min', resetPicker.min);
+  document.getElementById('reset-picker-mask').classList.add('on');
+  document.getElementById('reset-picker').classList.add('on');
+}
+function closeResetPicker() {
+  document.getElementById('reset-picker-mask').classList.remove('on');
+  document.getElementById('reset-picker').classList.remove('on');
+}
+function confirmResetPicker() {
+  applyResetSpec(resetPicker.day + ':' + pad2(resetPicker.hour) + ':' + pad2(resetPicker.min));
+  closeResetPicker();
 }
 function nodeStatus(n) {
   if (n.quota_state === 'exceeded') return '<span class="status-pill danger">流量已用尽</span>';
@@ -324,13 +400,13 @@ function showPolicy(nodeId) {
   document.getElementById('pol-ip-enable').checked = !!n.ip_limit_enabled;
   document.getElementById('pol-quota-box').classList.toggle('hidden', !n.quota_enabled);
   document.getElementById('pol-ip-box').classList.toggle('hidden', !n.ip_limit_enabled);
-  // 定时重置（起始时间 = 日:时:分）
-  document.getElementById('pol-reset-enable').checked = !!n.reset_enabled;
-  document.getElementById('pol-reset-box').classList.toggle('hidden', !n.reset_enabled);
-  var spec = resetSpecOf(n);
-  document.getElementById('pol-reset-spec').value = spec;
-  updateResetHint(spec);
-  document.getElementById('pol-reset-next').textContent = (n.reset_enabled && n.reset_next_at)
+  // 定时重置（依附于流量配额；配额关闭时整张卡片置灰禁用）
+  var quotaOn = !!n.quota_enabled;
+  setResetDependent(quotaOn);
+  document.getElementById('pol-reset-enable').checked = quotaOn && !!n.reset_enabled;
+  document.getElementById('pol-reset-box').classList.toggle('hidden', !(quotaOn && n.reset_enabled));
+  applyResetSpec(resetSpecOf(n));
+  document.getElementById('pol-reset-next').textContent = (quotaOn && n.reset_enabled && n.reset_next_at)
     ? formatResetFuture(n.reset_next_at) : '—';
   if (n.quota_enabled && n.quota_limit_bytes > 0) {
     var g = n.quota_limit_bytes / (1024 * 1024 * 1024);
@@ -373,10 +449,11 @@ function savePolicy() {
   var quotaVal = document.getElementById('pol-quota-val').value;
   var quotaUnit = document.getElementById('pol-quota-unit').value;
   var ipMax = document.getElementById('pol-ip-max').value;
-  var resetOn = document.getElementById('pol-reset-enable').checked;
-  var parsed = parseResetSpec(document.getElementById('pol-reset-spec').value);
+  // 定时重置依附于流量配额：配额没开时强制关闭并清语义，不发送开启。
+  var resetOn = quotaOn && document.getElementById('pol-reset-enable').checked;
+  var parsed = parseResetSpec(document.getElementById('pol-reset-spec').getAttribute('data-spec'));
   if (resetOn && !parsed) {
-    showPolError('起始时间需为 日:时:分（如 21:00:00 = 每月 21 日 00:00 整），日 1~30、时 0~23、分 0~59');
+    showPolError('请先选择起始时间（每月几号几点）');
     return;
   }
 
@@ -473,14 +550,16 @@ document.getElementById('pol-quota-reset').addEventListener('click', resetQuota)
 document.getElementById('ips-close').addEventListener('click', function () { closeDrawer('ips-drawer'); });
 document.getElementById('pol-quota-enable').addEventListener('change', function (e) {
   document.getElementById('pol-quota-box').classList.toggle('hidden', !e.target.checked);
+  // 配额开关联动：关闭配额时定时重置置灰禁用，开启时解除。
+  setResetDependent(e.target.checked);
 });
 document.getElementById('pol-ip-enable').addEventListener('change', function (e) {
   document.getElementById('pol-ip-box').classList.toggle('hidden', !e.target.checked);
 });
 document.getElementById('pol-reset-enable').addEventListener('change', function (e) {
   document.getElementById('pol-reset-box').classList.toggle('hidden', !e.target.checked);
-  if (e.target.checked) updateResetHint(document.getElementById('pol-reset-spec').value);
 });
-document.getElementById('pol-reset-spec').addEventListener('input', function (e) {
-  updateResetHint(e.target.value);
-});
+document.getElementById('pol-reset-spec').addEventListener('click', openResetPicker);
+document.getElementById('reset-picker-ok').addEventListener('click', confirmResetPicker);
+document.getElementById('reset-picker-cancel').addEventListener('click', closeResetPicker);
+document.getElementById('reset-picker-mask').addEventListener('click', closeResetPicker);

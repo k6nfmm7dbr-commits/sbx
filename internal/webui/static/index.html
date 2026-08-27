@@ -154,6 +154,22 @@
   <div class="drawer-body">
     <section class="sect">
       <label class="switch-row">
+        <div><b>IP 数量限制</b><small>达上限后阻止新 IP 接入</small></div>
+        <input type="checkbox" id="pol-ip-enable" class="sw-input"><span class="sw" aria-hidden="true"></span>
+      </label>
+      <div class="field summary-field">
+        <small>当前在线 IP</small>
+        <output id="pol-ip-active">—</output>
+      </div>
+      <div id="pol-ip-box" class="box hidden">
+        <div class="field row">
+          <input type="number" id="pol-ip-max" min="1" step="1" inputmode="numeric" placeholder="最大同时在线数">
+        </div>
+      </div>
+    </section>
+
+    <section class="sect">
+      <label class="switch-row">
         <div><b>流量配额</b><small>超出后仅阻断该节点端口</small></div>
         <input type="checkbox" id="pol-quota-enable" class="sw-input"><span class="sw" aria-hidden="true"></span>
       </label>
@@ -174,37 +190,22 @@
     </section>
 
     <section class="sect">
-      <label class="switch-row">
-        <div><b>IP 数量限制</b><small>达上限后阻止新 IP 接入</small></div>
-        <input type="checkbox" id="pol-ip-enable" class="sw-input"><span class="sw" aria-hidden="true"></span>
-      </label>
-      <div class="field summary-field">
-        <small>当前在线 IP</small>
-        <output id="pol-ip-active">—</output>
-      </div>
-      <div id="pol-ip-box" class="box hidden">
-        <div class="field row">
-          <input type="number" id="pol-ip-max" min="1" step="1" inputmode="numeric" placeholder="最大同时在线数">
-        </div>
-      </div>
-    </section>
-
-    <section class="sect">
-      <label class="switch-row">
+      <label class="switch-row" id="pol-reset-row">
         <div><b>定时重置流量</b><small>每月固定时间自动把本期已用流量归零（保留历史）</small></div>
-        <input type="checkbox" id="pol-reset-enable" class="sw-input"><span class="sw" aria-hidden="true"></span>
+        <input type="checkbox" id="pol-reset-enable" class="sw-input" disabled><span class="sw" aria-hidden="true"></span>
       </label>
       <div class="field summary-field">
         <small>下次重置</small>
         <output id="pol-reset-next">—</output>
+        <small class="hint hidden" id="pol-reset-depend">需先开启流量配额，才能定时归零已用流量</small>
       </div>
       <div id="pol-reset-box" class="box hidden">
         <div class="field">
           <small>起始时间（每月几日几点）</small>
-          <input type="text" id="pol-reset-spec" inputmode="numeric" autocomplete="off"
-                 placeholder="如 21:00:00 = 每月 21 日 00:00 整">
-          <small class="hint">格式 日:时:分 —— 日 1~30、时 00~23、分 00~59，秒固定 00</small>
-          <small id="pol-reset-hint"></small>
+          <button type="button" id="pol-reset-spec" class="picker-field" data-spec="">
+            <span id="pol-reset-spec-value">选择日期与时刻</span><span class="chev">›</span>
+          </button>
+          <small class="hint" id="pol-reset-hint">选择每月自动重置的日期与时刻</small>
         </div>
       </div>
     </section>
@@ -233,6 +234,30 @@
 </aside>
 
 <div id="toast" role="status"></div>
+
+<!-- ===== 起始时间滚轮选择器 ===== -->
+<div class="picker-mask" id="reset-picker-mask"></div>
+<div class="picker-sheet" id="reset-picker" role="dialog" aria-modal="true">
+  <header class="picker-head">
+    <button type="button" class="btn ghost" id="reset-picker-cancel">取消</button>
+    <b>起始时间</b>
+    <button type="button" class="btn primary" id="reset-picker-ok">确定</button>
+  </header>
+  <div class="wheel-group">
+    <div class="wheel-col">
+      <div class="wheel"><div class="wheel-band"></div><div class="wheel-scroll" data-col="day"></div></div>
+      <small class="wheel-unit">日</small>
+    </div>
+    <div class="wheel-col">
+      <div class="wheel"><div class="wheel-band"></div><div class="wheel-scroll" data-col="hour"></div></div>
+      <small class="wheel-unit">时</small>
+    </div>
+    <div class="wheel-col">
+      <div class="wheel"><div class="wheel-band"></div><div class="wheel-scroll" data-col="min"></div></div>
+      <small class="wheel-unit">分</small>
+    </div>
+  </div>
+</div>
 
 <script src="app.js"></script>
 </body>

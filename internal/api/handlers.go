@@ -125,8 +125,8 @@ func (s *Server) attachPolicyToSummary(sum *traffic.Summary) {
 		if st.IPLimitOn {
 			sum.Nodes[i].IPLimitState = st.IPLimitState
 		}
-		// 定时重置：开启时下发日/时刻/下次时间（供节点卡片倒计时与管理抽屉回填）。
-		if st.ResetEnabled {
+		// 定时重置：配额开启时才下发（依附于配额才有「归零」语义）。
+		if st.ResetEnabled && st.QuotaEnabled {
 			sum.Nodes[i].ResetEnabled = true
 			sum.Nodes[i].ResetDay = st.ResetDay
 			sum.Nodes[i].ResetTime = st.ResetTime
@@ -167,7 +167,7 @@ func (s *Server) attachPolicyToLive(live *traffic.Live) {
 			live.Nodes[i].ActiveIPs = st.ActiveIPs
 			live.Nodes[i].IPLimitOn = st.IPLimitOn
 			live.Nodes[i].IPLimitMax = st.IPLimitMax
-			if st.ResetEnabled {
+			if st.ResetEnabled && st.QuotaEnabled {
 				live.Nodes[i].ResetEnabled = true
 				live.Nodes[i].ResetNextAt = st.ResetNextAt
 			}

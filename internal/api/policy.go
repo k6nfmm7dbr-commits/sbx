@@ -140,8 +140,19 @@ func (s *Server) putPolicy(w http.ResponseWriter, r *http.Request, nodeID string
 		s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	// 定时重置依附于流量配额：配额关闭时它没有「归零」对象，禁止开启。
+	if cur.ResetEnabled && !cur.QuotaEnabled {
+		if req.ResetEnabled != nil && *req.ResetEnabled {
+			s.sendJSON(w, r, http.StatusBadRequest,
+				map[string]string{"error": "开启定时重置前需先开启流量配额"})
+			return
+		}
+		// 配额被关闭而重置未显式再开启 → 防御性关闭（保留日/时刻配置，下次开启配额可再用）。
+		cur.ResetEnabled = false
+		cur.ResetNextAt = 0
+	}
 	// 开启定时重置且（刚开启 / 日或时刻变了 / 从未算过）→ 重算下次触发时间。
-	if cur.ResetEnabled && (cur.ResetNextAt == 0 || resetChanged) {
+	if cur.ResetEnabled && cur.QuotaEnabled && (cur.ResetNextAt == 0 || resetChanged) {
 		cur.ResetNextAt = policy.NextResetAt(s.policy.Now(), cur.ResetDay,
 			policy.ParseResetTime(cur.ResetTime), nil)
 	} else if !cur.ResetEnabled {

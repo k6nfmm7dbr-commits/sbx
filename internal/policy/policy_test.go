@@ -388,6 +388,35 @@ func TestAutoResetSkipsInvalidDay(t *testing.T) {
 	}
 }
 
+// TestAutoResetSkippedWhenQuotaOff 锁定：配额关闭时即使 reset 到期也不自动归零，
+// 因为「定时重置」依附于流量配额——没有配额就没有「本期已用」可归零。
+func TestAutoResetSkippedWhenQuotaOff(t *testing.T) {
+	s := newTestService(t)
+	seedNode(t, s, 1, "vless", 443)
+	seedTotals(t, s, "1", 600, 400)
+	ctx := context.Background()
+	now := s.now()
+	cfg := Config{
+		NodeID:          "1",
+		QuotaEnabled:    false,
+		QuotaLimitBytes: 0,
+		ResetEnabled:    true,
+		ResetDay:        21,
+		ResetTime:       "00:00:00",
+		ResetNextAt:     now.Unix() - 10,
+	}
+	if err := s.UpsertConfig(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile 不应失败: %v", err)
+	}
+	st, _ := s.Snapshot()
+	if st["1"].QuotaUsed != 1000 {
+		t.Fatalf("配额关闭时不应自动重置 used=1000, got %d", st["1"].QuotaUsed)
+	}
+}
+
 func TestGenPolicyNFT(t *testing.T) {
 	list := []nodes.Node{{"id": int64(1), "type": "vless", "port": int64(443)}}
 	script := genPolicyNFT(map[int64]bool{443: true}, nil, list)
