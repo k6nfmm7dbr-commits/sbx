@@ -316,6 +316,87 @@ func TestQuotaExceededReconcile(t *testing.T) {
 	}
 }
 
+// TestTCPFlowIdleRelease 锁定：客户端异常断开（socket 仍 ESTABLISHED、但 conntrack
+// 字节不再增长）后，超过空闲窗口应把该 IP 从在线列表与活跃连接数中剔除。
+func TestTCPFlowIdleRelease(t *testing.T) {
+	s := newTestService(t)
+	seedNode(t, s, 1, "vless", 443)
+	s.SetTCPIdle(10 * time.Second)
+	ctx := context.Background()
+
+	base := time.Now()
+	s.SetClock(func() time.Time { return base })
+
+	// conntrack：一条 443 端口的流，先有流量（bytes=1000）
+	flow := []connection.ConntrackFlow{
+		{Proto: "tcp", DstPort: 443, SrcIP: "9.9.9.9", SrcPort: 12345, Bytes: 1000},
+	}
+	s.SetConntrack(func(path string) []connection.ConntrackFlow { return flow })
+
+	// /proc ESTABLISHED 也一直显示该 IP（模拟没发 FIN 的半开连接）
+	cur := map[string]connection.RemoteIPSet{
+		"1": {TCP: map[string]bool{"9.9.9.9": true}, UDP: map[string]bool{}},
+	}
+	s.SetRemoteIPs(func(list []nodes.Node) (map[string]connection.RemoteIPSet, bool, error) {
+		return cur, false, nil
+	})
+
+	if err := s.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := s.Snapshot()
+	if st["1"].ActiveIPs != 1 || st["1"].ActiveTCPConn != 1 {
+		t.Fatalf("首次应 1 在线 IP + 1 活跃连接, got %+v", st["1"])
+	}
+
+	// 无流量且超过空闲窗口 → 剔除
+	base = base.Add(11 * time.Second)
+	if err := s.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st, _ = s.Snapshot()
+	if st["1"].ActiveIPs != 0 || st["1"].ActiveTCPConn != 0 {
+		t.Fatalf("无流量超时空闲应 0 在线 IP + 0 活跃连接, got active=%d conn=%d", st["1"].ActiveIPs, st["1"].ActiveTCPConn)
+	}
+}
+
+// TestTCPFlowTrafficKeepsAlive 锁定：有持续流量（bytes 增长）的连接即使很久也保持在线。
+func TestTCPFlowTrafficKeepsAlive(t *testing.T) {
+	s := newTestService(t)
+	seedNode(t, s, 1, "vless", 443)
+	s.SetTCPIdle(10 * time.Second)
+	ctx := context.Background()
+
+	base := time.Now()
+	s.SetClock(func() time.Time { return base })
+	bytes := int64(1000)
+	s.SetConntrack(func(path string) []connection.ConntrackFlow {
+		return []connection.ConntrackFlow{
+			{Proto: "tcp", DstPort: 443, SrcIP: "9.9.9.9", SrcPort: 12345, Bytes: bytes},
+		}
+	})
+	cur := map[string]connection.RemoteIPSet{
+		"1": {TCP: map[string]bool{"9.9.9.9": true}, UDP: map[string]bool{}},
+	}
+	s.SetRemoteIPs(func(list []nodes.Node) (map[string]connection.RemoteIPSet, bool, error) {
+		return cur, false, nil
+	})
+
+	_ = s.reconcile(ctx)
+	// 持续有流量：跨多个周期 bytes 一直增长
+	for i := 0; i < 5; i++ {
+		bytes += 500
+		base = base.Add(3 * time.Second)
+		if err := s.reconcile(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st, _ := s.Snapshot()
+	if st["1"].ActiveIPs != 1 || st["1"].ActiveTCPConn != 1 {
+		t.Fatalf("持续有流量应保持在线, got %+v", st["1"])
+	}
+}
+
 func TestGenPolicyNFT(t *testing.T) {
 	list := []nodes.Node{{"id": int64(1), "type": "vless", "port": int64(443)}}
 	script := genPolicyNFT(map[int64]bool{443: true}, nil, list)

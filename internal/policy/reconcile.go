@@ -2,6 +2,7 @@ package policy
 
 import (
 	"context"
+	"strconv"
 
 	"github.com/k6nfmm7dbr-commits/sbx/internal/connection"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/nodes"
@@ -40,6 +41,21 @@ func (s *Service) reconcile(ctx context.Context) error {
 	nowNs := s.now().UnixNano()
 	udpTTLNs := s.udpTTL.Nanoseconds()
 
+	// conntrack 读一次，用于 TCP 连活判定（有近期流量才算在线/算连接数）。
+	var flows []connection.ConntrackFlow
+	if s.conntrack != nil {
+		flows = s.conntrack("")
+	}
+	// conntrack 不可用时回退 /proc ESTABLISHED 数作为「活跃连接数」。
+	var procConns map[string]connection.Conns
+	if len(flows) == 0 {
+		if cr, cerr := connection.CountForNodes(nodeList); cerr == nil {
+			procConns = cr.Conns
+		} else {
+			procConns = map[string]connection.Conns{}
+		}
+	}
+
 	newStates := map[string]State{}
 	newOnline := map[string]map[string]int64{}
 	quotaBlocked := map[string]bool{}
@@ -76,7 +92,8 @@ func (s *Service) reconcile(ctx context.Context) error {
 		}
 
 		// ---- IP slot 更新 ----
-		// slots 只存 UDP lastSeen；TCP 在线由本轮 cur.TCP 直接决定（断开即消失）。
+		// slots 只存 UDP lastSeen；TCP 在线由「conntrack 字节增判」决定：
+		// 有近期流量的 ESTABLISHED 连接才算在线，客户端异常断开后无流量即可回落。
 		if s.slots[id] == nil {
 			s.slots[id] = map[string]int64{}
 		}
@@ -94,9 +111,63 @@ func (s *Service) reconcile(ctx context.Context) error {
 			}
 		}
 
-		// 3) 构建 online 快照 = 本轮 TCP ∪ 未超 TTL 的 UDP。
+		// 3) 本节点端口集合 + TCP 连活判定。
+		nodePorts := map[int]bool{}
+		ranges := nodes.ParsePorts(n)
+		for _, r := range ranges {
+			for p := int(r[0]); p <= int(r[1]); p++ {
+				nodePorts[p] = true
+			}
+		}
+
+		activeTCP := map[string]bool{}
+		activeConn := 0
+		hasFlow := map[string]bool{} // cur.TCP 中「有 conntrack 流」的 IP
+
+		if len(flows) > 0 {
+			// 只统计「命中本节点监听端口、且源 IP 确实在 /proc ESTABLISHED 里」的流。
+			// 用 SrcIP ∈ cur.TCP 排除服务器自身发起的 outbound 流（其源 IP 是本机，不在客户端集合里）。
+			for _, f := range flows {
+				if f.Proto != "tcp" || !nodePorts[f.DstPort] || !cur.TCP[f.SrcIP] {
+					continue
+				}
+				hasFlow[f.SrcIP] = true
+				fkey := id + "\x00" + f.SrcIP + ":" + strconv.Itoa(f.SrcPort)
+				if last, ok := s.flowBytes[fkey]; ok {
+					if f.Bytes != last {
+						// 字节变化：有流量（或断线重连导致计数重置）→ 活跃
+						s.flowBytes[fkey] = f.Bytes
+						s.flowSeen[fkey] = nowNs
+					} else if nowNs-s.flowSeen[fkey] > s.tcpIdle.Nanoseconds() {
+						// 长期无流量 → 死连接，不计入在线
+						continue
+					}
+				} else {
+					s.flowBytes[fkey] = f.Bytes
+					s.flowSeen[fkey] = nowNs
+				}
+				activeTCP[f.SrcIP] = true
+				activeConn++
+			}
+			// cur.TCP 里没有 conntrack 流的 IP（本地连接 / 未走 conntrack）保守视为在线。
+			for ip := range cur.TCP {
+				if !hasFlow[ip] {
+					activeTCP[ip] = true
+				}
+			}
+		} else {
+			// conntrack 不可用：回退 ESTABLISHED 即在线。
+			for ip := range cur.TCP {
+				activeTCP[ip] = true
+			}
+			if c, ok := procConns[id]; ok && c.TCP != nil {
+				activeConn = *c.TCP
+			}
+		}
+
+		// 4) 构建 online 快照 = 活跃 TCP IP ∪ 未超 TTL 的 UDP。
 		online := map[string]int64{}
-		for ip := range cur.TCP {
+		for ip := range activeTCP {
 			online[ip] = nowNs
 		}
 		for ip, last := range slots {
@@ -106,6 +177,7 @@ func (s *Service) reconcile(ctx context.Context) error {
 
 		active := len(online)
 		st.ActiveIPs = active
+		st.ActiveTCPConn = activeConn
 
 		if cfg.IPLimitEnabled {
 			st.IPLimitState = "ok"

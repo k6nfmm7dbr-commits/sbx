@@ -37,6 +37,10 @@ type State struct {
 	IPLimitMax   int    `json:"ip_limit_max"`
 	ActiveIPs    int    `json:"active_ip_count"`
 	IPLimitState string `json:"ip_limit_state"` // unlimited / ok / exceeded
+
+	// ActiveTCPConn 是节点「活跃」TCP 连接数：有近期流量（conntrack 字节增判）的
+	// 连接才计入；conntrack 不可用时回退为 /proc ESTABLISHED 数。UDP 型节点为 0。
+	ActiveTCPConn int `json:"active_tcp_conns,omitempty"`
 }
 
 // Config 是持久化的策略配置（node_policy 表一行）。
@@ -79,6 +83,13 @@ type Service struct {
 	udpTTL time.Duration
 	now    func() time.Time
 
+	// TCP 连活判定：用 conntrack 字节增量识别「客户端异常断开但 socket 仍
+	// ESTABLISHED」的死连接。没有 conntrack 时回退 /proc ESTABLISHED 口径。
+	conntrack func(path string) []connection.ConntrackFlow
+	tcpIdle   time.Duration
+	flowBytes map[string]int64 // key: node\x00ip:sport -> 上次累计字节
+	flowSeen  map[string]int64 // key 同上 -> 上次活跃 unixNano
+
 	// nftApply 执行 nft 脚本（测试可替换为 no-op，规避 CI 无 nft 权限）。
 	nftApply func(ctx context.Context, scriptPath string) error
 
@@ -99,6 +110,10 @@ func New(db *sql.DB, appDir, nftConf string) *Service {
 		appliedIPLimit: map[string]map[string]bool{},
 		udpTTL:         120 * time.Second,
 		now:            time.Now,
+		conntrack:      connection.ReadConntrack,
+		tcpIdle:        tcpFlowIdleTimeout,
+		flowBytes:      map[string]int64{},
+		flowSeen:       map[string]int64{},
 		nftApply:       nil, // nil 表示用真实 nft 执行
 	}
 }
@@ -115,6 +130,17 @@ func (s *Service) SetNFTApply(fn func(ctx context.Context, scriptPath string) er
 
 // SetUDPTTL 覆盖 UDP slot 释放 TTL（测试用）。
 func (s *Service) SetUDPTTL(d time.Duration) { s.udpTTL = d }
+
+// tcpFlowIdleTimeout 是「无流量视为掉线」的判定窗口：客户端异常断开（没发 FIN）
+// 时服务端 socket 会一直停在 ESTABLISHED，只能靠 conntrack 累计字节不再增长来
+// 识别死连接。120s 兼顾「断开后尽快回落」与「连着但短时间没流量不误杀」。
+const tcpFlowIdleTimeout = 120 * time.Second
+
+// SetConntrack 注入 conntrack 读取函数（测试用）。
+func (s *Service) SetConntrack(fn func(path string) []connection.ConntrackFlow) { s.conntrack = fn }
+
+// SetTCPIdle 覆盖 TCP 连活判定的空闲窗口（测试用）。
+func (s *Service) SetTCPIdle(d time.Duration) { s.tcpIdle = d }
 
 // SetRemoteIPs 注入 TCP/UDP 活跃 IP 读取函数（测试用）。
 func (s *Service) SetRemoteIPs(fn func(list []nodes.Node) (map[string]connection.RemoteIPSet, bool, error)) {
