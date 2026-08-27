@@ -30,8 +30,8 @@ import (
 
 // 定时重置校验错误。
 var (
-	errInvalidResetPeriod = errors.New("reset_period 必须为 hourly/daily/weekly/monthly")
-	errInvalidResetTime   = errors.New("reset_time 必须为 HH:MM:SS")
+	errInvalidResetDay  = errors.New("重置日必须在 1~30 之间")
+	errInvalidResetTime = errors.New("重置时刻需为 HH:MM 或 HH:MM:SS")
 )
 
 // State 是单个节点的策略状态快照（面向 API / UI）。
@@ -45,10 +45,10 @@ type State struct {
 	ActiveIPs    int    `json:"active_ip_count"`
 	IPLimitState string `json:"ip_limit_state"` // unlimited / ok / exceeded
 
-	// 定时重置（计划任务）：用户可开关，精确到秒，月按 30 天。
+	// 定时重置（每月固定日自动重置）：用户可开关。
 	ResetEnabled bool   `json:"reset_enabled"`
-	ResetPeriod  string `json:"reset_period"`  // hourly / daily / weekly / monthly
-	ResetTime    string `json:"reset_time"`    // "HH:MM:SS"
+	ResetDay     int    `json:"reset_day"`    // 每月第几日（1~30）
+	ResetTime    string `json:"reset_time"`    // "HH:MM:SS"（秒固定 00）
 	ResetNextAt  int64  `json:"reset_next_at"` // 下次重置 Unix 秒
 }
 
@@ -63,7 +63,7 @@ type Config struct {
 
 	// 定时重置。
 	ResetEnabled bool
-	ResetPeriod  string
+	ResetDay     int
 	ResetTime    string
 	ResetNextAt  int64
 }
@@ -143,15 +143,15 @@ func (s *Service) SetLocation(loc *time.Location) { s.location = loc }
 func (s *Service) Now() time.Time { return s.now() }
 
 // ValidateReset 校验定时重置配置合法性。
-// 关闭时无约束；开启时要求周期合法、时刻格式为 HH:MM:SS。
+// 关闭时无约束；开启时要求日 1~30、时刻为 HH:MM 或 HH:MM:SS。
 func (s *Service) ValidateReset(c Config) error {
 	if !c.ResetEnabled {
 		return nil
 	}
-	if !validPeriod(c.ResetPeriod) {
-		return errInvalidResetPeriod
+	if !ValidResetDay(c.ResetDay) {
+		return errInvalidResetDay
 	}
-	if TimeOfDayToSeconds(c.ResetTime) < 0 {
+	if ParseResetTime(c.ResetTime) < 0 {
 		return errInvalidResetTime
 	}
 	return nil
@@ -211,7 +211,7 @@ func (s *Service) ActiveIPs(nodeID string) []string {
 func (s *Service) loadConfigs(ctx context.Context) (map[string]Config, error) {
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT node_id,quota_enabled,quota_limit_bytes,quota_reset_baseline,"+
-			"ip_limit_enabled,ip_limit_max,reset_enabled,reset_period,reset_time,reset_next_at "+
+			"ip_limit_enabled,ip_limit_max,reset_enabled,reset_day,reset_time,reset_next_at "+
 			"FROM node_policy")
 	if err != nil {
 		return nil, err
@@ -222,7 +222,7 @@ func (s *Service) loadConfigs(ctx context.Context) (map[string]Config, error) {
 		var c Config
 		var qe, ile, re int
 		if err := rows.Scan(&c.NodeID, &qe, &c.QuotaLimitBytes, &c.QuotaResetBaseline,
-			&ile, &c.IPLimitMax, &re, &c.ResetPeriod, &c.ResetTime, &c.ResetNextAt); err != nil {
+			&ile, &c.IPLimitMax, &re, &c.ResetDay, &c.ResetTime, &c.ResetNextAt); err != nil {
 			return nil, err
 		}
 		c.QuotaEnabled = qe != 0
@@ -253,10 +253,10 @@ func (s *Service) GetConfig(ctx context.Context, nodeID string) (Config, error) 
 	var qe, ile, re int
 	err := s.db.QueryRowContext(ctx,
 		"SELECT node_id,quota_enabled,quota_limit_bytes,quota_reset_baseline,"+
-			"ip_limit_enabled,ip_limit_max,reset_enabled,reset_period,reset_time,reset_next_at "+
+			"ip_limit_enabled,ip_limit_max,reset_enabled,reset_day,reset_time,reset_next_at "+
 			"FROM node_policy WHERE node_id=?",
 		nodeID).Scan(&c.NodeID, &qe, &c.QuotaLimitBytes, &c.QuotaResetBaseline,
-		&ile, &c.IPLimitMax, &re, &c.ResetPeriod, &c.ResetTime, &c.ResetNextAt)
+		&ile, &c.IPLimitMax, &re, &c.ResetDay, &c.ResetTime, &c.ResetNextAt)
 	if err == sql.ErrNoRows {
 		return Config{NodeID: nodeID}, nil
 	}
@@ -284,7 +284,7 @@ func (s *Service) UpsertConfig(ctx context.Context, c Config) error {
 	_, err := s.db.ExecContext(ctx,
 		"INSERT INTO node_policy(node_id,quota_enabled,quota_limit_bytes,"+
 			"quota_reset_baseline,ip_limit_enabled,ip_limit_max,"+
-			"reset_enabled,reset_period,reset_time,reset_next_at) "+
+			"reset_enabled,reset_day,reset_time,reset_next_at) "+
 			"VALUES(?,?,?,?,?,?,?,?,?,?) "+
 			"ON CONFLICT(node_id) DO UPDATE SET quota_enabled=excluded.quota_enabled,"+
 			"quota_limit_bytes=excluded.quota_limit_bytes,"+
@@ -292,11 +292,11 @@ func (s *Service) UpsertConfig(ctx context.Context, c Config) error {
 			"ip_limit_enabled=excluded.ip_limit_enabled,"+
 			"ip_limit_max=excluded.ip_limit_max,"+
 			"reset_enabled=excluded.reset_enabled,"+
-			"reset_period=excluded.reset_period,"+
+			"reset_day=excluded.reset_day,"+
 			"reset_time=excluded.reset_time,"+
 			"reset_next_at=excluded.reset_next_at",
 		c.NodeID, qe, c.QuotaLimitBytes, c.QuotaResetBaseline, ile, c.IPLimitMax,
-		re, c.ResetPeriod, c.ResetTime, c.ResetNextAt)
+		re, c.ResetDay, c.ResetTime, c.ResetNextAt)
 	return err
 }
 

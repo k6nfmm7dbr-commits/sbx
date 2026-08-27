@@ -76,7 +76,7 @@ type putPolicyRequest struct {
 
 	// 定时重置（可选，缺省视为不修改）。
 	ResetEnabled *bool   `json:"reset_enabled"`
-	ResetPeriod  *string `json:"reset_period"`
+	ResetDay     *int    `json:"reset_day"`
 	ResetTime    *string `json:"reset_time"`
 }
 
@@ -114,27 +114,36 @@ func (s *Server) putPolicy(w http.ResponseWriter, r *http.Request, nodeID string
 	cur.IPLimitMax = req.IPLimitMax
 
 	// 定时重置：仅当显式传了字段才修改（缺省保留原值）。
+	// 时刻收 HH:MM / HH:MM:SS 两种宽度，入库前规范化为 HH:MM:SS（秒固定 00）。
 	resetChanged := false
 	if req.ResetEnabled != nil && *req.ResetEnabled != cur.ResetEnabled {
 		cur.ResetEnabled = *req.ResetEnabled
 		resetChanged = true
 	}
-	if req.ResetPeriod != nil && *req.ResetPeriod != cur.ResetPeriod {
-		cur.ResetPeriod = *req.ResetPeriod
+	if req.ResetDay != nil && *req.ResetDay != cur.ResetDay {
+		cur.ResetDay = *req.ResetDay
 		resetChanged = true
 	}
-	if req.ResetTime != nil && *req.ResetTime != cur.ResetTime {
-		cur.ResetTime = *req.ResetTime
-		resetChanged = true
+	if req.ResetTime != nil {
+		secs := policy.ParseResetTime(*req.ResetTime)
+		if secs < 0 {
+			s.sendJSON(w, r, http.StatusBadRequest,
+				map[string]string{"error": "重置时刻需为 HH:MM 或 HH:MM:SS"})
+			return
+		}
+		if canon := policy.SecondsToTimeOfDay(secs); canon != cur.ResetTime {
+			cur.ResetTime = canon
+			resetChanged = true
+		}
 	}
 	if err := s.policy.ValidateReset(cur); err != nil {
 		s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	// 开启定时重置且（刚开启 / 周期或时刻变了 / 从未算过）→ 重算下次触发时间。
+	// 开启定时重置且（刚开启 / 日或时刻变了 / 从未算过）→ 重算下次触发时间。
 	if cur.ResetEnabled && (cur.ResetNextAt == 0 || resetChanged) {
-		cur.ResetNextAt = policy.NextResetAt(s.policy.Now(), cur.ResetPeriod,
-			policy.TimeOfDayToSeconds(cur.ResetTime), nil)
+		cur.ResetNextAt = policy.NextResetAt(s.policy.Now(), cur.ResetDay,
+			policy.ParseResetTime(cur.ResetTime), nil)
 	} else if !cur.ResetEnabled {
 		// 关闭时清空下次时间，避免残留误导。
 		cur.ResetNextAt = 0
@@ -190,7 +199,7 @@ func policyStateDefault() policy.State {
 		ActiveIPs:    0,
 		IPLimitState: "unlimited",
 		ResetEnabled: false,
-		ResetPeriod:  "",
+		ResetDay:     1,
 		ResetTime:    "00:00:00",
 		ResetNextAt:  0,
 	}

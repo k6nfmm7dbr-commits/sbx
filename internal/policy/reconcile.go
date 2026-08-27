@@ -50,13 +50,18 @@ func (s *Service) reconcile(ctx context.Context) error {
 		cfg := cfgs[id]
 
 		// ---- 定时重置：到期立即把 baseline 抬到当前 lifetime，并推进下次时间 ----
-		if cfg.ResetEnabled && validPeriod(cfg.ResetPeriod) && cfg.ResetNextAt > 0 && nowNs/1e9 >= cfg.ResetNextAt {
+		// day 非法（旧数据/异常配置）时跳过自动重置，宁可不动也不乱归零。
+		if cfg.ResetEnabled && cfg.ResetNextAt > 0 && ValidResetDay(cfg.ResetDay) && nowNs/1e9 >= cfg.ResetNextAt {
+			tod := ParseResetTime(cfg.ResetTime)
+			if tod < 0 {
+				tod = 0
+			}
 			life, lerr := s.lifetimeBytes(ctx, id)
 			if lerr != nil {
 				return lerr
 			}
 			cfg.QuotaResetBaseline = life
-			cfg.ResetNextAt = AdvanceNextPast(cfg.ResetNextAt, cfg.ResetPeriod, nowNs/1e9)
+			cfg.ResetNextAt = AdvanceNextPast(cfg.ResetNextAt, cfg.ResetDay, tod, s.location, nowNs/1e9)
 			if uerr := s.UpsertConfig(ctx, cfg); uerr != nil {
 				return uerr
 			}
@@ -80,7 +85,7 @@ func (s *Service) reconcile(ctx context.Context) error {
 			IPLimitMax:   cfg.IPLimitMax,
 			IPLimitState: "unlimited",
 			ResetEnabled: cfg.ResetEnabled,
-			ResetPeriod:  cfg.ResetPeriod,
+			ResetDay:     cfg.ResetDay,
 			ResetTime:    cfg.ResetTime,
 			ResetNextAt:  cfg.ResetNextAt,
 		}

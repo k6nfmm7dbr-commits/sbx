@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS node_policy (
     ip_limit_enabled       INTEGER NOT NULL DEFAULT 0,
     ip_limit_max           INTEGER NOT NULL DEFAULT 0,
     reset_enabled          INTEGER NOT NULL DEFAULT 0,
-    reset_period           TEXT    NOT NULL DEFAULT '',
+    reset_period           TEXT    NOT NULL DEFAULT '', -- 已废弃：旧版周期列，仅保留避免破坏性迁移
+    reset_day              INTEGER NOT NULL DEFAULT 0,
     reset_time             TEXT    NOT NULL DEFAULT '',
     reset_next_at          INTEGER NOT NULL DEFAULT 0
 );
@@ -154,6 +155,11 @@ func (d *DB) migrate() error {
 	}
 	if _, ok := npCols["reset_time"]; !ok {
 		if _, err := tx.Exec("ALTER TABLE node_policy ADD COLUMN reset_time TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+	}
+	if _, ok := npCols["reset_day"]; !ok {
+		if _, err := tx.Exec("ALTER TABLE node_policy ADD COLUMN reset_day INTEGER NOT NULL DEFAULT 0"); err != nil {
 			return err
 		}
 	}

@@ -125,10 +125,10 @@ func (s *Server) attachPolicyToSummary(sum *traffic.Summary) {
 		if st.IPLimitOn {
 			sum.Nodes[i].IPLimitState = st.IPLimitState
 		}
-		// 定时重置：开启时下发周期/时刻/下次时间（供节点卡片倒计时）。
+		// 定时重置：开启时下发日/时刻/下次时间（供节点卡片倒计时与管理抽屉回填）。
 		if st.ResetEnabled {
 			sum.Nodes[i].ResetEnabled = true
-			sum.Nodes[i].ResetPeriod = st.ResetPeriod
+			sum.Nodes[i].ResetDay = st.ResetDay
 			sum.Nodes[i].ResetTime = st.ResetTime
 			sum.Nodes[i].ResetNextAt = st.ResetNextAt
 		}

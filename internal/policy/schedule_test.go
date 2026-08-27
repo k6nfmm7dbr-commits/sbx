@@ -5,152 +5,132 @@ import (
 	"time"
 )
 
-func utcLoc() *time.Location {
-	l, _ := time.LoadLocation("UTC")
-	return l
+var cst = time.FixedZone("CST", 8*3600)
+
+func at(y int, m time.Month, d, hh, mm, ss int) time.Time {
+	return time.Date(y, m, d, hh, mm, ss, 0, cst)
 }
 
-func TestTimeOfDayRoundTrip(t *testing.T) {
-	cases := []string{"00:00:00", "00:00:01", "12:34:56", "23:59:59", "08:05:09"}
+func equalUnix(t *testing.T, what string, got int64, want time.Time) {
+	t.Helper()
+	if got != want.Unix() {
+		t.Fatalf("%s: want %s(%d), got %d (%s)", what,
+			want.Format("2006-01-02 15:04:05"), want.Unix(), got,
+			time.Unix(got, 0).In(cst).Format("2006-01-02 15:04:05"))
+	}
+}
+
+func TestParseResetTime(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{"00:00", 0},
+		{"08:00", 28800},
+		{"23:59", 86340},
+		{"00:00:00", 0},
+		{"08:00:00", 28800},
+		{"23:59:59", 86399},
+		// 非法：段数错 / 范围错 / 非数字
+		{"8:00", -1}, {"8:00:00", -1}, {"24:00", -1}, {"23:60", -1},
+		{"23:59:60", -1}, {"", -1}, {"ab:cd", -1}, {"12:00:00:00", -1}, {"12-00", -1},
+	}
 	for _, c := range cases {
-		secs := TimeOfDayToSeconds(c)
-		if secs < 0 {
-			t.Fatalf("%s 解析失败", c)
-		}
-		if got := SecondsToTimeOfDay(secs); got != c {
-			t.Fatalf("%s round-trip = %s", c, got)
-		}
-	}
-	for _, bad := range []string{"24:00:00", "12:60:00", "12:00:60", "abc", "1:2:3"} {
-		if TimeOfDayToSeconds(bad) >= 0 {
-			t.Fatalf("%q 应非法", bad)
+		if got := ParseResetTime(c.in); got != c.want {
+			t.Errorf("ParseResetTime(%q) = %d, want %d", c.in, got, c.want)
 		}
 	}
 }
 
-func TestNextResetDailyExactSecond(t *testing.T) {
-	l := utcLoc()
-	// 08:00:00 之前 → 今天 08:00:00。
-	now := time.Date(2026, 8, 27, 7, 30, 0, 0, l)
-	next := NextResetAt(now, "daily", TimeOfDayToSeconds("08:00:00"), l)
-	want := time.Date(2026, 8, 27, 8, 0, 0, 0, l).Unix()
-	if next != want {
-		t.Fatalf("daily 08:00 前: got %d want %d", next, want)
-	}
-	// 08:00:01 → 明天 08:00:00（精确到秒）。
-	now = time.Date(2026, 8, 27, 8, 0, 1, 0, l)
-	next = NextResetAt(now, "daily", TimeOfDayToSeconds("08:00:00"), l)
-	want = time.Date(2026, 8, 28, 8, 0, 0, 0, l).Unix()
-	if next != want {
-		t.Fatalf("daily 08:00 后: got %d want %d", next, want)
-	}
-	// 恰好 08:00:00 → 严格 > now，取明天。
-	now = time.Date(2026, 8, 27, 8, 0, 0, 0, l)
-	next = NextResetAt(now, "daily", TimeOfDayToSeconds("08:00:00"), l)
-	want = time.Date(2026, 8, 28, 8, 0, 0, 0, l).Unix()
-	if next != want {
-		t.Fatalf("daily 恰好 08:00: 应取明天, got %d want %d", next, want)
-	}
-}
-
-func TestNextResetHourly(t *testing.T) {
-	l := utcLoc()
-	// hourly：相位 = 分:秒（00:15:30 → 每小时 15:30）。
-	now := time.Date(2026, 8, 27, 10, 0, 0, 0, l)
-	next := NextResetAt(now, "hourly", TimeOfDayToSeconds("00:15:30"), l)
-	want := time.Date(2026, 8, 27, 10, 15, 30, 0, l).Unix()
-	if next != want {
-		t.Fatalf("hourly: got %d want %d", next, want)
-	}
-	// 过了 10:15:30 → 11:15:30。
-	now = time.Date(2026, 8, 27, 10, 15, 31, 0, l)
-	next = NextResetAt(now, "hourly", TimeOfDayToSeconds("00:15:30"), l)
-	want = time.Date(2026, 8, 27, 11, 15, 30, 0, l).Unix()
-	if next != want {
-		t.Fatalf("hourly 过点: got %d want %d", next, want)
-	}
-}
-
-func TestNextResetWeeklyAdvance(t *testing.T) {
-	l := utcLoc()
-	// weekly 首次就近当天目标时刻；后续靠 AdvanceNext 每 7 天推进。
-	now := time.Date(2026, 8, 27, 9, 0, 0, 0, l)
-	first := NextResetAt(now, "weekly", TimeOfDayToSeconds("08:00:00"), l)
-	// 08:00 已过 → 首次应是明天 08:00。
-	want := time.Date(2026, 8, 28, 8, 0, 0, 0, l).Unix()
-	if first != want {
-		t.Fatalf("weekly 首次: got %d want %d", first, want)
-	}
-	// 推进 3 个周期，间隔恒 7 天。
-	n := first
-	for i := 0; i < 3; i++ {
-		next := AdvanceNext(n, "weekly")
-		if next-n != 7*86400 {
-			t.Fatalf("weekly 步长应 7 天: got %d", next-n)
+func TestValidResetDay(t *testing.T) {
+	for _, d := range []int{1, 2, 15, 29, 30} {
+		if !ValidResetDay(d) {
+			t.Errorf("ValidResetDay(%d) 应为 true", d)
 		}
-		n = next
 	}
-}
-
-func TestNextResetMonthly30Days(t *testing.T) {
-	l := utcLoc()
-	month := int64(30 * 86400)
-	// 月 = 30 天：AdvanceNext 步长恒 30 天。
-	now := time.Date(2026, 8, 27, 0, 0, 0, 0, l)
-	tod := TimeOfDayToSeconds("00:30:00")
-	first := NextResetAt(now, "monthly", tod, l)
-	if first != time.Date(2026, 8, 27, 0, 30, 0, 0, l).Unix() {
-		t.Fatalf("monthly 首次: got %d", first)
-	}
-	n := first
-	for i := 0; i < 3; i++ {
-		next := AdvanceNext(n, "monthly")
-		if next-n != month {
-			t.Fatalf("monthly 步长应 30 天: got %d", next-n)
+	for _, d := range []int{-1, 0, 31, 100} {
+		if ValidResetDay(d) {
+			t.Errorf("ValidResetDay(%d) 应为 false", d)
 		}
-		n = next
 	}
 }
 
-func TestNextResetIn(t *testing.T) {
-	l := utcLoc()
-	now := time.Date(2026, 8, 27, 7, 30, 0, 0, l)
-	rem := NextResetIn(now, "daily", TimeOfDayToSeconds("08:00:00"), l)
-	if rem != 30*60 {
-		t.Fatalf("剩余应 1800s, got %d", rem)
-	}
+// 8 月 27 日 22:39 设「每月 21 日 00:00」→ 下次是 9 月 21 日 00:00。
+// 不是 8 月 21 日（已过去），更不是旧 30 天步长模型的「明天的同一时刻」。
+func TestNextResetMonthlyDay21(t *testing.T) {
+	now := at(2026, time.August, 27, 22, 39, 0)
+	equalUnix(t, "next", NextResetAt(now, 21, 0, cst), at(2026, time.September, 21, 0, 0, 0))
 }
 
-func TestAdvanceNextPast(t *testing.T) {
-	// 面板停摆多周期：next 已过期很久，应推进到严格 > now 的未来。
-	next := int64(1000)
-	now := int64(10 * 86400) // 10 天后
-	got := AdvanceNextPast(next, "daily", now)
-	if got <= now {
-		t.Fatalf("AdvanceNextPast 应推进到未来: got %d now %d", got, now)
-	}
-	// 步长恒 1 天、相位保持：got 与 next 的差应是 86400 的整数倍。
-	if (got-next)%86400 != 0 {
-		t.Fatalf("daily 推进应保持日相位: %d", got-next)
-	}
-	// monthly 步长 30 天。
-	got2 := AdvanceNextPast(int64(0), "monthly", int64(31*86400))
-	if got2 <= int64(31*86400) || (got2)%(30*86400) != 0 {
-		t.Fatalf("monthly 推进异常: %d", got2)
-	}
+// 当月配置时刻还没过 → 本月命中。
+func TestNextResetSameMonth(t *testing.T) {
+	now := at(2026, time.August, 10, 8, 0, 0)
+	equalUnix(t, "next", NextResetAt(now, 21, 9*3600+30*60, cst), at(2026, time.August, 21, 9, 30, 0))
 }
 
-func TestPeriodSecondsAndValid(t *testing.T) {
-	if periodSeconds("hourly") != 3600 ||
-		periodSeconds("daily") != 86400 ||
-		periodSeconds("weekly") != 7*86400 ||
-		periodSeconds("monthly") != 30*86400 {
-		t.Fatal("periodSeconds 常量错误")
+// 严格大于 now：now 恰好等于配置时刻时返回下个月。
+func TestNextResetStrictlyFuture(t *testing.T) {
+	now := at(2026, time.August, 21, 0, 0, 0)
+	equalUnix(t, "next", NextResetAt(now, 21, 0, cst), at(2026, time.September, 21, 0, 0, 0))
+}
+
+// 29/30 在小月钳到月末；闰年 2 月钳到 29。
+func TestNextResetClampShortMonth(t *testing.T) {
+	// 2026-02 平月 28 天：day=30 → 2 月 28 日 00:00
+	equalUnix(t, "2026-02", NextResetAt(at(2026, time.February, 10, 0, 0, 0), 30, 0, cst),
+		at(2026, time.February, 28, 0, 0, 0))
+	// 2028-02 闰年 29 天：day=30 → 2 月 29 日
+	equalUnix(t, "2028-02", NextResetAt(at(2028, time.February, 10, 0, 0, 0), 30, 0, cst),
+		at(2028, time.February, 29, 0, 0, 0))
+	// 30 天的月份（4 月）：day=30 原样命中
+	equalUnix(t, "2026-04", NextResetAt(at(2026, time.April, 10, 0, 0, 0), 30, 0, cst),
+		at(2026, time.April, 30, 0, 0, 0))
+}
+
+// 推进以「配置日」锚定：2 月钳到 28 之后，3 月回到配置日 30，而非停在 28。
+func TestAdvanceNextAnchoredToConfiguredDay(t *testing.T) {
+	feb := NextResetAt(at(2026, time.February, 10, 0, 0, 0), 30, 0, cst) // 2026-02-28
+	equalUnix(t, "mar", AdvanceNext(feb, 30, 0, cst), at(2026, time.March, 30, 0, 0, 0))
+	// 常规推进：9-21 → 10-21，时刻保持
+	sep := NextResetAt(at(2026, time.September, 22, 0, 0, 0), 21, 8*3600, cst)
+	equalUnix(t, "oct", AdvanceNext(sep, 21, 8*3600, cst), at(2026, time.October, 21, 8, 0, 0))
+}
+
+// 停摆多周期恢复：1 月 21 日停机、4 月 10 日恢复 → 直接推进到 4 月 21 日 00:00，
+// 日历日始终是 21（旧 30 天步长模型会漂移到 20/19 日）。
+func TestAdvanceNextPastRecoversToCalendarDay(t *testing.T) {
+	stale := at(2026, time.January, 21, 0, 0, 0).Unix()
+	got := AdvanceNextPast(stale, 21, 0, cst, at(2026, time.April, 10, 12, 0, 0).Unix())
+	equalUnix(t, "next", got, at(2026, time.April, 21, 0, 0, 0))
+}
+
+// 不变量：连续推进严格递增、时刻相位恒定；非法配置原样/返回 0。
+func TestScheduleInvariants(t *testing.T) {
+	base := at(2026, time.January, 31, 23, 59, 59).Unix()
+	for i := 0; i < 24; i++ {
+		nx := AdvanceNext(base, 21, 9*3600+30*60, cst)
+		if nx <= base {
+			t.Fatalf("第 %d 次推进未前进: %d -> %d", i, base, nx)
+		}
+		g := time.Unix(nx, 0).In(cst)
+		if g.Day() != 21 || g.Hour() != 9 || g.Minute() != 30 || g.Second() != 0 {
+			t.Fatalf("推进后相位漂移: %s", g)
+		}
+		base = nx
 	}
-	if !validPeriod("daily") || validPeriod("yearly") || validPeriod("") {
-		t.Fatal("validPeriod 判定错误")
+	if AdvanceNext(12345, 0, 0, cst) != 12345 {
+		t.Fatal("day 非法时 AdvanceNext 应原样返回")
 	}
-	if periodSeconds("bogus") != 0 || NextResetAt(time.Now(), "bogus", 0, nil) != 0 {
-		t.Fatal("非法周期应返回 0")
+	if AdvanceNextPast(1, 0, 0, cst, 9999999) != 1 {
+		t.Fatal("day 非法时 AdvanceNextPast 应原样返回")
+	}
+	if NextResetAt(time.Now(), 0, 0, cst) != 0 {
+		t.Fatal("day 非法时 NextResetAt 应返回 0")
+	}
+	if NextResetAt(time.Now(), 21, -1, cst) != 0 {
+		t.Fatal("时刻非法时 NextResetAt 应返回 0")
+	}
+	if NextResetIn(at(2026, time.August, 27, 0, 0, 0), 28, 8*3600, cst) != int64(8*3600+24*3600) {
+		t.Fatal("NextResetIn 剩余秒数不对")
 	}
 }

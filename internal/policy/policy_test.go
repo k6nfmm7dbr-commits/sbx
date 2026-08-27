@@ -331,7 +331,7 @@ func TestAutoResetAtDue(t *testing.T) {
 		QuotaEnabled:    true,
 		QuotaLimitBytes: 1000,
 		ResetEnabled:    true,
-		ResetPeriod:     "daily",
+		ResetDay:        21,
 		ResetTime:       "00:00:00",
 		ResetNextAt:     now.Unix() - 10, // 已过期
 	}
@@ -348,8 +348,43 @@ func TestAutoResetAtDue(t *testing.T) {
 	if st["1"].ResetNextAt <= now.Unix() {
 		t.Fatalf("重置后下次时间应 > now, got %d", st["1"].ResetNextAt)
 	}
-	if st["1"].ResetEnabled != true || st["1"].ResetPeriod != "daily" {
+	// 推进必须落在未来、且是某月 21 日 00:00:00（日历锚定不漂移）。
+	next := time.Unix(st["1"].ResetNextAt, 0).In(time.Local)
+	if next.Day() != 21 || next.Hour() != 0 || next.Minute() != 0 || next.Second() != 0 {
+		t.Fatalf("推进后应保持每月 21 日 00:00:00 相位, got %s", next)
+	}
+	if st["1"].ResetEnabled != true || st["1"].ResetDay != 21 {
 		t.Fatalf("重置后配置应保留: %+v", st["1"])
+	}
+}
+
+// TestAutoResetSkipsInvalidDay 锁定：day 非法（旧数据残留）时 reconcile
+// 不执行自动重置，宁可不动也不乱归零。
+func TestAutoResetSkipsInvalidDay(t *testing.T) {
+	s := newTestService(t)
+	seedNode(t, s, 1, "vless", 443)
+	seedTotals(t, s, "1", 600, 400)
+	ctx := context.Background()
+	now := s.now()
+	cfg := Config{
+		NodeID:             "1",
+		QuotaEnabled:       true,
+		QuotaLimitBytes:    1000,
+		QuotaResetBaseline: 0,
+		ResetEnabled:       true,
+		ResetDay:           0, // 非法
+		ResetTime:          "00:00:00",
+		ResetNextAt:        now.Unix() - 10,
+	}
+	if err := s.UpsertConfig(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile 不应失败: %v", err)
+	}
+	st, _ := s.Snapshot()
+	if st["1"].QuotaUsed != 1000 {
+		t.Fatalf("day 非法不应重置 used, got %d", st["1"].QuotaUsed)
 	}
 }
 

@@ -86,9 +86,9 @@ type SummaryNode struct {
 	IPLimitMax   int    `json:"ip_limit_max,omitempty"`
 	ActiveIPs    int    `json:"active_ip_count,omitempty"`
 	IPLimitState string `json:"ip_limit_state,omitempty"`
-	// 定时重置（计划任务）。
+	// 定时重置（每月固定日）。
 	ResetEnabled bool   `json:"reset_enabled,omitempty"`
-	ResetPeriod  string `json:"reset_period,omitempty"`
+	ResetDay     int    `json:"reset_day,omitempty"`
 	ResetTime    string `json:"reset_time,omitempty"`
 	ResetNextAt  int64  `json:"reset_next_at,omitempty"`
 }
