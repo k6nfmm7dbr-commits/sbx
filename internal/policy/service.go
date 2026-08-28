@@ -57,7 +57,7 @@ type Config struct {
 // 并发模型：
 //   - reconcile 由 runMu 串行化（Run goroutine 周期调用 + API 保存时同步调用，
 //     两者可能并发 → 必须串行，否则并发写 map 会 fatal error 崩溃）；
-//   - states/slots/online/applied 由 mu 保护（Snapshot/ActiveIPs 只读走 RLock）。
+//   - states/ipStates/applied 由 mu 保护（Snapshot / 快照 只读走 RLock）。
 type Service struct {
 	db      *sql.DB
 	appDir  string
@@ -70,31 +70,31 @@ type Service struct {
 	lastErr string
 
 	// IP Tracker 运行态（都在 mu 保护下）：
-	//   slots  —— nodeID -> ip -> UDP lastSeen（UnixNano），只存 UDP，用于 TTL 判定；
-	//   online —— nodeID -> ip -> lastSeen，当前「在线 IP」快照（TCP+UDP 合并，
-	//             TCP 断开立即消失，UDP 靠 TTL），供 ActiveIPs / active 数 / nft 用。
-	slots  map[string]map[string]int64
-	online map[string]map[string]int64
+	//   ipStates —— nodeID -> NodeIPState（Slots=Granted / Observed / Rejected）。
+	//   这是「观察到的 IP」「获准使用的 IP」「被拒绝的 IP」三者分离的唯一事实源。
+	ipStates map[string]*NodeIPState
 
 	// 已应用的 enforcement 快照（避免每轮 reconcile 无谓重写 nft）。
 	appliedQuota   map[string]bool
 	appliedIPLimit map[string]map[string]bool // nodeID -> ip set
 
-	udpTTL time.Duration
-	now    func() time.Time
+	now func() time.Time
 
-	// TCP 连活判定：用 conntrack 字节增量识别「客户端异常断开但 socket 仍
-	// ESTABLISHED」的死连接。没有 conntrack 时回退 /proc ESTABLISHED 口径。
-	conntrack func(path string) []connection.ConntrackFlow
-	tcpIdle   time.Duration
-	flowBytes map[string]int64 // key: node\x00ip:sport -> 上次累计字节
-	flowSeen  map[string]int64 // key 同上 -> 上次活跃 unixNano
+	// IP 判活与 admission 参数。
+	ipIdle      time.Duration // 无流量/消失后判离线窗口（grace = 同一窗口）
+	rejectedTTL time.Duration // 拒绝记录保留时长
+	conntrack   func(path string) connection.ConntrackResult
+	remoteIPs   func(list []nodes.Node) (map[string]connection.RemoteIPSet, bool, error)
+
+	// flow tracker：conntrack 字节增量判活状态（key: node\x00ip:sport）。
+	// reconcile 串行访问，runMu 保护；DeleteNode 清理。
+	flows map[string]*flowState
+
+	// notify 在每次 reconcile 发布新状态后非阻塞 signal，供 SSE 广播层唤醒。
+	notify chan struct{}
 
 	// nftApply 执行 nft 脚本（测试可替换为 no-op，规避 CI 无 nft 权限）。
 	nftApply func(ctx context.Context, scriptPath string) error
-
-	// remoteIPs 读取各节点 TCP/UDP 活跃 IP（测试可注入，默认读 /proc）。
-	remoteIPs func(list []nodes.Node) (map[string]connection.RemoteIPSet, bool, error)
 }
 
 // New 构造策略服务。
@@ -104,16 +104,15 @@ func New(db *sql.DB, appDir, nftConf string) *Service {
 		appDir:         appDir,
 		nftConf:        nftConf,
 		states:         map[string]State{},
-		slots:          map[string]map[string]int64{},
-		online:         map[string]map[string]int64{},
+		ipStates:       map[string]*NodeIPState{},
 		appliedQuota:   map[string]bool{},
 		appliedIPLimit: map[string]map[string]bool{},
-		udpTTL:         120 * time.Second,
 		now:            time.Now,
+		ipIdle:         ipIdleTimeout,
+		rejectedTTL:    rejectedTTL,
 		conntrack:      connection.ReadConntrack,
-		tcpIdle:        tcpFlowIdleTimeout,
-		flowBytes:      map[string]int64{},
-		flowSeen:       map[string]int64{},
+		flows:          map[string]*flowState{},
+		notify:         make(chan struct{}, 1),
 		nftApply:       nil, // nil 表示用真实 nft 执行
 	}
 }
@@ -128,24 +127,29 @@ func (s *Service) SetNFTApply(fn func(ctx context.Context, scriptPath string) er
 	s.nftApply = fn
 }
 
-// SetUDPTTL 覆盖 UDP slot 释放 TTL（测试用）。
-func (s *Service) SetUDPTTL(d time.Duration) { s.udpTTL = d }
+// ipIdleTimeout 是「无流量 / 消失后判离线」的窗口（同时充当 grace 时长）。
+// 移动端切网、TCP reconnect、QUIC、UDP NAT 短暂消失不会瞬间释放 slot。
+const ipIdleTimeout = 60 * time.Second
 
-// tcpFlowIdleTimeout 是「无流量视为掉线」的判定窗口：客户端异常断开（没发 FIN）
-// 时服务端 socket 会一直停在 ESTABLISHED，只能靠 conntrack 累计字节不再增长来
-// 识别死连接。120s 兼顾「断开后尽快回落」与「连着但短时间没流量不误杀」。
-const tcpFlowIdleTimeout = 120 * time.Second
+// rejectedTTL 是「被拒绝 IP」记录的保留时长（防端口扫描无限增长）。
+const rejectedTTL = 60 * time.Second
+
+// SetIPIdle 覆盖判活/grace 窗口（测试用）。
+func (s *Service) SetIPIdle(d time.Duration) { s.ipIdle = d }
+
+// SetRejectedTTL 覆盖拒绝记录 TTL（测试用）。
+func (s *Service) SetRejectedTTL(d time.Duration) { s.rejectedTTL = d }
 
 // SetConntrack 注入 conntrack 读取函数（测试用）。
-func (s *Service) SetConntrack(fn func(path string) []connection.ConntrackFlow) { s.conntrack = fn }
+func (s *Service) SetConntrack(fn func(path string) connection.ConntrackResult) { s.conntrack = fn }
 
-// SetTCPIdle 覆盖 TCP 连活判定的空闲窗口（测试用）。
-func (s *Service) SetTCPIdle(d time.Duration) { s.tcpIdle = d }
-
-// SetRemoteIPs 注入 TCP/UDP 活跃 IP 读取函数（测试用）。
+// SetRemoteIPs 注入 TCP/UDP 活跃 IP 读取函数（/proc 回退数据源，测试可注入）。
 func (s *Service) SetRemoteIPs(fn func(list []nodes.Node) (map[string]connection.RemoteIPSet, bool, error)) {
 	s.remoteIPs = fn
 }
+
+// Notify 返回 reconcile 发布新状态时被 signal 的只读通道（SSE 广播层等待它）。
+func (s *Service) Notify() <-chan struct{} { return s.notify }
 
 // Snapshot 返回策略状态快照。ready=false 表示尚未完成首次 reconcile。
 func (s *Service) Snapshot() (map[string]State, bool) {
@@ -165,29 +169,115 @@ func (s *Service) LastError() string {
 	return s.lastErr
 }
 
-// ActiveIPs 返回某节点当前在线公网 IP 列表（读 online 快照，含 TCP+UDP，按最后活跃时间倒序）。
+// ActiveIPs 返回某节点当前已获 slot（granted）的公网 IP 列表，按活跃时间倒序。
+// 未开启限制时，所有活跃 IP 都被授予 slot，因此等价于「当前在线 IP」。
 func (s *Service) ActiveIPs(nodeID string) []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	m := s.online[nodeID]
+	st := s.ipStates[nodeID]
+	if st == nil {
+		return []string{}
+	}
 	type kv struct {
 		ip   string
-		last int64
+		last time.Time
 	}
-	arr := make([]kv, 0, len(m))
-	for ip, last := range m {
+	arr := make([]kv, 0, len(st.Slots))
+	for ip, slot := range st.Slots {
+		last := slot.LastSeen
+		if slot.LastTraffic.After(last) {
+			last = slot.LastTraffic
+		}
 		arr = append(arr, kv{ip, last})
 	}
-	// 稳定排序：lastSeen 倒序，同时间按 IP 字典序（确定性输出）。
 	sort.Slice(arr, func(i, j int) bool {
-		if arr[i].last != arr[j].last {
-			return arr[i].last > arr[j].last
+		if !arr[i].last.Equal(arr[j].last) {
+			return arr[i].last.After(arr[j].last)
 		}
 		return arr[i].ip < arr[j].ip
 	})
 	out := make([]string, 0, len(arr))
 	for _, it := range arr {
 		out = append(out, it.ip)
+	}
+	return out
+}
+
+// flowState 是 conntrack 单条流（node + ip + sport）的判活状态。
+type flowState struct {
+	Bytes    int64
+	LastSeen time.Time
+}
+
+func (s *Service) signalNotify() {
+	select {
+	case s.notify <- struct{}{}:
+	default:
+	}
+}
+
+// IPEntry 是单个客户端 IP 的展示快照。
+type IPEntry struct {
+	IP      string `json:"ip"`
+	TCP     int    `json:"tcp"`
+	UDP     int    `json:"udp"`
+	Granted bool   `json:"granted"`
+}
+
+// NodeIPSnapshot 是单个节点的在线 IP 快照（供 /api/nodes/:id/ip-state 与 SSE）。
+type NodeIPSnapshot struct {
+	NodeID   string    `json:"node_id"`
+	Limited  bool      `json:"limited"`
+	MaxIPs   int       `json:"max_ips"`
+	Granted  int       `json:"granted_count"`
+	IPs      []IPEntry `json:"ips"`
+	Rejected []IPEntry `json:"rejected"`
+}
+
+func (s *Service) nodeIPSnapshotLocked(nodeID string) NodeIPSnapshot {
+	snap := NodeIPSnapshot{NodeID: nodeID, IPs: []IPEntry{}, Rejected: []IPEntry{}}
+	st := s.ipStates[nodeID]
+	if st == nil {
+		return snap
+	}
+	snap.Limited = st.MaxIPs > 0
+	snap.MaxIPs = st.MaxIPs
+	snap.Granted = len(st.Slots)
+	for ip := range st.Slots {
+		e := IPEntry{IP: ip, Granted: true}
+		if o, ok := st.Observed[ip]; ok {
+			e.TCP = o.TCPSessions
+			e.UDP = o.UDPSessions
+		}
+		snap.IPs = append(snap.IPs, e)
+	}
+	for ip := range st.Rejected {
+		e := IPEntry{IP: ip, Granted: false}
+		if o, ok := st.Observed[ip]; ok {
+			e.TCP = o.TCPSessions
+			e.UDP = o.UDPSessions
+		}
+		snap.Rejected = append(snap.Rejected, e)
+	}
+	sort.Slice(snap.IPs, func(i, j int) bool { return snap.IPs[i].IP < snap.IPs[j].IP })
+	sort.Slice(snap.Rejected, func(i, j int) bool { return snap.Rejected[i].IP < snap.Rejected[j].IP })
+	return snap
+}
+
+// NodeIPSnapshot 返回单个节点的在线 IP 快照。
+func (s *Service) NodeIPSnapshot(nodeID string) NodeIPSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.nodeIPSnapshotLocked(nodeID)
+}
+
+// IPStateSnapshot 返回所有节点的在线 IP 快照（SSE 首次完整 snapshot）。
+func (s *Service) IPStateSnapshot() map[string]NodeIPSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]NodeIPSnapshot, len(s.states))
+	for id := range s.states {
+		out[id] = s.nodeIPSnapshotLocked(id)
 	}
 	return out
 }
@@ -294,7 +384,7 @@ func (s *Service) ResetQuota(ctx context.Context, nodeID string) (int64, error) 
 	return life, nil
 }
 
-// DeleteNode 清理某节点的全部策略状态（配置 + slot + nft 对象）。
+// DeleteNode 清理某节点的全部策略状态（配置 + slot + observed + rejected + flow + nft 对象）。
 func (s *Service) DeleteNode(ctx context.Context, nodeID string) error {
 	if _, err := s.db.ExecContext(ctx, "DELETE FROM node_policy WHERE node_id=?", nodeID); err != nil {
 		return err
@@ -303,11 +393,17 @@ func (s *Service) DeleteNode(ctx context.Context, nodeID string) error {
 	s.runMu.Lock()
 	s.mu.Lock()
 	delete(s.states, nodeID)
-	delete(s.slots, nodeID)
-	delete(s.online, nodeID)
+	delete(s.ipStates, nodeID)
 	delete(s.appliedQuota, nodeID)
 	delete(s.appliedIPLimit, nodeID)
 	s.mu.Unlock()
+	// flow tracker 键前缀 nodeID，需整体清除。
+	prefix := nodeID + "\x00"
+	for k := range s.flows {
+		if len(k) >= len(prefix) && k[:len(prefix)] == prefix {
+			delete(s.flows, k)
+		}
+	}
 	s.runMu.Unlock()
 	// reconcile 会重建 nft（该节点已不在 list，规则自然清除）。
 	return s.reconcile(ctx)

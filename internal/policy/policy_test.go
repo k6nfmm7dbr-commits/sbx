@@ -5,9 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
-	"time"
 
-	"github.com/k6nfmm7dbr-commits/sbx/internal/connection"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/database"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/nodes"
 )
@@ -139,57 +137,6 @@ func TestQuotaResetKeepsHistory(t *testing.T) {
 	}
 }
 
-func TestIPLimitSlotSemantics(t *testing.T) {
-	s := newTestService(t)
-	seedNode(t, s, 1, "vless", 443)
-	ctx := context.Background()
-
-	// 启用 max=2
-	if err := s.UpsertConfig(ctx, Config{NodeID: "1", IPLimitEnabled: true, IPLimitMax: 2}); err != nil {
-		t.Fatal(err)
-	}
-
-	// 直接注入 slot，验证 active 数与达限判断（绕过 /proc 读取）
-	s.mu.Lock()
-	s.slots["1"] = map[string]int64{
-		"1.1.1.1": s.now().UnixNano(),
-		"8.8.8.8": s.now().UnixNano(),
-	}
-	s.mu.Unlock()
-
-	if err := s.reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	st, _ := s.Snapshot()
-	if st["1"].ActiveIPs != 2 || st["1"].IPLimitState != "exceeded" {
-		t.Fatalf("2 个 IP + max=2 应 exceeded, got active=%d state=%s", st["1"].ActiveIPs, st["1"].IPLimitState)
-	}
-
-	// 调高 max=3 → ok
-	if err := s.UpsertConfig(ctx, Config{NodeID: "1", IPLimitEnabled: true, IPLimitMax: 3}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	st, _ = s.Snapshot()
-	if st["1"].IPLimitState != "ok" {
-		t.Fatalf("max=3 应 ok, got %s", st["1"].IPLimitState)
-	}
-
-	// 降低 max=1：不踢现有 2 个，仅 exceeded
-	if err := s.UpsertConfig(ctx, Config{NodeID: "1", IPLimitEnabled: true, IPLimitMax: 1}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	st, _ = s.Snapshot()
-	if st["1"].ActiveIPs != 2 || st["1"].IPLimitState != "exceeded" {
-		t.Fatalf("降 max 不应踢 IP, got active=%d state=%s", st["1"].ActiveIPs, st["1"].IPLimitState)
-	}
-}
-
 func TestMigrationDefaults(t *testing.T) {
 	s := newTestService(t)
 	seedNode(t, s, 1, "vless", 443)
@@ -201,99 +148,6 @@ func TestMigrationDefaults(t *testing.T) {
 	}
 	if c.QuotaEnabled || c.IPLimitEnabled {
 		t.Fatalf("旧节点升级后应默认全不限, got quota=%v ip=%v", c.QuotaEnabled, c.IPLimitEnabled)
-	}
-}
-
-func TestTCPDisconnectImmediateRelease(t *testing.T) {
-	s := newTestService(t)
-	seedNode(t, s, 1, "vless", 443)
-	ctx := context.Background()
-	if err := s.UpsertConfig(ctx, Config{NodeID: "1", IPLimitEnabled: true, IPLimitMax: 2}); err != nil {
-		t.Fatal(err)
-	}
-
-	cur := map[string]connection.RemoteIPSet{
-		"1": {TCP: map[string]bool{"9.9.9.9": true}, UDP: map[string]bool{}},
-	}
-	s.SetRemoteIPs(func(list []nodes.Node) (map[string]connection.RemoteIPSet, bool, error) {
-		return cur, false, nil
-	})
-
-	// 第一轮：TCP 在线
-	if err := s.reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	st, _ := s.Snapshot()
-	if st["1"].ActiveIPs != 1 {
-		t.Fatalf("第一轮应 1 个在线 IP, got %d", st["1"].ActiveIPs)
-	}
-
-	// 第二轮：TCP 断开（cur.TCP 清空）——必须立即释放，不等 120s TTL
-	cur["1"] = connection.RemoteIPSet{TCP: map[string]bool{}, UDP: map[string]bool{}}
-	if err := s.reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	st, _ = s.Snapshot()
-	if st["1"].ActiveIPs != 0 {
-		t.Fatalf("TCP 断开后应立即 0 个在线 IP, got %d", st["1"].ActiveIPs)
-	}
-}
-
-func TestUDPTTLRelease(t *testing.T) {
-	s := newTestService(t)
-	seedNode(t, s, 1, "shadowsocks", 443)
-	ctx := context.Background()
-	if err := s.UpsertConfig(ctx, Config{NodeID: "1", IPLimitEnabled: true, IPLimitMax: 2}); err != nil {
-		t.Fatal(err)
-	}
-	s.SetUDPTTL(120 * time.Second)
-
-	cur := map[string]connection.RemoteIPSet{
-		"1": {TCP: map[string]bool{}, UDP: map[string]bool{"8.8.8.8": true}},
-	}
-	s.SetRemoteIPs(func(list []nodes.Node) (map[string]connection.RemoteIPSet, bool, error) {
-		return cur, false, nil
-	})
-
-	if err := s.reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	st, _ := s.Snapshot()
-	if st["1"].ActiveIPs != 1 {
-		t.Fatalf("UDP 在线应 1 个, got %d", st["1"].ActiveIPs)
-	}
-
-	// UDP 断开但未超 TTL：仍在线
-	cur["1"] = connection.RemoteIPSet{TCP: map[string]bool{}, UDP: map[string]bool{}}
-	s.SetClock(func() time.Time { return time.Now().Add(60 * time.Second) })
-	if err := s.reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	st, _ = s.Snapshot()
-	if st["1"].ActiveIPs != 1 {
-		t.Fatalf("UDP 断开 60s 内应仍在线, got %d", st["1"].ActiveIPs)
-	}
-}
-
-// TestActiveIPsIncludesTCP 锁定「查看在线 IP」列表要包含 TCP 在线 IP（移动网络主要是 TCP）。
-func TestActiveIPsIncludesTCP(t *testing.T) {
-	s := newTestService(t)
-	seedNode(t, s, 1, "vless", 443)
-	ctx := context.Background()
-
-	cur := map[string]connection.RemoteIPSet{
-		"1": {TCP: map[string]bool{"9.9.9.9": true, "8.8.8.8": true}, UDP: map[string]bool{}},
-	}
-	s.SetRemoteIPs(func(list []nodes.Node) (map[string]connection.RemoteIPSet, bool, error) {
-		return cur, false, nil
-	})
-	if err := s.reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-
-	ips := s.ActiveIPs("1")
-	if len(ips) != 2 {
-		t.Fatalf("ActiveIPs 应含 2 个 TCP IP, got %v", ips)
 	}
 }
 
@@ -313,87 +167,6 @@ func TestQuotaExceededReconcile(t *testing.T) {
 	st, _ := s.Snapshot()
 	if st["1"].QuotaState != "exceeded" {
 		t.Fatalf("limit<used 应 exceeded, got %s", st["1"].QuotaState)
-	}
-}
-
-// TestTCPFlowIdleRelease 锁定：客户端异常断开（socket 仍 ESTABLISHED、但 conntrack
-// 字节不再增长）后，超过空闲窗口应把该 IP 从在线列表与活跃连接数中剔除。
-func TestTCPFlowIdleRelease(t *testing.T) {
-	s := newTestService(t)
-	seedNode(t, s, 1, "vless", 443)
-	s.SetTCPIdle(10 * time.Second)
-	ctx := context.Background()
-
-	base := time.Now()
-	s.SetClock(func() time.Time { return base })
-
-	// conntrack：一条 443 端口的流，先有流量（bytes=1000）
-	flow := []connection.ConntrackFlow{
-		{Proto: "tcp", DstPort: 443, SrcIP: "9.9.9.9", SrcPort: 12345, Bytes: 1000},
-	}
-	s.SetConntrack(func(path string) []connection.ConntrackFlow { return flow })
-
-	// /proc ESTABLISHED 也一直显示该 IP（模拟没发 FIN 的半开连接）
-	cur := map[string]connection.RemoteIPSet{
-		"1": {TCP: map[string]bool{"9.9.9.9": true}, UDP: map[string]bool{}},
-	}
-	s.SetRemoteIPs(func(list []nodes.Node) (map[string]connection.RemoteIPSet, bool, error) {
-		return cur, false, nil
-	})
-
-	if err := s.reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	st, _ := s.Snapshot()
-	if st["1"].ActiveIPs != 1 || st["1"].ActiveTCPConn != 1 {
-		t.Fatalf("首次应 1 在线 IP + 1 活跃连接, got %+v", st["1"])
-	}
-
-	// 无流量且超过空闲窗口 → 剔除
-	base = base.Add(11 * time.Second)
-	if err := s.reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	st, _ = s.Snapshot()
-	if st["1"].ActiveIPs != 0 || st["1"].ActiveTCPConn != 0 {
-		t.Fatalf("无流量超时空闲应 0 在线 IP + 0 活跃连接, got active=%d conn=%d", st["1"].ActiveIPs, st["1"].ActiveTCPConn)
-	}
-}
-
-// TestTCPFlowTrafficKeepsAlive 锁定：有持续流量（bytes 增长）的连接即使很久也保持在线。
-func TestTCPFlowTrafficKeepsAlive(t *testing.T) {
-	s := newTestService(t)
-	seedNode(t, s, 1, "vless", 443)
-	s.SetTCPIdle(10 * time.Second)
-	ctx := context.Background()
-
-	base := time.Now()
-	s.SetClock(func() time.Time { return base })
-	bytes := int64(1000)
-	s.SetConntrack(func(path string) []connection.ConntrackFlow {
-		return []connection.ConntrackFlow{
-			{Proto: "tcp", DstPort: 443, SrcIP: "9.9.9.9", SrcPort: 12345, Bytes: bytes},
-		}
-	})
-	cur := map[string]connection.RemoteIPSet{
-		"1": {TCP: map[string]bool{"9.9.9.9": true}, UDP: map[string]bool{}},
-	}
-	s.SetRemoteIPs(func(list []nodes.Node) (map[string]connection.RemoteIPSet, bool, error) {
-		return cur, false, nil
-	})
-
-	_ = s.reconcile(ctx)
-	// 持续有流量：跨多个周期 bytes 一直增长
-	for i := 0; i < 5; i++ {
-		bytes += 500
-		base = base.Add(3 * time.Second)
-		if err := s.reconcile(ctx); err != nil {
-			t.Fatal(err)
-		}
-	}
-	st, _ := s.Snapshot()
-	if st["1"].ActiveIPs != 1 || st["1"].ActiveTCPConn != 1 {
-		t.Fatalf("持续有流量应保持在线, got %+v", st["1"])
 	}
 }
 

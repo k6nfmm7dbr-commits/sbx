@@ -37,6 +37,8 @@ func (s *Server) handlePolicyAPI(w http.ResponseWriter, r *http.Request, idStr s
 		s.resetQuota(w, r, nodeID)
 	case sub == "active-ips" && r.Method == http.MethodGet:
 		s.activeIPs(w, r, nodeID)
+	case sub == "ip-state" && r.Method == http.MethodGet:
+		s.ipState(w, r, nodeID)
 	default:
 		s.sendJSON(w, r, http.StatusNotFound, map[string]string{"error": "not found"})
 	}
@@ -145,6 +147,14 @@ func (s *Server) activeIPs(w http.ResponseWriter, r *http.Request, nodeID string
 		ips = []string{}
 	}
 	s.sendJSON(w, r, http.StatusOK, map[string]any{"ips": ips})
+}
+
+func (s *Server) ipState(w http.ResponseWriter, r *http.Request, nodeID string) {
+	if !s.policyNodeExists(nodeID) {
+		s.sendJSON(w, r, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
+	s.sendJSON(w, r, http.StatusOK, s.policy.NodeIPSnapshot(nodeID))
 }
 
 func policyStateDefault() policy.State {

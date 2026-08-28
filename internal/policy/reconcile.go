@@ -3,6 +3,7 @@ package policy
 import (
 	"context"
 	"strconv"
+	"time"
 
 	"github.com/k6nfmm7dbr-commits/sbx/internal/connection"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/nodes"
@@ -11,11 +12,11 @@ import (
 // reconcile 执行一轮策略同步：
 //  1. 读节点列表与策略配置；
 //  2. 算每个节点的 quota used；
-//  3. 读 /proc 更新 IP slot 与在线 IP 快照（TCP 立即、UDP TTL）；
-//  4. 决定需 enforcement 的节点集合；
-//  5. 生成并应用 nft 规则（变化时才重写）。
+//  3. 读 conntrack（主）与 /proc（回退）采集客户端 IP 活动；
+//  4. 更新 Slot Manager（observed → active → granted/rejected），严格 admission；
+//  5. 用 granted 集合生成 nft allow set（Rejected 绝不进入）。
 //
-// 并发安全：runMu 串行化所有 reconciler 调用（Run goroutine 周期调用与
+// 并发安全：runMu 串行化所有 reconcile 调用（Run goroutine 周期调用与
 // API 保存/重置时的同步调用可能并发），否则并发写 map 会 fatal error。
 func (s *Service) reconcile(ctx context.Context) error {
 	s.runMu.Lock()
@@ -27,37 +28,32 @@ func (s *Service) reconcile(ctx context.Context) error {
 		return err
 	}
 
-	// IP Tracker：读 /proc 提取各节点当前活跃公网源 IP（TCP/UDP 分离）。
-	var curSplit map[string]connection.RemoteIPSet
+	now := s.now()
+
+	// ---- IP 采集：conntrack 主 + /proc 回退 ----
+	cr := connection.ConntrackResult{Available: false}
+	if s.conntrack != nil {
+		cr = s.conntrack("")
+	}
+
+	var procSplit map[string]connection.RemoteIPSet
+	procPartial := false
 	if s.remoteIPs != nil {
-		curSplit, _, err = s.remoteIPs(nodeList)
+		procSplit, procPartial, err = s.remoteIPs(nodeList)
 	} else {
-		curSplit, _, err = connection.NodeRemoteIPsSplit(nodeList, nil)
+		procSplit, procPartial, err = connection.NodeRemoteIPsSplit(nodeList, nil)
 	}
 	if err != nil {
 		return err
 	}
 
-	nowNs := s.now().UnixNano()
-	udpTTLNs := s.udpTTL.Nanoseconds()
+	// 采集结果「不完整」（conntrack 读失败 或 /proc partial）→ fail-safe：
+	// 本轮不释放已有 slot。
+	partial := procPartial || cr.Partial
 
-	// conntrack 读一次，用于 TCP 连活判定（有近期流量才算在线/算连接数）。
-	var flows []connection.ConntrackFlow
-	if s.conntrack != nil {
-		flows = s.conntrack("")
-	}
-	// conntrack 不可用时回退 /proc ESTABLISHED 数作为「活跃连接数」。
-	var procConns map[string]connection.Conns
-	if len(flows) == 0 {
-		if cr, cerr := connection.CountForNodes(nodeList); cerr == nil {
-			procConns = cr.Conns
-		} else {
-			procConns = map[string]connection.Conns{}
-		}
-	}
+	active := s.buildActivity(nodeList, cr, procSplit, now)
 
 	newStates := map[string]State{}
-	newOnline := map[string]map[string]int64{}
 	quotaBlocked := map[string]bool{}
 	ipBlocked := map[string]map[string]bool{}
 
@@ -91,114 +87,51 @@ func (s *Service) reconcile(ctx context.Context) error {
 			}
 		}
 
-		// ---- IP slot 更新 ----
-		// slots 只存 UDP lastSeen；TCP 在线由「conntrack 字节增判」决定：
-		// 有近期流量的 ESTABLISHED 连接才算在线，客户端异常断开后无流量即可回落。
-		if s.slots[id] == nil {
-			s.slots[id] = map[string]int64{}
+		// ---- Slot Manager admission ----
+		ipState := s.ipStates[id]
+		if ipState == nil {
+			ipState = newIPState()
+			s.ipStates[id] = ipState
 		}
-		slots := s.slots[id]
-		cur := curSplit[id]
-
-		// 1) touch：UDP 活跃的 IP 刷新 lastSeen。
-		for ip := range cur.UDP {
-			slots[ip] = nowNs
+		nodeActive := active[id]
+		if nodeActive == nil {
+			nodeActive = map[string]IPActivity{}
 		}
-		// 2) purge：UDP lastSeen 超 TTL 的释放。
-		for ip, last := range slots {
-			if nowNs-last > udpTTLNs {
-				delete(slots, ip)
-			}
-		}
-
-		// 3) 本节点端口集合 + TCP 连活判定。
-		nodePorts := map[int]bool{}
-		ranges := nodes.ParsePorts(n)
-		for _, r := range ranges {
-			for p := int(r[0]); p <= int(r[1]); p++ {
-				nodePorts[p] = true
-			}
-		}
-
-		activeTCP := map[string]bool{}
-		activeConn := 0
-		hasFlow := map[string]bool{} // cur.TCP 中「有 conntrack 流」的 IP
-
-		if len(flows) > 0 {
-			// 只统计「命中本节点监听端口、且源 IP 确实在 /proc ESTABLISHED 里」的流。
-			// 用 SrcIP ∈ cur.TCP 排除服务器自身发起的 outbound 流（其源 IP 是本机，不在客户端集合里）。
-			for _, f := range flows {
-				if f.Proto != "tcp" || !nodePorts[f.DstPort] || !cur.TCP[f.SrcIP] {
-					continue
-				}
-				hasFlow[f.SrcIP] = true
-				fkey := id + "\x00" + f.SrcIP + ":" + strconv.Itoa(f.SrcPort)
-				if last, ok := s.flowBytes[fkey]; ok {
-					if f.Bytes != last {
-						// 字节变化：有流量（或断线重连导致计数重置）→ 活跃
-						s.flowBytes[fkey] = f.Bytes
-						s.flowSeen[fkey] = nowNs
-					} else if nowNs-s.flowSeen[fkey] > s.tcpIdle.Nanoseconds() {
-						// 长期无流量 → 死连接，不计入在线
-						continue
-					}
-				} else {
-					s.flowBytes[fkey] = f.Bytes
-					s.flowSeen[fkey] = nowNs
-				}
-				activeTCP[f.SrcIP] = true
-				activeConn++
-			}
-			// cur.TCP 里没有 conntrack 流的 IP（本地连接 / 未走 conntrack）保守视为在线。
-			for ip := range cur.TCP {
-				if !hasFlow[ip] {
-					activeTCP[ip] = true
+		// partial：把已持有的 slot IP 补齐进 active，避免「不完整结果」误踢在线用户。
+		if partial {
+			for ip := range ipState.Slots {
+				if _, ok := nodeActive[ip]; !ok {
+					nodeActive[ip] = IPActivity{IP: ip}
 				}
 			}
-		} else {
-			// conntrack 不可用：回退 ESTABLISHED 即在线。
-			for ip := range cur.TCP {
-				activeTCP[ip] = true
-			}
-			if c, ok := procConns[id]; ok && c.TCP != nil {
-				activeConn = *c.TCP
-			}
 		}
 
-		// 4) 构建 online 快照 = 活跃 TCP IP ∪ 未超 TTL 的 UDP。
-		online := map[string]int64{}
-		for ip := range activeTCP {
-			online[ip] = nowNs
+		maxIPs := 0
+		if cfg.IPLimitEnabled {
+			maxIPs = cfg.IPLimitMax
 		}
-		for ip, last := range slots {
-			online[ip] = last
-		}
-		newOnline[id] = online
+		granted, hasRejected := ipState.Reconcile(nodeActive, maxIPs, now, s.ipIdle, s.rejectedTTL)
 
-		active := len(online)
-		st.ActiveIPs = active
-		st.ActiveTCPConn = activeConn
+		st.ActiveIPs = len(granted)
+		st.ActiveTCPConn = activeTCPCount(nodeActive)
 
 		if cfg.IPLimitEnabled {
-			st.IPLimitState = "ok"
-			if cfg.IPLimitMax >= 1 && active >= cfg.IPLimitMax {
+			if hasRejected {
 				st.IPLimitState = "exceeded"
-				ipBlocked[id] = cloneIPSets(online)
+			} else {
+				st.IPLimitState = "ok"
 			}
+			// 只有 granted 进入 allow set；Rejected 永不进入。v4/v6 由 genPolicyNFT 内部分流。
+			ipBlocked[id] = granted
 		}
 
 		newStates[id] = st
 	}
 
-	// 清理已删除节点的运行时状态。
-	for id := range s.slots {
+	// 清理已删除节点的运行时状态（slot 由 flow tracker 的 GC 兜底；这里清 ipStates）。
+	for id := range s.ipStates {
 		if _, ok := newStates[id]; !ok {
-			delete(s.slots, id)
-		}
-	}
-	for id := range s.online {
-		if _, ok := newStates[id]; !ok {
-			delete(s.online, id)
+			delete(s.ipStates, id)
 		}
 	}
 
@@ -209,24 +142,130 @@ func (s *Service) reconcile(ctx context.Context) error {
 
 	s.mu.Lock()
 	s.states = newStates
-	s.online = newOnline
 	s.ready = true
 	s.lastErr = ""
 	s.appliedQuota = quotaBlocked
 	s.appliedIPLimit = ipBlocked
 	s.mu.Unlock()
 
+	s.signalNotify()
 	return nil
+}
+
+// buildActivity 用 conntrack 主数据源 + /proc 回退，产出每个节点的活跃 IP。
+func (s *Service) buildActivity(nodeList []nodes.Node, cr connection.ConntrackResult, procSplit map[string]connection.RemoteIPSet, now time.Time) map[string]map[string]IPActivity {
+	portNode := map[int]string{}
+	for _, n := range nodeList {
+		id := nodes.IDString(n)
+		for _, r := range nodes.ParsePorts(n) {
+			for p := int(r[0]); p <= int(r[1]); p++ {
+				portNode[p] = id
+			}
+		}
+	}
+
+	out := map[string]map[string]IPActivity{}
+	agg := func(nodeID string) map[string]IPActivity {
+		m := out[nodeID]
+		if m == nil {
+			m = map[string]IPActivity{}
+			out[nodeID] = m
+		}
+		return m
+	}
+
+	currentFlowKeys := map[string]bool{}
+
+	if cr.Available {
+		for _, f := range cr.Flows {
+			nodeID := portNode[f.DstPort]
+			if nodeID == "" {
+				continue
+			}
+			fkey := nodeID + "\x00" + f.SrcIP + ":" + strconv.Itoa(f.SrcPort)
+			currentFlowKeys[fkey] = true
+
+			traffic := false
+			prev := s.flows[fkey]
+			switch {
+			case prev == nil:
+				s.flows[fkey] = &flowState{Bytes: f.Bytes, LastSeen: now}
+				traffic = true
+			case f.Bytes != prev.Bytes:
+				s.flows[fkey] = &flowState{Bytes: f.Bytes, LastSeen: now}
+				traffic = true
+			case now.Sub(prev.LastSeen) <= s.ipIdle:
+				// 静默但仍在 grace → 活跃
+			default:
+				continue // 死连接：整条流不活跃
+			}
+
+			m := agg(nodeID)
+			a := m[f.SrcIP]
+			a.IP = f.SrcIP
+			if f.Proto == "tcp" {
+				a.TCPSessions++
+			} else {
+				a.UDPSessions++
+			}
+			if traffic {
+				a.Traffic = true
+			}
+			m[f.SrcIP] = a
+		}
+	}
+
+	// /proc 回退 / 补充：conntrack 不可用时 ESTABLISHED 即在线；否则补齐 conntrack
+	// 里没有的本地/未走 conntrack 连接，保守视为在线（不做误杀）。
+	if procSplit != nil {
+		for _, n := range nodeList {
+			id := nodes.IDString(n)
+			cur, ok := procSplit[id]
+			if !ok {
+				continue
+			}
+			m := agg(id)
+			for ip := range cur.TCP {
+				a := m[ip]
+				a.IP = ip
+				if !cr.Available || a.TCPSessions == 0 {
+					if a.TCPSessions == 0 {
+						a.TCPSessions = 1
+					}
+				}
+				m[ip] = a
+			}
+			for ip := range cur.UDP {
+				a := m[ip]
+				a.IP = ip
+				if !cr.Available || a.UDPSessions == 0 {
+					if a.UDPSessions == 0 {
+						a.UDPSessions = 1
+					}
+				}
+				m[ip] = a
+			}
+		}
+	}
+
+	// flow tracker GC：不在本轮且超空闲的流清理，防 map 无限增长。
+	for k, fs := range s.flows {
+		if !currentFlowKeys[k] && now.Sub(fs.LastSeen) > s.ipIdle {
+			delete(s.flows, k)
+		}
+	}
+
+	return out
+}
+
+// activeTCPCount 统计某节点活跃 TCP 会话数（conntrack 判活 + /proc 补充）。
+func activeTCPCount(active map[string]IPActivity) int {
+	n := 0
+	for _, a := range active {
+		n += a.TCPSessions
+	}
+	return n
 }
 
 // Reconcile 公开同步入口：API 保存策略后立即调用，使 nft 生效。
 func (s *Service) Reconcile(ctx context.Context) error { return s.reconcile(ctx) }
-
-// cloneIPSets 把 online 快照（ip -> lastSeen）转成 allow set（ip -> true）。
-func cloneIPSets(m map[string]int64) map[string]bool {
-	out := make(map[string]bool, len(m))
-	for ip := range m {
-		out[ip] = true
-	}
-	return out
-}

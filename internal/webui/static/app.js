@@ -247,6 +247,7 @@ function loadSummary() { return api('/api/summary').then(renderSummary).catch(fu
 function loadLive() { return api('/api/live').then(renderLive).catch(function () {}); }
 
 loadSummary().then(function () { loadLive(); loadDaily(); });
+startEvents();
 setInterval(function () { if (!document.hidden) loadLive(); }, 2000);
 setInterval(function () { if (!document.hidden) loadSummary(); }, 8000);
 setInterval(function () { if (!document.hidden) { loadDaily(); loadNodeDaily(); } }, 60000);
@@ -256,6 +257,74 @@ document.addEventListener('visibilitychange', function () {
 
 /* ==================== 节点策略管理（Quota / IP Limit） ==================== */
 var policyState = { nodeId: null, summaryNode: null };
+
+/* ---------- SSE 实时在线 IP ---------- */
+var ipState = {};           // nodeId -> NodeIPSnapshot
+var ipsDrawerNodeId = null; // 当前打开的在线 IP 抽屉节点
+
+function nodeIPText(nodeId) {
+  var s = ipState[String(nodeId)];
+  if (!s) return null;
+  return s.limited ? (s.granted_count + ' / ' + s.max_ips) : String(s.granted_count);
+}
+
+// 局部 patch 单节点在线 IP 数量（不整页/整卡刷新）。
+function renderNodeIPCount(nodeId) {
+  var txt = nodeIPText(nodeId);
+  if (txt == null) return;
+  var el = document.querySelector('[data-node-ips="' + String(nodeId) + '"]');
+  if (el && el.textContent !== txt) el.textContent = txt;
+}
+
+function escIPEntry(e) {
+  var v6 = e.ip.indexOf(':') >= 0;
+  var proto = '在线 · ' + (e.tcp || 0) + ' TCP · ' + (e.udp || 0) + ' UDP';
+  return '<div class="ip-item">' +
+    '<div class="ip-line"><span class="ip-addr">' + esc(e.ip) + '</span>' +
+    '<span class="ip-tag">' + (v6 ? 'IPv6' : 'IPv4') + '</span></div>' +
+    '<span class="ip-meta">' + proto + '</span></div>';
+}
+
+function escRejectedEntry(e) {
+  return '<div class="ip-item rejected">' +
+    '<div class="ip-line"><span class="ip-addr">' + esc(e.ip) + '</span>' +
+    '<span class="ip-tag danger">已拒绝</span></div>' +
+    '<span class="ip-meta">原因：在线 IP 已达上限</span></div>';
+}
+
+function renderIPList() {
+  if (!ipsDrawerNodeId) return;
+  var list = document.getElementById('ips-list');
+  var s = ipState[String(ipsDrawerNodeId)];
+  if (!list) return;
+  if (!s || ((s.ips || []).length === 0 && (s.rejected || []).length === 0)) {
+    list.innerHTML = '<div class="empty">暂无在线 IP</div>';
+    return;
+  }
+  var html = (s.ips || []).map(escIPEntry).join('') + (s.rejected || []).map(escRejectedEntry).join('');
+  list.innerHTML = html;
+}
+
+function onSnapshot(msg) {
+  ipState = {};
+  (msg.nodes || []).forEach(function (ns) { ipState[String(ns.node_id)] = ns; });
+  Object.keys(ipState).forEach(renderNodeIPCount);
+  renderIPList();
+}
+
+function onNodeEvent(ns) {
+  ipState[String(ns.node_id)] = ns;
+  renderNodeIPCount(String(ns.node_id));
+  if (ipsDrawerNodeId === String(ns.node_id)) renderIPList();
+}
+
+function startEvents() {
+  // EventSource 原生自动重连；服务重启后重连即收到完整 snapshot。
+  var es = new EventSource('/api/events');
+  es.addEventListener('snapshot', function (e) { try { onSnapshot(JSON.parse(e.data)); } catch (err) {} });
+  es.addEventListener('node', function (e) { try { onNodeEvent(JSON.parse(e.data)); } catch (err) {} });
+  es.onerror = function () { /* 断线由 EventSource 自动重连，无需手工处理 */ };
+}
 
 function showPolicy(nodeId) {
   var n = (state.summary && state.summary.nodes || []).filter(function (x) { return String(x.id) === String(nodeId); })[0];
@@ -361,29 +430,25 @@ function resetQuota() {
 
 function showActiveIPs(nodeId) {
   var id = nodeId != null ? String(nodeId) : policyState.nodeId;
+  ipsDrawerNodeId = String(id);
   var name = '';
   var found = (state.summary && state.summary.nodes || []).filter(function (x) { return String(x.id) === id; })[0];
   if (found) name = found.name;
   else if (policyState.summaryNode && String(policyState.summaryNode.id) === id) name = policyState.summaryNode.name;
   document.getElementById('ips-node-name').textContent = name;
-  var list = document.getElementById('ips-list');
-  list.innerHTML = '<div class="empty">加载中…</div>';
   openDrawer('ips-drawer');
-  fetch('/api/nodes/' + id + '/active-ips')
+  // 先用已推送的 SSE 状态渲染；没有则 fallback 拉取一次。
+  renderIPList();
+  fetch('/api/nodes/' + id + '/ip-state')
     .then(function (r) {
       if (r.status === 401) { location.replace('/login'); throw new Error('未登录'); }
       return r.json().then(function (d) { if (!r.ok) throw new Error(d.error || '请求失败'); return d; });
     })
-    .then(function (d) {
-      var ips = d.ips || [];
-      if (!ips.length) { list.innerHTML = '<div class="empty">暂无在线 IP</div>'; return; }
-      list.innerHTML = ips.map(function (ip) {
-        var v6 = ip.indexOf(':') >= 0;
-        return '<div class="ip-item"><span class="ip-addr">' + esc(ip) + '</span>' +
-          '<span class="ip-tag">' + (v6 ? 'IPv6' : 'IPv4') + '</span></div>';
-      }).join('');
+    .then(function (ns) {
+      ipState[String(id)] = ns;
+      renderIPList();
     })
-    .catch(function (e) { if (e.message !== '未登录') { list.innerHTML = '<div class="empty">加载失败</div>'; toast(e.message); } });
+    .catch(function (e) { if (e.message !== '未登录') toast(e.message); });
 }
 
 /* 事件委托：节点卡片上的在线 IP 条 + 管理按钮（动态渲染） */

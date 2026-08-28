@@ -48,6 +48,9 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request, route string)
 		s.attachPolicyToLive(live)
 		s.sendJSON(w, r, http.StatusOK, live)
 
+	case "/api/events":
+		s.handleEvents(w, r)
+
 	case "/api/daily":
 		daysRaw := qsGet(r, "days")
 		days := 30
@@ -190,7 +193,7 @@ func (s *Server) tryPolicyRoute(w http.ResponseWriter, r *http.Request, route st
 	}
 	idStr := rest[:slash]
 	sub := rest[slash+1:]
-	if sub != "policy" && sub != "quota/reset" && sub != "active-ips" {
+	if sub != "policy" && sub != "quota/reset" && sub != "active-ips" && sub != "ip-state" {
 		return false
 	}
 	s.handlePolicyAPI(w, r, idStr, sub)

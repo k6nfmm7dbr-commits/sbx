@@ -9,26 +9,36 @@ func TestParseConntrack(t *testing.T) {
 		"ipv4     2 tcp      6 431999 TIME_WAIT src=1.2.3.4 dst=91.110.232.102 sport=9999 dport=8844 packets=3 bytes=400 src=91.110.232.102 dst=1.2.3.4 sport=8844 dport=9999 packets=2 bytes=300 mark=0 zone=0 use=2\n"
 
 	flows := ParseConntrack(sample)
-	if len(flows) != 1 {
-		t.Fatalf("应只保留 1 条 tcp ESTABLISHED 流（udp/TIME_WAIT 都忽略）, got %d", len(flows))
+	// 1 条 tcp ESTABLISHED + 1 条 udp；tcp TIME_WAIT 忽略。
+	if len(flows) != 2 {
+		t.Fatalf("应保留 tcp ESTABLISHED 与 udp 各 1 条，got %d", len(flows))
 	}
-	f := flows[0]
-	if f.Proto != "tcp" || f.DstPort != 8844 || f.SrcIP != "112.115.49.228" || f.SrcPort != 35740 {
-		t.Fatalf("流解析错误: %+v", f)
+	var tcp, udp *ConntrackFlow
+	for i := range flows {
+		f := &flows[i]
+		if f.Proto == "tcp" {
+			tcp = f
+		} else {
+			udp = f
+		}
 	}
-	// bytes = 1906488 + 141552（双向）
-	if f.Bytes != 1906488+141552 {
-		t.Fatalf("bytes 应双向相加, got %d", f.Bytes)
+	if tcp == nil || tcp.DstPort != 8844 || tcp.SrcIP != "112.115.49.228" || tcp.SrcPort != 35740 {
+		t.Fatalf("tcp 流解析错误: %+v", tcp)
+	}
+	if tcp.Bytes != 1906488+141552 {
+		t.Fatalf("tcp bytes 应双向相加, got %d", tcp.Bytes)
+	}
+	if udp == nil || udp.Proto != "udp" || udp.SrcIP != "8.8.8.8" || udp.DstPort != 33333 {
+		t.Fatalf("udp 流解析错误: %+v", udp)
 	}
 }
 
 func TestParseConntrackEmptyAndMalformed(t *testing.T) {
-	if got := ParseConntrack(""); got != nil && len(got) != 0 {
+	if got := ParseConntrack(""); len(got) != 0 {
 		t.Fatalf("空文本应返回空, got %v", got)
 	}
 	bad := "this is not conntrack\nipv4 2 tcp 6 1 ESTABLISHED\n"
-	flows := ParseConntrack(bad)
-	if len(flows) != 0 {
-		t.Fatalf("畸形/缺字段行应忽略, got %v", flows)
+	if got := ParseConntrack(bad); len(got) != 0 {
+		t.Fatalf("畸形/缺字段行应忽略, got %v", got)
 	}
 }
