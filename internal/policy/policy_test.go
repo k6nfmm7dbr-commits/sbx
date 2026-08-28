@@ -185,6 +185,10 @@ func TestGenPolicyNFT(t *testing.T) {
 	if !containsStr(script2, "ip_allow_1_v4") || !containsStr(script2, "1.1.1.1") {
 		t.Errorf("IP limit 脚本缺 allow set: %s", script2)
 	}
+	// 关键：IP limit 必须只 drop「已建立」连接并放行 SYN，否则第二个 IP 拿不到 slot。
+	if !containsStr(script2, "ct state established") {
+		t.Errorf("IP limit 脚本缺 ct state established: %s", script2)
+	}
 }
 
 func containsStr(haystack, needle string) bool {

@@ -86,12 +86,16 @@ func genPolicyNFT(quotaPorts map[int64]bool, ipLimits map[string]map[string]bool
 		if _, ok := ipLimits[id]; !ok {
 			continue
 		}
-		// 达 IP 限的节点：只放行 allow set 内的源 IP，其余 drop。
-		// 每个协议（tcp/udp）都要写，且 v4/v6 分开。
-		fmt.Fprintf(&b, "        tcp dport %d ip saddr != @ip_allow_%s_v4 drop\n", p, id)
-		fmt.Fprintf(&b, "        udp dport %d ip saddr != @ip_allow_%s_v4 drop\n", p, id)
-		fmt.Fprintf(&b, "        tcp dport %d ip6 saddr != @ip_allow_%s_v6 drop\n", p, id)
-		fmt.Fprintf(&b, "        udp dport %d ip6 saddr != @ip_allow_%s_v6 drop\n", p, id)
+		// 达 IP 限的节点：只放行 allow set 内的源 IP。
+		// 关键：只 drop「已建立（ct state established）」的连接，放行 SYN（new）——
+		// 否则第二个 IP 的 SYN 会被直接丢弃，连握手都起不来，conntrack 也看不到候选，
+		// 导致「严格 allow set」出现鸡生蛋死锁（第二个 IP 永远拿不到 slot）。
+		// 放行 SYN 后，握手可完成、conntrack 能看到 SYN_RECV 候选，Slot Manager
+		// 才会临时授予并把它加进 allow set，随后其数据包放行。
+		fmt.Fprintf(&b, "        tcp dport %d ct state established ip saddr != @ip_allow_%s_v4 drop\n", p, id)
+		fmt.Fprintf(&b, "        udp dport %d ct state established ip saddr != @ip_allow_%s_v4 drop\n", p, id)
+		fmt.Fprintf(&b, "        tcp dport %d ct state established ip6 saddr != @ip_allow_%s_v6 drop\n", p, id)
+		fmt.Fprintf(&b, "        udp dport %d ct state established ip6 saddr != @ip_allow_%s_v6 drop\n", p, id)
 	}
 	b.WriteString("    }\n")
 
