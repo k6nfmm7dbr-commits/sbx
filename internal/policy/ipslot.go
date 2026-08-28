@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// IPActivity 是单轮采集得到的某个客户端 IP 的活跃摘要（TCP/UDP 合并）。
+// IPActivity 是单轮采集得到的某个客户端 IP 的活动摘要（TCP/UDP 合并）。
 type IPActivity struct {
 	IP          string
 	TCPSessions int
@@ -13,7 +13,8 @@ type IPActivity struct {
 	Traffic     bool // 本轮判定有流量（conntrack 字节有增量）
 }
 
-// IPSlot 已获得使用资格（granted）的 IP，允许通过防火墙使用节点。
+// IPSlot 已获得使用资格（granted）的 IP：既可能是已确认在线（ESTABLISHED），
+// 也可能是候选（刚发 SYN 尚未完成握手）的 provisional 授予。
 type IPSlot struct {
 	IP          string
 	GrantedAt   time.Time
@@ -21,9 +22,13 @@ type IPSlot struct {
 	LastTraffic time.Time
 	TCP         bool
 	UDP         bool
+	// Provisional 为 true 表示该 slot 是「候选 → 临时授予」，握手尚未完成；
+	// 若超过 provisionalTTL 仍未建立，将被释放。
+	Provisional bool
+	CandidateAt time.Time
 }
 
-// ObservedIP 采集层观察到的 IP（可能未获得 slot，也可能已被拒绝）。
+// ObservedIP 采集层观察到的 IP。
 type ObservedIP struct {
 	IP          string
 	FirstSeen   time.Time
@@ -33,11 +38,15 @@ type ObservedIP struct {
 	UDPSessions int
 }
 
-// NodeIPState 单节点 IP 状态：Slots=Granted，Observed=发现过，Rejected=被拒。
+// NodeIPState 单节点 IP 状态：
+//
+//	Slots    = Granted（合法使用资格，allow set 的权威来源）
+//	Observed = 发现过（含候选/扫描）
+//	Rejected = 因超出上限被拒绝
 type NodeIPState struct {
 	Slots    map[string]*IPSlot
 	Observed map[string]*ObservedIP
-	Rejected map[string]time.Time // ip -> 拒绝时刻
+	Rejected map[string]time.Time
 	MaxIPs   int
 }
 
@@ -56,76 +65,94 @@ func lastActive(ip string, lastSeen, lastTraffic time.Time) time.Time {
 	return lastSeen
 }
 
-// Reconcile 执行一轮严格 admission。
+// Reconcile 执行一轮严格 admission（原子：检查容量 + 授予 + 更新内存在同一调用内完成）。
 //
-// active 是「本轮判活为在线」的 IP 集合（不含被 /proc partial 影响的误判）。
-// maxIPs<=0 表示不限制（全部活跃 IP 授予 slot，但仅用于「在线 IP」显示，
-// 不应用 allow set）。
+// active 是「已建立并判活在线」的 IP；candidates 是「发起握手但尚未 ESTABLISHED」的 IP。
+// maxIPs<=0 表示不限制。
 //
-// 规则：
-//   - 已持有 slot 的 IP 优先保留并 refresh；
-//   - 新 IP 仅在 len(granted) < maxIPs 时授予；
-//   - 超出上限的 IP 标记 rejected，绝不进入 granted；
-//   - 离线（本轮未出现 + 距上次活跃超过 idle）的 slot 释放，下轮才能补位。
+//   - 已持有 slot 优先保留；
+//   - active 优先于 candidate；
+//   - 候选在有名额时 provisional 授予（进 allow set，让握手完成）；
+//   - 候选超过 provisionalTTL 仍未建立 → 释放 provisional slot；
+//   - 超出上限的（actives 与 candidates）→ Rejected，绝不进 allow set。
 //
-// 返回 granted 集合（供 nft allow set）与是否有新拒绝。
-func (st *NodeIPState) Reconcile(active map[string]IPActivity, maxIPs int, now time.Time, idle, rejectedTTL time.Duration) (granted map[string]bool, hasRejected bool) {
+// 返回 allowSet（所有 slot，含 provisional）与是否有新拒绝。
+func (st *NodeIPState) Reconcile(active, candidates map[string]IPActivity, maxIPs int, now time.Time, idle, rejectedTTL, provisionalTTL time.Duration) (allowSet map[string]bool, hasRejected bool) {
 	st.MaxIPs = maxIPs
 
-	// 1) 更新 Observed。
+	type want struct {
+		ip     string
+		active bool
+	}
 	seen := map[string]bool{}
-	order := make([]string, 0, len(active))
+	all := make([]want, 0, len(active)+len(candidates))
+
+	// 1) 更新 Observed（active 与 candidate 都算「见过」）。
 	for ip, a := range active {
-		o, ok := st.Observed[ip]
-		if !ok {
-			o = &ObservedIP{IP: ip, FirstSeen: now}
-			st.Observed[ip] = o
-		}
-		o.LastSeen = now
-		o.TCPSessions = a.TCPSessions
-		o.UDPSessions = a.UDPSessions
-		if a.Traffic {
-			o.LastTraffic = now
-		}
+		st.touchObserved(ip, a, now)
 		seen[ip] = true
-		order = append(order, ip)
+		all = append(all, want{ip, true})
+	}
+	for ip, a := range candidates {
+		if seen[ip] {
+			continue // 已在 active 里
+		}
+		st.touchObserved(ip, a, now)
+		seen[ip] = true
+		all = append(all, want{ip, false})
 	}
 
-	// 2) 拒绝表 TTL 清理（防端口扫描造成无限增长）。
+	// 2) Rejected TTL 清理。
 	for ip, t := range st.Rejected {
 		if now.Sub(t) > rejectedTTL {
 			delete(st.Rejected, ip)
 		}
 	}
 
-	// 3) 释放离线 slot：本轮未出现 + 距上次活跃超过 idle。
+	// 3) 释放 slot：本轮不在 active（conntrack 已无 ESTABLISHED 流 = 确认关闭/FIN/RST/超时）
+	// 立即释放；grace/dead 由 buildActivity 的字节增量判活承担（半开 ESTABLISHED 仍保留）。
+	// released 记录本轮刚释放的 IP，admission 不得在同一轮立刻 re-grant。
+	released := map[string]bool{}
 	for ip, slot := range st.Slots {
-		if seen[ip] {
+		if !seen[ip] {
+			delete(st.Slots, ip)
+			released[ip] = true
 			continue
 		}
-		if now.Sub(lastActive(ip, slot.LastSeen, slot.LastTraffic)) > idle {
+		if slot.Provisional && now.Sub(slot.CandidateAt) > provisionalTTL {
 			delete(st.Slots, ip)
+			released[ip] = true
 		}
 	}
 
-	// 4) Admission：已持有优先，其余按 FirstSeen 先到先得（同轮内按 IP 字典序兜底保证确定性）。
-	sort.Slice(order, func(i, j int) bool {
-		a, b := order[i], order[j]
-		_, aHas := st.Slots[a]
-		_, bHas := st.Slots[b]
-		if aHas != bHas {
-			return aHas
+	// 4) 排序：已有 slot > active > FirstSeen > IP（确定性）。
+	sort.Slice(all, func(i, j int) bool {
+		a, b := all[i], all[j]
+		_, aSlot := st.Slots[a.ip]
+		_, bSlot := st.Slots[b.ip]
+		if aSlot != bSlot {
+			return aSlot
 		}
-		fa, fb := st.Observed[a].FirstSeen, st.Observed[b].FirstSeen
+		if a.active != b.active {
+			return a.active
+		}
+		fa, fb := st.Observed[a.ip].FirstSeen, st.Observed[b.ip].FirstSeen
 		if !fa.Equal(fb) {
 			return fa.Before(fb)
 		}
-		return a < b
+		return a.ip < b.ip
 	})
 
-	for _, ip := range order {
-		a := active[ip]
-		if slot, ok := st.Slots[ip]; ok {
+	// 5) Admission。
+	for _, w := range all {
+		if released[w.ip] {
+			continue // 本轮刚释放，不 re-grant
+		}
+		a := active[w.ip]
+		if !w.active {
+			a = candidates[w.ip]
+		}
+		if slot, ok := st.Slots[w.ip]; ok {
 			slot.LastSeen = now
 			if a.TCPSessions > 0 {
 				slot.TCP = true
@@ -136,26 +163,43 @@ func (st *NodeIPState) Reconcile(active map[string]IPActivity, maxIPs int, now t
 			if a.Traffic {
 				slot.LastTraffic = now
 			}
+			if w.active {
+				// 成功建立 → 不再是 provisional。
+				slot.Provisional = false
+				slot.CandidateAt = time.Time{}
+			}
 			continue
 		}
 		if maxIPs <= 0 || len(st.Slots) < maxIPs {
-			st.Slots[ip] = &IPSlot{IP: ip, GrantedAt: now, LastSeen: now, TCP: a.TCPSessions > 0, UDP: a.UDPSessions > 0}
-			if a.Traffic {
-				st.Slots[ip].LastTraffic = now
+			slot := &IPSlot{
+				IP:        w.ip,
+				GrantedAt: now,
+				LastSeen:  now,
+				TCP:       a.TCPSessions > 0,
+				UDP:       a.UDPSessions > 0,
 			}
+			if w.active {
+				if a.Traffic {
+					slot.LastTraffic = now
+				}
+			} else {
+				slot.Provisional = true
+				slot.CandidateAt = now
+			}
+			st.Slots[w.ip] = slot
 		} else {
-			st.Rejected[ip] = now
+			st.Rejected[w.ip] = now
 			hasRejected = true
 		}
 	}
 
-	// 5) granted = 所有仍持有的 slot（含 grace 中未释放的，保证断线重连不误踢）。
-	granted = make(map[string]bool, len(st.Slots))
+	// 6) allow set = 所有 slot（含 provisional，保证候选手握能通过 nft）。
+	allowSet = make(map[string]bool, len(st.Slots))
 	for ip := range st.Slots {
-		granted[ip] = true
+		allowSet[ip] = true
 	}
 
-	// 6) Observed GC：无 slot、无拒绝、且久未活跃的观察项清理，防无限增长。
+	// 7) Observed GC：无 slot、无拒绝、久未活跃的观察项清理。
 	for ip, o := range st.Observed {
 		if _, ok := st.Slots[ip]; ok {
 			continue
@@ -167,8 +211,34 @@ func (st *NodeIPState) Reconcile(active map[string]IPActivity, maxIPs int, now t
 			delete(st.Observed, ip)
 		}
 	}
-	return granted, hasRejected
+
+	return allowSet, hasRejected
 }
 
-// grantedCount 返回当前持有 slot 的 IP 数。
+func (st *NodeIPState) touchObserved(ip string, a IPActivity, now time.Time) {
+	o, ok := st.Observed[ip]
+	if !ok {
+		o = &ObservedIP{IP: ip, FirstSeen: now}
+		st.Observed[ip] = o
+	}
+	o.LastSeen = now
+	o.TCPSessions = a.TCPSessions
+	o.UDPSessions = a.UDPSessions
+	if a.Traffic {
+		o.LastTraffic = now
+	}
+}
+
+// grantedCount 返回持有 slot 的 IP 数（含 provisional）。
 func (st *NodeIPState) grantedCount() int { return len(st.Slots) }
+
+// activeGrantedCount 返回已建立（非 provisional）的 granted IP 数，即「在线 IP」。
+func (st *NodeIPState) activeGrantedCount() int {
+	n := 0
+	for _, s := range st.Slots {
+		if !s.Provisional {
+			n++
+		}
+	}
+	return n
+}

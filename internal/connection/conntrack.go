@@ -7,14 +7,24 @@ import (
 	"strings"
 )
 
-// ConntrackFlow 是一条 /proc/net/nf_conntrack 中的「已建立」流摘要。
-// 只保留流向本机监听端口方向的流的客户端身份，用于按字节增量判断是否还有流量。
+// ConntrackFlow 是一条 /proc/net/nf_conntrack 流摘要（TCP 保留连接状态）。
 type ConntrackFlow struct {
 	Proto   string // "tcp" / "udp"
+	State   string // tcp: ESTABLISHED / SYN_SENT / SYN_RECV；udp: "udp"
 	DstPort int    // 本机监听端口（dport 第一次出现）
 	SrcIP   string // 客户端源 IP（src 第一次出现）
 	SrcPort int    // 客户端源端口（sport 第一次出现）
 	Bytes   int64  // 双向 bytes= 之和（累计值）
+}
+
+// 保留的连接状态：ESTABLISHED 是活跃，SYN_SENT/SYN_RECV 是握手候选。
+// TIME_WAIT/CLOSE/FIN_WAIT/CLOSE_WAIT/LAST_ACK 等都是已死/收尾状态，被丢弃。
+func keepTCPState(s string) bool {
+	switch s {
+	case "ESTABLISHED", "SYN_SENT", "SYN_RECV":
+		return true
+	}
+	return false
 }
 
 // ConntrackResult 是 conntrack 读取结果。必须区分三种情况：
@@ -64,25 +74,27 @@ func ParseConntrack(text string) []ConntrackFlow {
 		}
 		fields := strings.Fields(line)
 		// 固定头部：l3 l4 proto num [timeout] [state] src=...
-		// TCP 有 state 字段（ESTABLISHED/TIME_WAIT/...），UDP 没有。
+		// TCP 有 state 字段（ESTABLISHED/SYN_SENT/...），UDP 没有。
 		if len(fields) < 6 {
 			continue
 		}
 		proto := fields[2]
+		var state string
 		switch proto {
 		case "tcp":
-			// 第 6 个字段（fields[5]）是连接状态；只保留 ESTABLISHED，忽略 TIME_WAIT/CLOSE_WAIT。
-			if fields[5] != "ESTABLISHED" {
+			state = fields[5]
+			if !keepTCPState(state) {
 				continue
 			}
 		case "udp":
-			// UDP 无 state 字段，继续。
+			state = "udp"
 		default:
 			continue
 		}
 
 		var f ConntrackFlow
 		f.Proto = proto
+		f.State = state
 		var gotSrc, gotSport, gotDport bool
 		for _, field := range fields {
 			switch {

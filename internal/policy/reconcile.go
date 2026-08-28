@@ -47,11 +47,11 @@ func (s *Service) reconcile(ctx context.Context) error {
 		return err
 	}
 
-	// 采集结果「不完整」（conntrack 读失败 或 /proc partial）→ fail-safe：
+	// 采集结果「不完整」（conntrack 读失败 / Err 或 /proc partial）→ fail-safe：
 	// 本轮不释放已有 slot。
-	partial := procPartial || cr.Partial
+	partial := procPartial || cr.Partial || cr.Err != nil
 
-	active := s.buildActivity(nodeList, cr, procSplit, now)
+	active, candidates := s.buildActivity(nodeList, cr, procSplit, now)
 
 	newStates := map[string]State{}
 	quotaBlocked := map[string]bool{}
@@ -97,6 +97,10 @@ func (s *Service) reconcile(ctx context.Context) error {
 		if nodeActive == nil {
 			nodeActive = map[string]IPActivity{}
 		}
+		nodeCandidates := candidates[id]
+		if nodeCandidates == nil {
+			nodeCandidates = map[string]IPActivity{}
+		}
 		// partial：把已持有的 slot IP 补齐进 active，避免「不完整结果」误踢在线用户。
 		if partial {
 			for ip := range ipState.Slots {
@@ -110,9 +114,10 @@ func (s *Service) reconcile(ctx context.Context) error {
 		if cfg.IPLimitEnabled {
 			maxIPs = cfg.IPLimitMax
 		}
-		granted, hasRejected := ipState.Reconcile(nodeActive, maxIPs, now, s.ipIdle, s.rejectedTTL)
+		allowSet, hasRejected := ipState.Reconcile(nodeActive, nodeCandidates, maxIPs, now, s.ipIdle, s.rejectedTTL, s.provisionalTTL)
 
-		st.ActiveIPs = len(granted)
+		// 「在线 IP」= 已建立（非 provisional）的 granted 数量。
+		st.ActiveIPs = ipState.activeGrantedCount()
 		st.ActiveTCPConn = activeTCPCount(nodeActive)
 
 		if cfg.IPLimitEnabled {
@@ -121,8 +126,8 @@ func (s *Service) reconcile(ctx context.Context) error {
 			} else {
 				st.IPLimitState = "ok"
 			}
-			// 只有 granted 进入 allow set；Rejected 永不进入。v4/v6 由 genPolicyNFT 内部分流。
-			ipBlocked[id] = granted
+			// 只有 granted（allowSet，含 provisional）进入 nft；Rejected 永不进入。
+			ipBlocked[id] = allowSet
 		}
 
 		newStates[id] = st
@@ -152,8 +157,14 @@ func (s *Service) reconcile(ctx context.Context) error {
 	return nil
 }
 
-// buildActivity 用 conntrack 主数据源 + /proc 回退，产出每个节点的活跃 IP。
-func (s *Service) buildActivity(nodeList []nodes.Node, cr connection.ConntrackResult, procSplit map[string]connection.RemoteIPSet, now time.Time) map[string]map[string]IPActivity {
+// buildActivity 产出每个节点的「活跃 IP」与「候选 IP」。
+//
+// conntrack 可用时：conntrack 是唯一 TCP 生命周期事实来源——ESTABLISHED/udp 流 →
+// active；SYN_SENT/SYN_RECV 流 → candidate。绝不把 /proc 残留 ESTABLISHED 重新判活
+// （否则断开的客户端会一直残留）。
+//
+// conntrack 不可用/读失败时：回退 /proc ESTABLISHED / connected。
+func (s *Service) buildActivity(nodeList []nodes.Node, cr connection.ConntrackResult, procSplit map[string]connection.RemoteIPSet, now time.Time) (map[string]map[string]IPActivity, map[string]map[string]IPActivity) {
 	portNode := map[int]string{}
 	for _, n := range nodeList {
 		id := nodes.IDString(n)
@@ -164,12 +175,13 @@ func (s *Service) buildActivity(nodeList []nodes.Node, cr connection.ConntrackRe
 		}
 	}
 
-	out := map[string]map[string]IPActivity{}
-	agg := func(nodeID string) map[string]IPActivity {
-		m := out[nodeID]
+	active := map[string]map[string]IPActivity{}
+	candidates := map[string]map[string]IPActivity{}
+	agg := func(dst map[string]map[string]IPActivity, nodeID string) map[string]IPActivity {
+		m := dst[nodeID]
 		if m == nil {
 			m = map[string]IPActivity{}
-			out[nodeID] = m
+			dst[nodeID] = m
 		}
 		return m
 	}
@@ -182,9 +194,19 @@ func (s *Service) buildActivity(nodeList []nodes.Node, cr connection.ConntrackRe
 			if nodeID == "" {
 				continue
 			}
+			// 候选：TCP 握手尚未完成。
+			if f.Proto == "tcp" && (f.State == "SYN_SENT" || f.State == "SYN_RECV") {
+				m := agg(candidates, nodeID)
+				a := m[f.SrcIP]
+				a.IP = f.SrcIP
+				a.TCPSessions++
+				m[f.SrcIP] = a
+				continue
+			}
+
+			// 活跃流：tcp ESTABLISHED 或 udp。
 			fkey := nodeID + "\x00" + f.SrcIP + ":" + strconv.Itoa(f.SrcPort)
 			currentFlowKeys[fkey] = true
-
 			traffic := false
 			prev := s.flows[fkey]
 			switch {
@@ -200,7 +222,7 @@ func (s *Service) buildActivity(nodeList []nodes.Node, cr connection.ConntrackRe
 				continue // 死连接：整条流不活跃
 			}
 
-			m := agg(nodeID)
+			m := agg(active, nodeID)
 			a := m[f.SrcIP]
 			a.IP = f.SrcIP
 			if f.Proto == "tcp" {
@@ -213,36 +235,25 @@ func (s *Service) buildActivity(nodeList []nodes.Node, cr connection.ConntrackRe
 			}
 			m[f.SrcIP] = a
 		}
-	}
-
-	// /proc 回退 / 补充：conntrack 不可用时 ESTABLISHED 即在线；否则补齐 conntrack
-	// 里没有的本地/未走 conntrack 连接，保守视为在线（不做误杀）。
-	if procSplit != nil {
+	} else if procSplit != nil {
+		// conntrack 不可用：回退 /proc。
 		for _, n := range nodeList {
 			id := nodes.IDString(n)
 			cur, ok := procSplit[id]
 			if !ok {
 				continue
 			}
-			m := agg(id)
+			m := agg(active, id)
 			for ip := range cur.TCP {
 				a := m[ip]
 				a.IP = ip
-				if !cr.Available || a.TCPSessions == 0 {
-					if a.TCPSessions == 0 {
-						a.TCPSessions = 1
-					}
-				}
+				a.TCPSessions++
 				m[ip] = a
 			}
 			for ip := range cur.UDP {
 				a := m[ip]
 				a.IP = ip
-				if !cr.Available || a.UDPSessions == 0 {
-					if a.UDPSessions == 0 {
-						a.UDPSessions = 1
-					}
-				}
+				a.UDPSessions++
 				m[ip] = a
 			}
 		}
@@ -255,10 +266,13 @@ func (s *Service) buildActivity(nodeList []nodes.Node, cr connection.ConntrackRe
 		}
 	}
 
-	return out
+	return active, candidates
 }
 
-// activeTCPCount 统计某节点活跃 TCP 会话数（conntrack 判活 + /proc 补充）。
+// Reconcile 公开同步入口：API 保存策略后立即调用，使 nft 生效。
+func (s *Service) Reconcile(ctx context.Context) error { return s.reconcile(ctx) }
+
+// activeTCPCount 统计某节点「已建立」的活跃 TCP 会话数（不含候选 SYN）。
 func activeTCPCount(active map[string]IPActivity) int {
 	n := 0
 	for _, a := range active {
@@ -266,6 +280,3 @@ func activeTCPCount(active map[string]IPActivity) int {
 	}
 	return n
 }
-
-// Reconcile 公开同步入口：API 保存策略后立即调用，使 nft 生效。
-func (s *Service) Reconcile(ctx context.Context) error { return s.reconcile(ctx) }

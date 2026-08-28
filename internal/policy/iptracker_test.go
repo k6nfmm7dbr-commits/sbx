@@ -19,8 +19,8 @@ func procResult(tcp, udp map[string]bool, partial bool) func([]nodes.Node) (map[
 	}
 }
 
-// conntrack Available=true 且 0 flows：不得被当成 unavailable，/proc ESTABLISHED 仍在线。
-func TestConntrackAvailableZeroFlows(t *testing.T) {
+// conntrack Available=true 且 0 flows：禁止 fallback 到 /proc 残留 ESTABLISHED（不复活已死 IP）。
+func TestConntrackAvailableButEmptyDoesNotFallbackToProc(t *testing.T) {
 	s := newTestService(t)
 	seedNode(t, s, 1, "vless", 443)
 	s.SetConntrack(func(path string) connection.ConntrackResult {
@@ -31,8 +31,8 @@ func TestConntrackAvailableZeroFlows(t *testing.T) {
 		t.Fatal(err)
 	}
 	st, _ := s.Snapshot()
-	if st["1"].ActiveIPs != 1 {
-		t.Fatalf("conntrack 可用但 0 flow 时 ESTABLISHED 应在线, got %d", st["1"].ActiveIPs)
+	if st["1"].ActiveIPs != 0 {
+		t.Fatalf("conntrack 可用但 0 flow + /proc 残留 ESTABLISHED 不应被判在线, got %d", st["1"].ActiveIPs)
 	}
 }
 
@@ -179,5 +179,129 @@ func TestServiceAdmissionRejects(t *testing.T) {
 	}
 	if len(snap.Rejected) != 1 {
 		t.Fatalf("rejected 应为 1, got %d", len(snap.Rejected))
+	}
+}
+
+// conntrack 上一轮有 A，本轮 conntrack 已无 A 但 /proc 仍 ESTABLISHED → A 必须离线。
+func TestProcStaleTCPDoesNotResurrectIP(t *testing.T) {
+	s := newTestService(t)
+	seedNode(t, s, 1, "vless", 443)
+	ctx := context.Background()
+	s.SetRemoteIPs(procResult(map[string]bool{"9.9.9.9": true}, nil, false))
+
+	// 第一轮：conntrack 有 A
+	s.SetConntrack(func(string) connection.ConntrackResult {
+		return connection.ConntrackResult{Available: true, Flows: []connection.ConntrackFlow{
+			{Proto: "tcp", State: "ESTABLISHED", DstPort: 443, SrcIP: "9.9.9.9", SrcPort: 1111, Bytes: 100},
+		}}
+	})
+	if err := s.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := s.Snapshot(); st["1"].ActiveIPs != 1 {
+		t.Fatalf("第一轮应在线, got %d", st["1"].ActiveIPs)
+	}
+
+	// 第二轮：conntrack 已无 A（0 flow），但 /proc 仍残留 ESTABLISHED A → 不得复活。
+	s.SetConntrack(func(string) connection.ConntrackResult {
+		return connection.ConntrackResult{Available: true, Flows: nil}
+	})
+	if err := s.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := s.Snapshot(); st["1"].ActiveIPs != 0 {
+		t.Fatalf("conntrack 无 A 后 /proc 残留不得复活, got %d", st["1"].ActiveIPs)
+	}
+}
+
+// A/B/C 在线，A/B 断开，下一轮 snapshot 只含 C。
+func TestDisconnectedIPRemovedFromSnapshot(t *testing.T) {
+	s := newTestService(t)
+	seedNode(t, s, 1, "vless", 443)
+	ctx := context.Background()
+	s.SetRemoteIPs(procResult(nil, nil, false))
+	mk := func(ips ...string) connection.ConntrackResult {
+		var fs []connection.ConntrackFlow
+		for i, ip := range ips {
+			fs = append(fs, connection.ConntrackFlow{Proto: "tcp", State: "ESTABLISHED", DstPort: 443, SrcIP: ip, SrcPort: 1000 + i, Bytes: 100})
+		}
+		return connection.ConntrackResult{Available: true, Flows: fs}
+	}
+	s.SetConntrack(func(string) connection.ConntrackResult { return mk("A", "B", "C") })
+	if err := s.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snap := s.NodeIPSnapshot("1")
+	if len(snap.IPs) != 3 {
+		t.Fatalf("应有 3 在线, got %d", len(snap.IPs))
+	}
+	// A/B 断开
+	s.SetConntrack(func(string) connection.ConntrackResult { return mk("C") })
+	if err := s.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snap = s.NodeIPSnapshot("1")
+	if len(snap.IPs) != 1 || snap.IPs[0].IP != "C" {
+		t.Fatalf("断开后 snapshot 应只含 C, got %+v", snap.IPs)
+	}
+}
+
+// TCP 在线 IP 整条链：conntrack TCP 流 → Active State → Live Snapshot。
+func TestActiveIPsIncludesTCP(t *testing.T) {
+	s := newTestService(t)
+	seedNode(t, s, 1, "vless", 443)
+	ctx := context.Background()
+	s.SetRemoteIPs(procResult(nil, nil, false))
+	s.SetConntrack(func(string) connection.ConntrackResult {
+		return connection.ConntrackResult{Available: true, Flows: []connection.ConntrackFlow{
+			{Proto: "tcp", State: "ESTABLISHED", DstPort: 443, SrcIP: "9.9.9.9", SrcPort: 1111, Bytes: 100},
+			{Proto: "tcp", State: "ESTABLISHED", DstPort: 443, SrcIP: "8.8.8.8", SrcPort: 2222, Bytes: 200},
+		}}
+	})
+	if err := s.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ips := s.ActiveIPs("1")
+	if len(ips) != 2 {
+		t.Fatalf("TCP 在线 IP 应有 2 个, got %v", ips)
+	}
+	snap := s.NodeIPSnapshot("1")
+	if len(snap.IPs) != 2 || snap.IPs[0].TCP <= 0 {
+		t.Fatalf("snapshot 应含 2 个 TCP IP, got %+v", snap.IPs)
+	}
+}
+
+// 半开连接（异常断网/无 FIN，conntrack 仍 ESTABLISHED 但无流量）：idle 内保持在线，超 idle 释放。
+func TestHalfOpenTCPStaysOnlineUntilIdle(t *testing.T) {
+	s := newTestService(t)
+	seedNode(t, s, 1, "vless", 443)
+	ctx := context.Background()
+	s.SetRemoteIPs(procResult(nil, nil, false))
+	s.SetIPIdle(10 * time.Second)
+	base := time.Now()
+	s.SetClock(func() time.Time { return base })
+
+	flow := connection.ConntrackFlow{Proto: "tcp", State: "ESTABLISHED", DstPort: 443, SrcIP: "9.9.9.9", SrcPort: 1111, Bytes: 100}
+	s.SetConntrack(func(string) connection.ConntrackResult {
+		return connection.ConntrackResult{Available: true, Flows: []connection.ConntrackFlow{flow}}
+	})
+	if err := s.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	base = base.Add(5 * time.Second)
+	if err := s.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := s.Snapshot(); st["1"].ActiveIPs != 1 {
+		t.Fatalf("半开但 idle 内应仍在线, got %d", st["1"].ActiveIPs)
+	}
+
+	base = base.Add(6 * time.Second)
+	if err := s.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := s.Snapshot(); st["1"].ActiveIPs != 0 {
+		t.Fatalf("半开超 idle 应释放, got %d", st["1"].ActiveIPs)
 	}
 }

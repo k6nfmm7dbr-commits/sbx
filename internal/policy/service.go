@@ -81,10 +81,11 @@ type Service struct {
 	now func() time.Time
 
 	// IP 判活与 admission 参数。
-	ipIdle      time.Duration // 无流量/消失后判离线窗口（grace = 同一窗口）
-	rejectedTTL time.Duration // 拒绝记录保留时长
-	conntrack   func(path string) connection.ConntrackResult
-	remoteIPs   func(list []nodes.Node) (map[string]connection.RemoteIPSet, bool, error)
+	ipIdle         time.Duration // 无流量/消失后判离线窗口（grace = 同一窗口）
+	rejectedTTL    time.Duration // 拒绝记录保留时长
+	provisionalTTL time.Duration // 候选 slot 超时（未建立则释放）
+	conntrack      func(path string) connection.ConntrackResult
+	remoteIPs      func(list []nodes.Node) (map[string]connection.RemoteIPSet, bool, error)
 
 	// flow tracker：conntrack 字节增量判活状态（key: node\x00ip:sport）。
 	// reconcile 串行访问，runMu 保护；DeleteNode 清理。
@@ -110,6 +111,7 @@ func New(db *sql.DB, appDir, nftConf string) *Service {
 		now:            time.Now,
 		ipIdle:         ipIdleTimeout,
 		rejectedTTL:    rejectedTTL,
+		provisionalTTL: provisionalTTL,
 		conntrack:      connection.ReadConntrack,
 		flows:          map[string]*flowState{},
 		notify:         make(chan struct{}, 1),
@@ -134,11 +136,18 @@ const ipIdleTimeout = 60 * time.Second
 // rejectedTTL 是「被拒绝 IP」记录的保留时长（防端口扫描无限增长）。
 const rejectedTTL = 60 * time.Second
 
+// provisionalTTL 是候选（SYN 未建立）slot 的保留时长：超过仍未 ESTABLISHED 即释放，
+// 避免端口扫描/失败握手占用名额。
+const provisionalTTL = 10 * time.Second
+
 // SetIPIdle 覆盖判活/grace 窗口（测试用）。
 func (s *Service) SetIPIdle(d time.Duration) { s.ipIdle = d }
 
 // SetRejectedTTL 覆盖拒绝记录 TTL（测试用）。
 func (s *Service) SetRejectedTTL(d time.Duration) { s.rejectedTTL = d }
+
+// SetProvisionalTTL 覆盖候选 slot 保留时长（测试用）。
+func (s *Service) SetProvisionalTTL(d time.Duration) { s.provisionalTTL = d }
 
 // SetConntrack 注入 conntrack 读取函数（测试用）。
 func (s *Service) SetConntrack(fn func(path string) connection.ConntrackResult) { s.conntrack = fn }
@@ -184,6 +193,9 @@ func (s *Service) ActiveIPs(nodeID string) []string {
 	}
 	arr := make([]kv, 0, len(st.Slots))
 	for ip, slot := range st.Slots {
+		if slot.Provisional {
+			continue // 候选尚未建立，不算「在线」
+		}
 		last := slot.LastSeen
 		if slot.LastTraffic.After(last) {
 			last = slot.LastTraffic
@@ -242,8 +254,11 @@ func (s *Service) nodeIPSnapshotLocked(nodeID string) NodeIPSnapshot {
 	}
 	snap.Limited = st.MaxIPs > 0
 	snap.MaxIPs = st.MaxIPs
-	snap.Granted = len(st.Slots)
-	for ip := range st.Slots {
+	snap.Granted = st.activeGrantedCount()
+	for ip, slot := range st.Slots {
+		if slot.Provisional {
+			continue // 候选（尚未 ESTABLISHED）不算在线，不进主列表
+		}
 		e := IPEntry{IP: ip, Granted: true}
 		if o, ok := st.Observed[ip]; ok {
 			e.TCP = o.TCPSessions

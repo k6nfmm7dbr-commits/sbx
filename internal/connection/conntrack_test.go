@@ -33,6 +33,23 @@ func TestParseConntrack(t *testing.T) {
 	}
 }
 
+func TestParseConntrackKeepsSynStates(t *testing.T) {
+	sample := "" +
+		"ipv4     2 tcp      6 120 SYN_SENT src=1.2.3.4 dst=91.110.232.102 sport=50000 dport=8844 packets=1 bytes=60 src=91.110.232.102 dst=1.2.3.4 sport=8844 dport=50000 packets=0 bytes=0 [UNREPLIED] mark=0 zone=0 use=2\n" +
+		"ipv4     2 tcp      6 60  SYN_RECV src=5.6.7.8 dst=91.110.232.102 sport=51000 dport=8844 packets=1 bytes=60 src=91.110.232.102 dst=5.6.7.8 sport=8844 dport=51000 packets=1 bytes=60 mark=0 zone=0 use=2\n"
+
+	flows := ParseConntrack(sample)
+	if len(flows) != 2 {
+		t.Fatalf("应保留 SYN_SENT + SYN_RECV 两条候选, got %d", len(flows))
+	}
+	for i := range flows {
+		f := flows[i]
+		if f.State != "SYN_SENT" && f.State != "SYN_RECV" {
+			t.Fatalf("应保留握手态, got state=%q", f.State)
+		}
+	}
+}
+
 func TestParseConntrackEmptyAndMalformed(t *testing.T) {
 	if got := ParseConntrack(""); len(got) != 0 {
 		t.Fatalf("空文本应返回空, got %v", got)
