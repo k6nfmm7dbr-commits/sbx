@@ -115,6 +115,9 @@ install_deps() {
   command -v curl    >/dev/null 2>&1 || need+=(curl)
   command -v tar     >/dev/null 2>&1 || need+=(tar)
   command -v openssl >/dev/null 2>&1 || need+=(openssl)
+  # jq：候选配置提交前的 route.final 引用完整性自检需要（见 sanitize_candidate_route）。
+  # 缺失不阻断安装——自检会降级为告警，行为退回到修复前，不会更糟。
+  command -v jq      >/dev/null 2>&1 || need+=(jq)
   ((${#need[@]})) && { info "安装: ${need[*]}"; pkg_install "${need[@]}"; }
 
   # 计数后端：优先 nftables
@@ -678,9 +681,70 @@ sbx_lock() {
 #   3) 原文件不存在属合法状态（全新安装），按 original_exists=false 记录，
 #      回滚时恢复为“不存在”；但“存在却备份失败”必须中止。
 # >>> commit-node-flow（tests/commit_flow_test.sh 提取本段做回滚一致性测试）
+# sanitize_candidate_route <candidate_file>
+# P0 修复：候选配置 route.final 引用完整性自检。
+#   sbx-core 在原 config.json 缺 route 段时会注入 route.final="direct"，但
+#   outbounds 里 direct 出站的 tag 未必叫 "direct"（例如发行版包/手工配置常用
+#   "direct-out"）。此时 final 指向一个不存在的 tag，而 `sing-box check` 并不校验
+#   该引用（返回 0），故障要到 restart 才以
+#     FATAL start service: default outbound not found: direct
+#   暴露 —— 表现为"配置校验通过但 sing-box 启动失败"并触发整体回滚，节点永远加不上。
+#   这里在提交前把 final 校正为真实存在的 direct 出站 tag（没有可用 direct 出站时
+#   删除 final，交回 sing-box 自身默认行为）。
+# 约束：纯读改候选文件，绝不触碰正式配置；jq 缺失或任何异常都只告警并放行，
+#       让后续 check/restart/回滚链路照原样兜底（fail-open：不比修复前更糟）。
+sanitize_candidate_route() {
+  local cand="$1" verb tag tmp
+  [[ -f "$cand" ]] || return 0
+  command -v jq >/dev/null 2>&1 || {
+    warn "未找到 jq，跳过候选配置 route.final 引用自检"
+    return 0
+  }
+  # 阶段一：只判定，不写盘。final 缺失或已指向存在的 tag → 原样放行（字节不变）。
+  verb=$(jq -r '
+      (.outbounds // []) as $obs
+    | ($obs | map(.tag? // empty)) as $tags
+    | (.route?.final? // null) as $fin
+    | if $fin == null or ($tags | index($fin)) != null then "ok"
+      elif (($obs | map(select(.type? == "direct")) | first | .tag?) // null) != null then "set"
+      else "del" end
+  ' "$cand" 2>/dev/null) || {
+    warn "候选配置 route.final 自检失败（JSON 解析异常），已跳过自检"
+    return 0
+  }
+  case "$verb" in
+    ok) return 0 ;;
+    set|del) ;;
+    *) warn "候选配置 route.final 自检结果异常，已跳过自检"; return 0 ;;
+  esac
+  # 阶段二：确实存在悬空引用才改写候选文件（正式配置始终不受影响）
+  tmp="$cand.route-fix"
+  if ! jq '
+      (.outbounds // []) as $obs
+    | (($obs | map(select(.type? == "direct")) | first | .tag?) // null) as $d
+    | if $d != null then .route.final = $d else del(.route.final) end
+  ' "$cand" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    warn "候选配置 route.final 改写失败，已跳过自检"
+    return 0
+  fi
+  [[ -s "$tmp" ]] || { rm -f "$tmp"; warn "候选配置 route.final 改写结果为空，已跳过自检"; return 0; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$cand" || { rm -f "$tmp"; warn "候选配置 route.final 写回失败，已跳过自检"; return 0; }
+  if [[ "$verb" == "set" ]]; then
+    tag=$(jq -r '.route.final // "?"' "$cand" 2>/dev/null)
+    info "已校正候选配置 route.final → ${tag}（原值指向不存在的出站 tag）"
+  else
+    info "已移除候选配置悬空的 route.final（无可用 direct 出站）"
+  fi
+  return 0
+}
+
 commit_node() {
   local cand="$SB_CONF.candidate"
   [[ -f "$cand" ]] || { warn "未生成候选配置"; return 1; }
+  # check 之前先校正 route.final：check 不校验该引用，放过去就会在 restart 阶段炸
+  sanitize_candidate_route "$cand"
   if ! "$SB_BIN" check -c "$cand" >/dev/null 2>&1; then
     warn "sing-box 配置校验失败，已回滚"
     "$SB_BIN" check -c "$cand" 2>&1 | head -5 >&2
@@ -1599,6 +1663,8 @@ apply_update() {
       info "已跳过本次升级的配置迁移；请修复 $NODES_JSON 后重新运行升级"
       sync_err="node sync 失败"
     elif [[ -f "$SB_CONF.candidate" ]]; then
+      # 与 commit_node 同源：check 不校验 route.final 引用，先校正再校验
+      sanitize_candidate_route "$SB_CONF.candidate"
       if "$SB_BIN" check -c "$SB_CONF.candidate" >/dev/null 2>&1; then
         # SB_CONF 含节点凭据：存在即必须备份成功，失败则中止迁移（正式配置不动）
         if [[ -f "$SB_CONF" ]] && ! cp -f "$SB_CONF" "$SB_CONF.upd-bak"; then
