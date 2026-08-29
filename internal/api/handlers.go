@@ -150,8 +150,9 @@ func toI64(v any) int64 {
 	}
 }
 
-// attachPolicyToLive 把策略状态（在线 IP 数 + IP 限制 + 活跃 TCP 连接）合并进
-// live 的节点列表，供前端 2s 高频轮询刷新节点卡片。
+// attachPolicyToLive 把策略状态（在线 IP 数 + IP 限制）合并进 live 的节点列表。
+// 连接数始终由 traffic.Collector 的 socket 统计结果提供；不能在这里用策略模块
+// 的按 IP 聚合结果覆盖，否则同一 NAT IP 下的多条 TCP 会被错误压成 1。
 func (s *Server) attachPolicyToLive(live *traffic.Live) {
 	if s.policy == nil {
 		return
@@ -163,22 +164,8 @@ func (s *Server) attachPolicyToLive(live *traffic.Live) {
 			live.Nodes[i].ActiveIPs = st.ActiveIPs
 			live.Nodes[i].IPLimitOn = st.IPLimitOn
 			live.Nodes[i].IPLimitMax = st.IPLimitMax
-			// 覆盖「TCP 连接」：只统计有近期流量的活跃连接（与在线 IP 同源判活）。
-			// 仅当该节点原本就是 TCP 型（ConnsTCP 非 nil）才覆盖，UDP 型保持 nil。
-			if live.Nodes[i].ConnsTCP != nil {
-				v := st.ActiveTCPConn
-				live.Nodes[i].ConnsTCP = &v
-			}
 		}
 	}
-	// 让顶部 KPI 的 TCP 总数与卡片一致：按覆盖后的 per-node 值重新求和。
-	var tcpTotal int64
-	for i := range live.Nodes {
-		if live.Nodes[i].ConnsTCP != nil {
-			tcpTotal += int64(*live.Nodes[i].ConnsTCP)
-		}
-	}
-	live.ConnsTotal = tcpTotal
 }
 func (s *Server) tryPolicyRoute(w http.ResponseWriter, r *http.Request, route string) bool {
 	prefix := "/api/nodes/"

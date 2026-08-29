@@ -1023,8 +1023,11 @@ ProtectKernelTunables=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+# v3.0.6：面板需要 CAP_NET_RAW 兼容 iptables-legacy（Ubuntu 20.04 等）；
+# root UID 在 systemd capability 沙箱下不等于完整 root，缺该能力时
+# iptables-legacy 会报 filter table Permission denied。
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
 
 [Install]
 WantedBy=multi-user.target
