@@ -10,6 +10,9 @@ clear_one() {
   "$B" -w -D OUTPUT -j "$OUT" 2>/dev/null
   "$B" -w -F "$IN" 2>/dev/null; "$B" -w -X "$IN" 2>/dev/null
   "$B" -w -F "$OUT" 2>/dev/null; "$B" -w -X "$OUT" 2>/dev/null
+  # 「链本就不存在」对 clear 语义即成功；最后一条 -X 的 rc 不得透出，
+  # 否则 nft-only 主机上 `sh iptables.sh clear` 永远非 0 退出。
+  return 0
 }
 
 apply_one() {

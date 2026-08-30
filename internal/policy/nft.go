@@ -3,9 +3,11 @@ package policy
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/k6nfmm7dbr-commits/sbx/internal/firewall"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/fsx"
@@ -197,7 +199,13 @@ func (s *Service) applyEnforcement(ctx context.Context, quotaBlocked map[string]
 	shapeChanged := shape != s.appliedShape &&
 		(needEnforce || len(s.appliedQuota) > 0 || len(s.appliedIPLimit) > 0)
 	if !quotaChanged && !ipContentChanged && !shapeChanged {
-		return nil
+		// 无变化时仍要防「外部把策略表删了」：clear-firewall / 手工 nft delete
+		// 之后内存里的 applied 快照与目标一致，不重写就会永远失去 enforcement。
+		// 存在性探测有节流（probeInterval），平时零开销。
+		if !needEnforce || s.policyTablePresent() {
+			return nil
+		}
+		slog.Warn("检测到策略表被外部移除, 正在重建 enforcement")
 	}
 
 	// 仅 IP 内容变化时走节流窗口；其余（谁被限变了/端口变了）立即应用。
@@ -239,6 +247,7 @@ func (s *Service) applyEnforcement(ctx context.Context, quotaBlocked map[string]
 	s.appliedIPLimit = ipBlocked
 	s.appliedShape = shape
 	s.lastEnforceAt = now
+	s.lastProbeOK = true // 刚应用成功，表必然存在
 	return nil
 }
 
@@ -270,6 +279,41 @@ func sameIPLimitKeys(a, b map[string]map[string]bool) bool {
 	}
 	return true
 }
+
+// probeInterval 是策略表存在性探测的间隔（每次探测是一次 nft exec，
+// 不能每秒做；被外部删除后最坏一个间隔内自愈，方向仍是 fail-closed）。
+const probeInterval = 10 * time.Second
+
+// policyTablePresent 探测内核里策略表是否真实存在（有节流与结果缓存）。
+// 默认实现用 `nft list table`；测试可经 SetTableProbe 注入。
+// 探测本身失败（无 nft 命令 / 无权限）按「存在」处理，不据此重写规则。
+func (s *Service) policyTablePresent() bool {
+	now := s.now()
+	if now.Sub(s.lastProbeAt) < probeInterval {
+		return s.lastProbeOK
+	}
+	s.lastProbeAt = now
+	probe := s.tableProbe
+	if probe == nil {
+		probe = func() bool {
+			rc, _, _ := firewall.RunCmd(context.Background(), "nft", "list", "table", "inet", PolicyTable)
+			return rc == 0
+		}
+	}
+	ok := probe()
+	if ok {
+		s.lastProbeOK = true
+	} else {
+		// 缺失结论不节流：配合上层「缺失即重建」，下一轮立即重探，
+		// 重建成功后回到节流探测节奏。
+		s.lastProbeAt = time.Time{}
+		s.lastProbeOK = false
+	}
+	return ok
+}
+
+// SetTableProbe 注入策略表存在性探测函数（测试用）。
+func (s *Service) SetTableProbe(fn func() bool) { s.tableProbe = fn }
 
 func sameQuota(a map[string]bool, b map[string]bool) bool {
 	if len(a) != len(b) {

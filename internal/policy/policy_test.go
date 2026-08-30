@@ -22,6 +22,8 @@ func newTestService(t *testing.T) *Service {
 	s := New(db.DB, dir, filepath.Join(dir, "policy.nft"))
 	// 单元测试不依赖真实 nft（CI runner 无 netlink 权限）；仅验证脚本生成与状态机。
 	s.nftApply = func(ctx context.Context, scriptPath string) error { return nil }
+	// 存在性探测默认恒真：单测环境无 nft；自愈行为由专门测试注入假探针覆盖。
+	s.tableProbe = func() bool { return true }
 	// 默认关闭应用节流：既有测试用真实时钟，多次 reconcile 间隔极短，
 	// 节流会让「第二次应用」被合并而失败；节流行为由专门测试用假时钟覆盖。
 	s.enforceMinInterval = 0

@@ -176,4 +176,12 @@ reconcile 的 notify 唤醒 + 5s 保险 tick，不再每秒全量快照。）
   `config-get` 缺失键打印空行（不再输出 Go 的 `<nil>`）；
   `State.ActiveTCPConn` 从 JSON DTO 移除（从未被任何 API 消费方使用，
   数据保留在包内 `activeTCP` 供测试断言）。
+- **策略表外部删除自愈（修复中附带发现）**：`sbx --clear-firewall` 在面板运行中
+  删掉 `sbx_policy` 后，reconcile 因内存 applied 快照与目标一致而永不重写，
+  enforcement 静默失效。现在无变化分支对「需要 enforcement」的节点做
+  10s 节流的存在性探测（`nft list table`），缺失即主动重建。
+- **`sh iptables.sh clear` 在无链时返回非 0（修复中附带发现）**：nft-only 主机上
+  `sbx --clear-firewall` 必报「iptables 计数链清除失败」并以 1 退出。
+  `clear_one` 末尾显式 `return 0`——「链本就不存在」对 clear 语义即成功。
+
 

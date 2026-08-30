@@ -144,6 +144,12 @@ type Service struct {
 	// 用于发现「端口变了但 allow set 没变」这种 applied 比较看不出来的漂移。
 	appliedShape string // runMu 保护
 
+	// tableProbe 探测内核策略表是否存在（防外部删除后 applied 快照不再重写）。
+	// lastProbeAt/lastProbeOK 是探测节流与缓存（runMu 保护）。
+	tableProbe  func() bool
+	lastProbeAt time.Time
+	lastProbeOK bool
+
 	// nftApply 执行 nft 脚本（测试可替换为 no-op，规避 CI 无 nft 权限）。
 	nftApply func(ctx context.Context, scriptPath string) error
 

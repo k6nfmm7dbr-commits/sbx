@@ -140,6 +140,58 @@ func TestSubscribeFanoutWakesAll(t *testing.T) {
 	}
 }
 
+// 外部删除自愈：clear-firewall / 手工 nft delete 把策略表删了之后，
+// 内存 applied 快照与目标一致，若只按快照比较就永远不再重写——
+// 必须探测到表缺失并主动重建。
+func TestExternalTableDeletionTriggersRebuild(t *testing.T) {
+	s := newTestService(t)
+	seedNode(t, s, 1, "vless", 443)
+	if err := s.UpsertConfig(context.Background(), Config{NodeID: "1", IPLimitEnabled: true, IPLimitMax: 1}); err != nil {
+		t.Fatal(err)
+	}
+	s.SetConntrack(func(string) connection.ConntrackResult { return connection.ConntrackResult{Available: false} })
+	s.SetRemoteIPs(procResult(map[string]bool{"1.2.3.4": true}, nil, false))
+	applies := 0
+	s.SetNFTApply(func(ctx context.Context, p string) error { applies++; return nil })
+
+	if err := s.reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if applies != 1 {
+		t.Fatalf("首次应用 1 次, got %d", applies)
+	}
+
+	// 状态不变的第二轮：跳过（恒真探针）
+	if err := s.reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if applies != 1 {
+		t.Fatalf("无变化不应重写, got %d", applies)
+	}
+
+	// 模拟外部把策略表删了（探针报缺失）→ 下一轮必须重建。
+	// 探针结论有 10s 节流缓存（生产上最坏 10s 自愈，刻意如此），
+	// 测试里清掉上次探测时间强制立即重探。
+	present := false
+	s.SetTableProbe(func() bool { return present })
+	s.lastProbeAt = time.Time{}
+	if err := s.reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if applies != 2 {
+		t.Fatalf("表被外部删除后必须重建, got %d", applies)
+	}
+
+	// 表恢复后回到「无变化不重写」
+	present = true
+	if err := s.reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if applies != 2 {
+		t.Fatalf("重建后无变化不应再重写, got %d", applies)
+	}
+}
+
 // saveNodePort 重写单个节点的端口（覆盖写，不产生重复 id）。
 func saveNodePort(t *testing.T, s *Service, id int64, typ string, port int64) error {
 	t.Helper()
