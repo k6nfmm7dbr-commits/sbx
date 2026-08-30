@@ -55,6 +55,8 @@ v3.0.6
 
 底部三页签（首页 / 每日 / 节点），令牌登录（HttpOnly Cookie，SameSite=Lax）。
 
+同一来源 IP 连续登录失败 5 次后，后续失败尝试每次强制等待 2 秒（5 分钟窗口内累计，只惩罚失败、输对立即放行），挡住凭据喷洒与日志刷屏。来源只取 `RemoteAddr`，不信任可伪造的 `X-Forwarded-For`。
+
 - **首页**：节点卡片（实时速率 / 累计流量 / TCP·UDP 连接数 / 在线 IP / 配额状态）+ 顶部 KPI
 - **每日**：全节点流量趋势（近 60 天）与单节点详情
 - **节点**：节点管理抽屉 —— 流量配额、IP 数量限制、重置已用流量、查看在线 IP
@@ -91,6 +93,10 @@ v3.0.6
   `/etc/sbx/nft.conf`（表 `sbx_traffic`）完全分离，互不覆盖。
 - `sbx-core reset [scope]` 清空统计时会同事务清零对应节点的配额基线，
   避免「统计归零后配额长期失效」。
+- `nodes.json` 损坏或不可读时，策略端点返回 503 并说明「配置文件不可用，策略维持
+  上一轮状态」，而不是误报 404「节点不存在」；此期间 enforcement 不会 fail-open。
+- 策略规则生成是确定性的：同一份配置反复保存产生字节一致的 `policy.nft`（端口升序），
+  不会因 map 遍历顺序而无意义重写。
 
 ## 升级
 
@@ -153,13 +159,21 @@ internal/webui/static/   前端（go:embed）
 installer-template.sh    sbx.sh 模板（与 sbx.sh 保持同步，CI 校验）
 scripts/build-release.sh 七架构交叉编译 + SHA256SUMS
 scripts/e2e_remote.sh    真机验收
+tests/                   安装器与提交流程的 shell 回归测试
 docs/AUDIT.md            行为审计（留档）
+FUTURE_IMPROVEMENTS.md   已知取舍与待办（诚实标注未做的部分）
 ```
 
 ```bash
 go test ./... && go test -race ./...
 ./scripts/build-release.sh dist
+bash tests/baseline_test.sh    # 版本一致性 + 安装器 fail-closed + 权限
+bash tests/commit_flow_test.sh # 节点提交事务 / route.final 校正
 ```
+
+`-race` 必跑：策略层是「reconcile 私有状态 + 每轮末发布不可变快照」的并发模型，
+读侧（HTTP / SSE）只看快照，回归测试 `internal/policy/concurrency_test.go` 专门
+锁定这一点。
 
 核心逻辑（节点、流量、nftables、SQLite、sing-box 配置、Web API）全部由 Go 实现，仓库无 Python 文件。`internal/*/testdata` 为测试静态快照。
 
@@ -173,5 +187,9 @@ SBX_CORE_BIN=$PWD/dist/sbx-core-linux-amd64 SBX_SB_BIN=/path/to/sing-box bash sb
 ## 分发
 
 - `main`：源码（含安装器与测试）
-- `dist`：编译产物（`sbx-core-linux-<arch>` + `SHA256SUMS`），安装器按架构从这里下载
+- `dist`：编译产物（`sbx-core-linux-<arch>` + `SHA256SUMS` + `scripts/dist-manifest.txt`），
+  安装器按架构从这里下载。CI 每次重建都把 dist 树整体替换（`git read-tree --empty`），
+  只保留清单内的文件，不会累积历史产物
 - `backup/pre-reset-removal-20260828-0246`：定时流量重置功能移除前的完整版本备份（含月度配额自动归零状态机）
+
+纯文档改动（未触及 `cmd/`、`internal/`、`installer-template.sh` 等）不会触发 dist 重建。
