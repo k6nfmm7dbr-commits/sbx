@@ -96,15 +96,19 @@ curl -fsS --max-time 30 --socks5-hostname 10.66.0.2:10801 http://10.66.0.1:8000/
 ck "经节点下载 1MB 成功" $?
 [[ $(stat -c%s /tmp/e2e-dl.bin) == 1048576 ]]; ck "下载字节数完整" $?
 sleep 4   # 等两轮采集
-api_total() { curl -fsS "http://127.0.0.1:$PORT/api/summary?token=$TOKEN" | jq -r '
+api_total() { curl -fsS -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/api/summary" | jq -r '
   ([.nodes[] | select(.id==1)][0] | "\(.total.rx) \(.total.tx)")'; }
 read RX TX <<< "$(api_total 2>/dev/null || echo 0 0)"
 echo "  节点累计 rx=$RX tx=$TX"
 [[ "$TX" -ge 1000000 ]]; ck "tx≥1MB（下载计入）" $?
 [[ "$RX" -ge 500 && "$RX" -le 20000 ]]; ck "rx 在请求量级（无虚增）" $?
-curl -fsS "http://127.0.0.1:$PORT/api/summary?token=$TOKEN" | jq -e '
+curl -fsS -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/api/summary" | jq -e '
   .rate_known==true and .total.tx>=1000000 and .healthy==true' >/dev/null 2>&1
 ck "healthy 且速率已知" $?
+
+# query string token 渠道已在 v3.0.5 移除（会泄漏进日志/history）：必须 401
+CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:$PORT/api/summary?token=$TOKEN")
+[[ "$CODE" == "401" ]]; ck "?token= 渠道已移除（返回 401，实得 $CODE）" $?
 
 # ---------------------------------------------------------------- 5. epoch 换代连续性
 section "5. 规则重建(epoch 换代)不丢计不重复"

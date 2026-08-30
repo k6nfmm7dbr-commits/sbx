@@ -24,13 +24,16 @@ ck "节点落库正确" $?
 
 sleep 3
 TOKEN=$(jq -r '.token' /etc/sbx/panel.json)
-curl -fsS --max-time 10 "http://127.0.0.1:$PORT/api/live?token=$TOKEN" | jq -e '
+curl -fsS --max-time 10 -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/api/live" | jq -e '
   .healthy==true and any(.nodes[]; .id==1)' >/dev/null 2>&1
 ck "/api/live healthy 且含节点" $?
 
 echo "== 清理卸载 =="
 echo y | env NO_COLOR=1 bash /usr/local/bin/sbx --uninstall >/tmp/gh-uninstall.log 2>&1
 ck "卸载退出码 0" $?
+# v3.0.7：卸载须清理策略表与 sysctl 持久化文件
+! nft list tables 2>/dev/null | grep -q 'inet sbx_'; ck "卸载后无 sbx_* nft 表残留" $?
+[[ ! -f /etc/sysctl.d/99-sbx-conntrack.conf ]]; ck "卸载后无 sysctl 残留" $?
 [[ ! -d /etc/sbx ]]; ck "目录清除" $?
 
 echo "== 结果 =="
