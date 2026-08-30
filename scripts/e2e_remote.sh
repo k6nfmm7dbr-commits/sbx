@@ -20,7 +20,17 @@ ck() { # ck <名称> <条件退出码>
 }
 section() { echo; echo "== $1 =="; }
 
-pkill -f sbx-core-linux 2>/dev/null; pkill -f 'sing-box run' 2>/dev/null
+pkill -f "$ROOT/usr/local/bin/sbx-core" 2>/dev/null; pkill -f 'sing-box run' 2>/dev/null
+# 隔离生产实例：本机若已有正式安装（systemd 的 sbx-panel），它会管理同名的
+# 内核表 inet sbx_traffic / sbx_policy，并在 e2e 删表后把自己的表重建回来——
+# 那会污染「clear 后无残留」「外部删除自愈」这类内核态断言。先停掉，收尾时恢复。
+PROD_STOPPED=0
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet sbx-panel 2>/dev/null; then
+  systemctl stop sbx-panel >/dev/null 2>&1 && PROD_STOPPED=1
+  echo "  (已临时停止生产 sbx-panel，收尾时恢复)"
+fi
+nft delete table inet sbx_traffic 2>/dev/null
+nft delete table inet sbx_policy 2>/dev/null
 ip netns del e2e 2>/dev/null
 rm -rf "$ROOT"; mkdir -p "$ROOT"
 
@@ -38,8 +48,10 @@ ck "panel.json 合法(token+port)" $?
 
 # ---------------------------------------------------------------- 2. 菜单加节点
 section "2. 菜单添加 Shadowsocks 2022 节点"
-E2E_PW="$(openssl rand -base64 16 | tr -d '\n')"
-printf '1\n2\n18388\nss-e2e\n%s\n\n0\n0\n' "$E2E_PW" | env SBX_ROOT="$ROOT" SBX_NO_SERVICE=1 \
+# 按键序列（v3.0.x 菜单顺序）：
+#   1=添加节点 → 2=Shadowsocks → 1=加密算法(128) → 端口 → 备注 → 回车(pause) → 0=退出
+# 密码由 `sbx-core node ss2022-key` 用 crypto/rand 生成，菜单不再询问。
+printf '1\n2\n1\n18388\nss-e2e\n\n0\n' | env SBX_ROOT="$ROOT" SBX_NO_SERVICE=1 \
   NO_COLOR=1 bash "$ROOT/usr/local/bin/sbx" >/tmp/e2e-menu.log 2>&1
 ck "菜单流程退出码 0" $?
 jq -e 'length==1 and .[0].type=="shadowsocks" and .[0].port==18388 and .[0].name=="ss-e2e"' "$NODES_JSON" >/dev/null 2>&1
@@ -99,6 +111,8 @@ sleep 4   # 等两轮采集
 api_total() { curl -fsS -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/api/summary" | jq -r '
   ([.nodes[] | select(.id==1)][0] | "\(.total.rx) \(.total.tx)")'; }
 read RX TX <<< "$(api_total 2>/dev/null || echo 0 0)"
+[[ "$RX" =~ ^[0-9]+$ ]] || RX=0
+[[ "$TX" =~ ^[0-9]+$ ]] || TX=0
 echo "  节点累计 rx=$RX tx=$TX"
 [[ "$TX" -ge 1000000 ]]; ck "tx≥1MB（下载计入）" $?
 [[ "$RX" -ge 500 && "$RX" -le 20000 ]]; ck "rx 在请求量级（无虚增）" $?
@@ -148,13 +162,124 @@ section "7. 统计一致性核对"
 # 本脚本通过 /api/summary 的 epoch 连续性与累计值核对真机数据面一致性。
 env SBX_CONF="$PANEL_CONF" "$CORE" show >/tmp/e2e-show.txt 2>&1
 grep -qE "今日|累计|rx|tx|RX|TX" /tmp/e2e-show.txt; ck "sbx-core show 输出流量汇总" $?
-grep -qE "总计|系统|node" /tmp/e2e-show.txt; ck "show 含节点/系统维度" $?
+# show 的维度字样：概览段（总览）+ 节点段（节点流量/合计）
+grep -qE "总览" /tmp/e2e-show.txt && grep -qE "节点流量|合计" /tmp/e2e-show.txt; ck "show 含总览/节点维度" $?
+
+# ---------------------------------------------------------------- 8. 策略层（v3.0.7 修复点）
+section "8. 策略 enforcement（配额阻断 / 表清理 / 外部删除自愈）"
+policy_put() { # policy_put <json>
+  curl -fsS -m 10 -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -d "$1" "http://127.0.0.1:$PORT/api/nodes/1/policy"; }
+
+# 8.1 配额达限 → 生成 sbx_policy 表并 drop 该节点端口
+policy_put '{"quota_enabled":true,"quota_limit_bytes":1000,"ip_limit_enabled":false,"ip_limit_max":0}' \
+  | jq -e '.quota_state=="exceeded"' >/dev/null 2>&1
+ck "配额达限 → quota_state=exceeded" $?
+sleep 1
+nft list table inet sbx_policy 2>/dev/null | grep -q 'tcp dport @quota_ports drop'; ck "sbx_policy 生成 quota drop 规则" $?
+curl -fsS -m 8 --socks5-hostname 10.66.0.2:10801 http://10.66.0.1:8000/e2e-1mb.bin -o /dev/null 2>/dev/null
+[[ $? -ne 0 ]]; ck "达限后经节点访问被阻断" $?
+
+# 8.2 保存策略必须 200（不因 enforcement 细节返回 500）
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 10 -X PUT -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"quota_enabled":false,"quota_limit_bytes":0,"ip_limit_enabled":false,"ip_limit_max":0}' \
+  "http://127.0.0.1:$PORT/api/nodes/1/policy")
+[[ "$CODE" == "200" ]]; ck "解除配额 → 200（实得 $CODE）" $?
+sleep 1
+curl -fsS -m 20 --socks5-hostname 10.66.0.2:10801 http://10.66.0.1:8000/e2e-1mb.bin -o /dev/null
+ck "解除后经节点访问恢复" $?
+
+# 8.3 请求体加固：超限 / 尾随数据必须 400
+head -c 2200000 /dev/zero | tr '\0' 'A' > /tmp/e2e-big.txt
+printf '{"pad":"%s"}' "$(cat /tmp/e2e-big.txt)" > /tmp/e2e-big.json
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 20 -X PUT -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' --data-binary @/tmp/e2e-big.json \
+  "http://127.0.0.1:$PORT/api/nodes/1/policy")
+[[ "$CODE" == "400" ]]; ck "超大 body → 400（实得 $CODE）" $?
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 10 -X PUT -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"quota_enabled":false} GARBAGE' \
+  "http://127.0.0.1:$PORT/api/nodes/1/policy")
+[[ "$CODE" == "400" ]]; ck "尾随数据 → 400（实得 $CODE）" $?
+rm -f /tmp/e2e-big.txt /tmp/e2e-big.json
+
+# 8.4 IP 限制：allow set 授予在线 IP
+policy_put '{"quota_enabled":false,"quota_limit_bytes":0,"ip_limit_enabled":true,"ip_limit_max":1}' \
+  | jq -e '.ip_limit_enabled==true and .ip_limit_max==1' >/dev/null 2>&1
+ck "启用 IP 限制(max=1)" $?
+sleep 1
+nft list table inet sbx_policy 2>/dev/null | grep -q 'ct state established ip saddr != @ip_allow_1_v4 drop'
+ck "生成 IP allow set 规则" $?
+# 慢速长连接让 conntrack 出现持续活跃流 → slot 授予。
+# 1MB @48k ≈ 21s，采样窗口内必然处于传输中。
+( curl -fsS -m 40 --limit-rate 48k --socks5-hostname 10.66.0.2:10801 \
+    http://10.66.0.1:8000/e2e-1mb.bin -o /dev/null >/dev/null 2>&1 & )
+GRANTED=1
+for i in $(seq 1 12); do
+  if curl -fsS -m 10 -H "Authorization: Bearer $TOKEN" \
+       "http://127.0.0.1:$PORT/api/nodes/1/active-ips" | jq -e '(.ips|length)>=1' >/dev/null 2>&1; then
+    GRANTED=0; break
+  fi
+  sleep 1
+done
+ck "在线 IP 被授予 slot（active-ips 非空）" $GRANTED
+if [[ "$GRANTED" != 0 ]]; then
+  echo "  [diag] conntrack(dport=18388): $(grep -c 'dport=18388' /proc/net/nf_conntrack 2>/dev/null)"
+  grep 'dport=18388' /proc/net/nf_conntrack 2>/dev/null | head -2 | sed 's/^/  [diag] /'
+  echo "  [diag] ip-state: $(curl -fsS -m 5 -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/api/nodes/1/ip-state")"
+  echo "  [diag] acct: $(sysctl -n net.netfilter.nf_conntrack_acct 2>/dev/null)"
+fi
+nft list set inet sbx_policy ip_allow_1_v4 2>/dev/null | grep -q 'elements'
+SETW=$?
+if [[ "$SETW" != 0 ]]; then
+  # allow set 的 IP 内容变化走 3s 合并窗口（v3.0.7 节流，防 SYN churn 高频重写），
+  # 因此 slot 授予后 nft 里最多晚一个窗口才出现元素——这里轮询等收敛。
+  for i in $(seq 1 8); do
+    sleep 1
+    nft list set inet sbx_policy ip_allow_1_v4 2>/dev/null | grep -q 'elements' && { SETW=0; break; }
+  done
+fi
+ck "allow set 已写入客户端 IP（含节流窗口收敛）" $SETW
+
+# 8.5 外部删除策略表 → 自愈重建
+# 用「配额达限」而非 IP 限制做这个断言：quota 阻断集合是稳态的，
+# 不会像 allow set 那样因 slot 授予/释放而自行触发重写——只有存在性探测
+# 能把表带回来，断言才真正测到自愈逻辑（探测有 10s 节流，给 ~14s）。
+pkill -f 'curl.*socks5-hostname' 2>/dev/null
+policy_put '{"quota_enabled":true,"quota_limit_bytes":1000,"ip_limit_enabled":false,"ip_limit_max":0}' >/dev/null 2>&1
+sleep 2
+nft list table inet sbx_policy 2>/dev/null | grep -q 'quota_ports'; ck "自愈前置：quota 表已就位" $?
+nft delete table inet sbx_policy >/dev/null 2>&1
+! nft list table inet sbx_policy >/dev/null 2>&1; ck "手工删除 sbx_policy 成功" $?
+REBUILT=1
+for i in $(seq 1 18); do
+  nft list table inet sbx_policy >/dev/null 2>&1 && { REBUILT=0; break; }
+  sleep 1
+done
+ck "策略表被外部删除后自动重建" $REBUILT
+grep -q "策略表被外部移除" /tmp/e2e-panel.log; ck "日志明确记录重建原因" $?
+
+# 8.6 clear 清除计数表与策略表，且退出码 0（iptables 链不存在不得报错）
+policy_put '{"quota_enabled":false,"quota_limit_bytes":0,"ip_limit_enabled":false,"ip_limit_max":0}' >/dev/null 2>&1
+kill -TERM "$CORE_PID" 2>/dev/null; wait "$CORE_PID" 2>/dev/null
+env SBX_CONF="$PANEL_CONF" "$CORE" clear >/tmp/e2e-clear.log 2>&1
+ck "sbx-core clear 退出码 0" $?
+! nft list tables 2>/dev/null | grep -q 'inet sbx_'; ck "clear 后无 sbx_* 表残留（含 sbx_policy）" $?
+env SBX_CONF="$PANEL_CONF" "$CORE" serve >>/tmp/e2e-panel.log 2>&1 &
+CORE_PID=$!
+sleep 2
 
 # ---------------------------------------------------------------- 收尾
 section "结果"
 kill "$SB_PID" "$CLI_PID" "$HTTP_PID" 2>/dev/null
+kill "$CORE_PID" 2>/dev/null
+pkill -f "$ROOT/usr/local/bin/sbx-core" 2>/dev/null
 ip netns del e2e 2>/dev/null
-pkill -f sbx-core-linux 2>/dev/null
+nft delete table inet sbx_traffic 2>/dev/null
+nft delete table inet sbx_policy 2>/dev/null
+if [[ "$PROD_STOPPED" == 1 ]]; then
+  systemctl start sbx-panel >/dev/null 2>&1 && echo "  (生产 sbx-panel 已恢复)"
+fi
 echo "PASS=$PASS FAIL=$FAIL"
 if [[ "$FAIL" -gt 0 ]]; then printf '%s\n' "${FAILED[@]}"; exit 1; fi
 echo E2E_ALL_GREEN

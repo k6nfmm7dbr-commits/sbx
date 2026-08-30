@@ -17,7 +17,8 @@ PORT=$(jq -r '.port' /etc/sbx/panel.json)
 curl -fsS "http://127.0.0.1:$PORT/healthz" | grep -q '"ok":true'; ck "API 健康" $?
 
 echo "== 菜单添加节点（真实用户路径） =="
-printf '1\n2\n28388\ngh-e2e\n\n\n0\n0\n' | env NO_COLOR=1 bash /usr/local/bin/sbx >/tmp/gh-menu.log 2>&1
+# 1=添加节点 → 2=Shadowsocks → 1=加密算法(128) → 端口 → 备注 → 回车(pause) → 0=退出
+printf '1\n2\n1\n28388\ngh-e2e\n\n0\n' | env NO_COLOR=1 bash /usr/local/bin/sbx >/tmp/gh-menu.log 2>&1
 ck "菜单加节点退出码 0" $?
 jq -e 'length==1 and .[0].port==28388' /etc/sbx/nodes.json >/dev/null 2>&1
 ck "节点落库正确" $?
