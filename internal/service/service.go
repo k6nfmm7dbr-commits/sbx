@@ -16,6 +16,7 @@ import (
 	"github.com/k6nfmm7dbr-commits/sbx/internal/api"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/config"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/database"
+	"github.com/k6nfmm7dbr-commits/sbx/internal/firewall"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/policy"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/traffic"
 )
@@ -53,7 +54,15 @@ func Serve() int {
 	collector := traffic.NewCollector(cfg, db)
 
 	// 策略服务（Quota / IP Limit）：与采集器并行运行，复用同一 SQLite。
-	policySvc := policy.New(db.DB, config.AppDir(), cfg.NftConf)
+	//
+	// 脚本路径必须与计数规则 cfg.NftConf 分离：旧版把 cfg.NftConf 传进来，
+	// 一旦任何节点启用策略，policy 脚本就覆盖 /etc/sbx/nft.conf 的
+	// sbx_traffic 计数表定义；更糟的是 firewall.Nft.Repair 自愈时重放的
+	// 也是这个文件，导致计数器永远建不回来（统计与配额一起停摆）。
+	policySvc := policy.New(db.DB, config.AppDir(), policy.DefaultPolicyConf(config.AppDir()))
+	// 策略 enforcement 只支持 nft；把「当前生效后端」告诉策略层，
+	// 使 iptables 主机上状态照常发布并明确提示不支持，而不是每秒失败一次。
+	policySvc.SetEnforceBackend(func() string { return firewall.EffectiveBackend(cfg.Backend) })
 
 	addr := net.JoinHostPort(cfg.Listen, fmt.Sprint(cfg.Port))
 

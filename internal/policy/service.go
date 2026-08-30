@@ -19,7 +19,10 @@ package policy
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,23 +57,38 @@ type Config struct {
 }
 
 // Service 是策略核心：读配置、算 used、追踪 IP slot、生成并应用 nft 规则。
-// 并发模型：
-//   - reconcile 由 runMu 串行化（Run goroutine 周期调用 + API 保存时同步调用，
-//     两者可能并发 → 必须串行，否则并发写 map 会 fatal error 崩溃）；
-//   - states/ipStates/applied 由 mu 保护（Snapshot / 快照 只读走 RLock）。
+//
+// 并发模型（v3.0.6 修正，之前存在 fatal error: concurrent map read and map write）：
+//
+//   - runMu 串行化 reconcile（Run goroutine 周期调用 + API 保存时同步调用）。
+//   - ipStates / flows 是 reconcile 的**私有可变工作区**，只允许在持有 runMu 时
+//     访问，绝不暴露给读侧。
+//   - 读侧（Snapshot / NodeIPSnapshot / IPStateSnapshot / ActiveIPs）只读
+//     reconcile 末尾在 mu 下发布的不可变快照（states / ipSnaps / activeIPs）。
+//
+// 关键教训：旧实现里 reconcile 只持 runMu 就直接改 ipStates 及其内部 map，
+// 而 SSE/HTTP 读侧只持 mu.RLock 就遍历同一批 map——两把锁互不相干，
+// 1s 一次的 reconcile 与每秒一次的 SSE 快照在多核上必然并发读写 map 而崩溃。
+// 因此：**任何新增字段都必须明确归属「reconcile 私有」或「mu 保护的已发布快照」**，
+// 不允许出现第三种状态。
 type Service struct {
-	db      *sql.DB
-	appDir  string
-	nftConf string
+	db         *sql.DB
+	appDir     string
+	policyConf string
 
-	runMu   sync.Mutex   // 串行化 reconcile
-	mu      sync.RWMutex // 保护下列内存态
+	runMu   sync.Mutex   // 串行化 reconcile；同时保护 ipStates / flows
+	mu      sync.RWMutex // 保护下列「已发布」内存态
 	states  map[string]State
 	ready   bool
 	lastErr string
 
-	// IP Tracker 运行态（都在 mu 保护下）：
-	//   ipStates —— nodeID -> NodeIPState（Slots=Granted / Observed / Rejected）。
+	// ipSnaps / activeIPs 是 reconcile 末尾发布的不可变快照（每轮整体替换，
+	// 发布后绝不原地修改），读侧可安全并发读取。
+	ipSnaps   map[string]NodeIPSnapshot
+	activeIPs map[string][]string
+
+	// ipStates 是 reconcile 私有工作区（runMu 保护，绝不给读侧）：
+	//   nodeID -> NodeIPState（Slots=Granted / Observed / Rejected）。
 	//   这是「观察到的 IP」「获准使用的 IP」「被拒绝的 IP」三者分离的唯一事实源。
 	ipStates map[string]*NodeIPState
 
@@ -88,23 +106,56 @@ type Service struct {
 	remoteIPs      func(list []nodes.Node) (map[string]connection.RemoteIPSet, bool, error)
 
 	// flow tracker：conntrack 字节增量判活状态（key: node\x00ip:sport）。
-	// reconcile 串行访问，runMu 保护；DeleteNode 清理。
+	// reconcile 私有，runMu 保护；DeleteNode 清理。
 	flows map[string]*flowState
+
+	// acctDisabled 记录「conntrack 存在流但全部 bytes=0」——即内核
+	// net.netfilter.nf_conntrack_acct=0（Debian/Ubuntu 默认）。
+	// 仅用于打一次提示日志；判活降级是**逐流**判断 f.Bytes==0（见 buildActivity），
+	// 因为运行中开启 sysctl 只对新流生效，混合状态下全局开关会误踢老流。
+	// runMu 保护。
+	acctDisabled bool
+
+	// selfIPs 是本机地址集合（含回环），用于排除「服务器自身发起的出站流」
+	// 被误判成节点客户端。runMu 保护，周期刷新。
+	selfIPs    map[string]bool
+	selfIPsAt  time.Time
+	localAddrs func() (map[string]bool, error)
 
 	// notify 在每次 reconcile 发布新状态后非阻塞 signal，供 SSE 广播层唤醒。
 	notify chan struct{}
 
 	// nftApply 执行 nft 脚本（测试可替换为 no-op，规避 CI 无 nft 权限）。
 	nftApply func(ctx context.Context, scriptPath string) error
+
+	// enforceBackend 报告当前生效的防火墙后端（"nft" / "iptables"）。
+	// 策略 enforcement 目前只实现 nft 后端；非 nft 时必须「状态照常发布 +
+	// 明确告知不支持」，而不是每轮 reconcile 在 nft -f 处失败导致
+	// states 永远不发布（面板全显示「不限」且每秒刷 WARN）。
+	enforceBackend func() string
 }
 
+// ErrEnforceUnsupported 表示当前防火墙后端不支持策略 enforcement。
+// reconcile 仍会发布状态（面板可见真实用量），但阻断不会生效。
+var ErrEnforceUnsupported = errors.New(
+	"策略 enforcement 需要 nftables：当前生效后端为 iptables，配额/IP 限制不会被执行")
+
 // New 构造策略服务。
-func New(db *sql.DB, appDir, nftConf string) *Service {
+//
+// policyConf 是**策略专属**的 nft 脚本路径，绝不能复用计数规则文件
+// （cfg.NftConf / nft.conf）——否则策略脚本会覆盖计数表定义，
+// 且 firewall.Nft.Repair 自愈时重放策略脚本，计数器永远建不回来。
+func New(db *sql.DB, appDir, policyConf string) *Service {
+	if policyConf == "" {
+		policyConf = appDir + "/policy.nft"
+	}
 	return &Service{
 		db:             db,
 		appDir:         appDir,
-		nftConf:        nftConf,
+		policyConf:     policyConf,
 		states:         map[string]State{},
+		ipSnaps:        map[string]NodeIPSnapshot{},
+		activeIPs:      map[string][]string{},
 		ipStates:       map[string]*NodeIPState{},
 		appliedQuota:   map[string]bool{},
 		appliedIPLimit: map[string]map[string]bool{},
@@ -116,8 +167,22 @@ func New(db *sql.DB, appDir, nftConf string) *Service {
 		flows:          map[string]*flowState{},
 		notify:         make(chan struct{}, 1),
 		nftApply:       nil, // nil 表示用真实 nft 执行
+		localAddrs:     connection.LocalIPs,
+		enforceBackend: nil, // nil 视为 nft（默认后端）
 	}
 }
+
+// DefaultPolicyConf 返回默认策略脚本路径（与计数规则 nft.conf 分离）。
+func DefaultPolicyConf(appDir string) string { return appDir + "/policy.nft" }
+
+// SetEnforceBackend 注入「当前生效防火墙后端」查询函数。
+func (s *Service) SetEnforceBackend(fn func() string) { s.enforceBackend = fn }
+
+// SetLocalAddrs 注入本机地址读取函数（测试用）。
+func (s *Service) SetLocalAddrs(fn func() (map[string]bool, error)) { s.localAddrs = fn }
+
+// PolicyConfPath 返回策略脚本落盘路径（供诊断/测试）。
+func (s *Service) PolicyConfPath() string { return s.policyConf }
 
 func (s *Service) nodesPath() string { return s.appDir + "/nodes.json" }
 
@@ -180,10 +245,23 @@ func (s *Service) LastError() string {
 
 // ActiveIPs 返回某节点当前已获 slot（granted）的公网 IP 列表，按活跃时间倒序。
 // 未开启限制时，所有活跃 IP 都被授予 slot，因此等价于「当前在线 IP」。
+//
+// 只读 reconcile 已发布的不可变快照（绝不触碰 ipStates，那是 runMu 下的私有工作区）。
 func (s *Service) ActiveIPs(nodeID string) []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	st := s.ipStates[nodeID]
+	ips := s.activeIPs[nodeID]
+	if len(ips) == 0 {
+		return []string{}
+	}
+	out := make([]string, len(ips))
+	copy(out, ips)
+	return out
+}
+
+// buildActiveIPsLocked 在 runMu 下由 reconcile 调用，生成某节点的在线 IP 有序列表
+// （非 provisional 的 granted slot，按最近活跃时间倒序、同刻按 IP 升序）。
+func buildActiveIPsFromState(st *NodeIPState) []string {
 	if st == nil {
 		return []string{}
 	}
@@ -246,9 +324,10 @@ type NodeIPSnapshot struct {
 	Rejected []IPEntry `json:"rejected"`
 }
 
-func (s *Service) nodeIPSnapshotLocked(nodeID string) NodeIPSnapshot {
+// buildNodeIPSnapshot 由 reconcile 在 runMu 下调用，把私有 NodeIPState
+// 转成不可变展示快照。切片/字段一律新建，发布后绝不再修改。
+func buildNodeIPSnapshot(nodeID string, st *NodeIPState) NodeIPSnapshot {
 	snap := NodeIPSnapshot{NodeID: nodeID, IPs: []IPEntry{}, Rejected: []IPEntry{}}
-	st := s.ipStates[nodeID]
 	if st == nil {
 		return snap
 	}
@@ -279,20 +358,24 @@ func (s *Service) nodeIPSnapshotLocked(nodeID string) NodeIPSnapshot {
 	return snap
 }
 
-// NodeIPSnapshot 返回单个节点的在线 IP 快照。
+// NodeIPSnapshot 返回单个节点的在线 IP 快照（读已发布的不可变快照）。
 func (s *Service) NodeIPSnapshot(nodeID string) NodeIPSnapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.nodeIPSnapshotLocked(nodeID)
+	if snap, ok := s.ipSnaps[nodeID]; ok {
+		return snap
+	}
+	return NodeIPSnapshot{NodeID: nodeID, IPs: []IPEntry{}, Rejected: []IPEntry{}}
 }
 
 // IPStateSnapshot 返回所有节点的在线 IP 快照（SSE 首次完整 snapshot）。
+// 直接复制已发布的不可变快照 map，不做任何计算，也不触碰 ipStates。
 func (s *Service) IPStateSnapshot() map[string]NodeIPSnapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make(map[string]NodeIPSnapshot, len(s.states))
-	for id := range s.states {
-		out[id] = s.nodeIPSnapshotLocked(id)
+	out := make(map[string]NodeIPSnapshot, len(s.ipSnaps))
+	for id, snap := range s.ipSnaps {
+		out[id] = snap
 	}
 	return out
 }
@@ -333,6 +416,36 @@ func (s *Service) lifetimeBytes(ctx context.Context, nodeID string) (int64, erro
 		return 0, err
 	}
 	return rx.Int64 + tx.Int64, nil
+}
+
+// lifetimeBytesAll 一次性读出所有节点的 lifetime（rx+tx）。
+// 旧实现在 reconcile 里对每个节点各发一条 SELECT（N 次查询 / 秒，
+// MaxOpenConns=1 下与采集写入争用同一连接），这里合并为单条查询。
+func (s *Service) lifetimeBytesAll(ctx context.Context) (map[string]int64, error) {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT scope,rx,tx FROM totals WHERE scope LIKE 'node:%'")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int64{}
+	for rows.Next() {
+		var scope string
+		var rx, tx sql.NullInt64
+		if err := rows.Scan(&scope, &rx, &tx); err != nil {
+			return nil, err
+		}
+		out[strings.TrimPrefix(scope, "node:")] = rx.Int64 + tx.Int64
+	}
+	return out, rows.Err()
+}
+
+// setResetBaseline 只更新单个节点的配额基线（不触碰其它字段）。
+// 用于「统计被 reset 后基线高于 lifetime」的自愈校正。
+func (s *Service) setResetBaseline(ctx context.Context, nodeID string, baseline int64) error {
+	_, err := s.db.ExecContext(ctx,
+		"UPDATE node_policy SET quota_reset_baseline=? WHERE node_id=?", baseline, nodeID)
+	return err
 }
 
 // GetConfig 读单个节点策略配置（不存在时返回默认「全不限」）。
@@ -399,27 +512,69 @@ func (s *Service) ResetQuota(ctx context.Context, nodeID string) (int64, error) 
 	return life, nil
 }
 
+// ClearBaselineTx 在给定事务内把节点配额基线清零。供 `sbx-core reset <scope>`
+// 在清空 daily/totals/samples 的**同一事务**中调用。
+//
+// 为什么必需：used = lifetime(totals) - quota_reset_baseline 并 clamp 到 0。
+// reset 删掉 totals 行后 lifetime 归零，若基线仍停在旧高水位（例如用户点过
+// 「归零本期用量」后 baseline=100GiB），配额要重新跑满 100GiB 才恢复生效——
+// 期间限额完全失效。
+func ClearBaselineTx(tx *sql.Tx, scope string) error {
+	if scope == "" {
+		_, err := tx.Exec("UPDATE node_policy SET quota_reset_baseline=0")
+		return err
+	}
+	if !strings.HasPrefix(scope, "node:") {
+		return nil // system 等非节点 scope 与策略基线无关
+	}
+	_, err := tx.Exec("UPDATE node_policy SET quota_reset_baseline=0 WHERE node_id=?",
+		strings.TrimPrefix(scope, "node:"))
+	return err
+}
+
 // DeleteNode 清理某节点的全部策略状态（配置 + slot + observed + rejected + flow + nft 对象）。
 func (s *Service) DeleteNode(ctx context.Context, nodeID string) error {
 	if _, err := s.db.ExecContext(ctx, "DELETE FROM node_policy WHERE node_id=?", nodeID); err != nil {
 		return err
 	}
-	// 与 reconcile 串行：直接改内存 map 必须与周期 reconcile 互斥。
+	// ipStates / flows 是 reconcile 私有工作区 → 必须在 runMu 下改；
+	// states / ipSnaps / activeIPs 是已发布快照 → 必须在 mu 下改。
 	s.runMu.Lock()
-	s.mu.Lock()
-	delete(s.states, nodeID)
 	delete(s.ipStates, nodeID)
-	delete(s.appliedQuota, nodeID)
-	delete(s.appliedIPLimit, nodeID)
-	s.mu.Unlock()
 	// flow tracker 键前缀 nodeID，需整体清除。
 	prefix := nodeID + "\x00"
 	for k := range s.flows {
-		if len(k) >= len(prefix) && k[:len(prefix)] == prefix {
+		if strings.HasPrefix(k, prefix) {
 			delete(s.flows, k)
 		}
 	}
+	delete(s.appliedQuota, nodeID)
+	delete(s.appliedIPLimit, nodeID)
+	s.mu.Lock()
+	delete(s.states, nodeID)
+	delete(s.ipSnaps, nodeID)
+	delete(s.activeIPs, nodeID)
+	s.mu.Unlock()
 	s.runMu.Unlock()
 	// reconcile 会重建 nft（该节点已不在 list，规则自然清除）。
 	return s.reconcile(ctx)
+}
+
+// PurgeOrphanConfigs 删除 node_policy 中已不存在节点的孤儿行。
+// 节点删除走 nodes CLI 的 candidate/commit 流程，不经过 DeleteNode，
+// 因此需要在 reconcile 时按当前节点集合做一次清理（NextID 单调不复用，
+// 孤儿行不会串到新节点，但会无界累积）。
+func (s *Service) purgeOrphanConfigs(ctx context.Context, alive map[string]bool, cfgs map[string]Config) {
+	for id := range cfgs {
+		if alive[id] {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx,
+			"DELETE FROM node_policy WHERE node_id=?", id); err != nil {
+			slog.Warn("清理孤儿策略配置失败", "node", id, "err", err)
+			continue
+		}
+		delete(cfgs, id)
+		slog.Info("已清理孤儿策略配置", "node", id)
+	}
 }

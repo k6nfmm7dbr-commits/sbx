@@ -45,14 +45,20 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	last := map[string]string{}
+	// last 缓存已推送内容的序列化结果：既做去重判据，又直接复用为发送 payload，
+	// 避免旧实现「一次 Marshal 算 hash + 一次 Marshal 发送」的双份开销
+	// （成本随 SSE 连接数 × 节点数 增长）。
+	last := make(map[string]string, len(snap))
 	for id, ns := range snap {
-		last[id] = nodeSnapHash(ns)
+		last[id] = marshalSnap(ns)
 	}
 
 	notify := s.policy.Notify()
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
+	// 只靠 notify 唤醒（reconcile 每轮都会 signal），去掉额外的 1s 轮询 ticker：
+	// 无状态变化时不再做任何全量快照与序列化。fallbackTick 仅作保险，
+	// 万一 notify 通道因故未触发也能在 5s 内自愈。
+	fallback := time.NewTicker(5 * time.Second)
+	defer fallback.Stop()
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
 
@@ -66,21 +72,17 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			}
 			continue
 		case <-notify:
-		case <-ticker.C:
+		case <-fallback.C:
 		}
 
 		cur := s.policy.IPStateSnapshot()
 		for id, ns := range cur {
-			h := nodeSnapHash(ns)
-			if last[id] == h {
+			payload := marshalSnap(ns)
+			if payload == "" || last[id] == payload {
 				continue
 			}
-			last[id] = h
-			p, err := json.Marshal(ns)
-			if err != nil {
-				continue
-			}
-			if !writeSSE(w, flusher, "node", p) {
+			last[id] = payload
+			if !writeSSE(w, flusher, "node", []byte(payload)) {
 				return // 客户端断开
 			}
 		}
@@ -91,6 +93,15 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+// marshalSnap 序列化节点快照；失败返回空串（调用方跳过该节点）。
+func marshalSnap(ns policy.NodeIPSnapshot) string {
+	b, err := json.Marshal(ns)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // writeSSE 写一条 SSE 事件并 flush。返回 false 表示写入失败（客户端已断开）。
@@ -114,10 +125,4 @@ func writeSSE(w http.ResponseWriter, flusher http.Flusher, event string, data []
 	}
 	flusher.Flush()
 	return true
-}
-
-// nodeSnapHash 生成节点快照的稳定字符串（用于去重，避免重复推送不变状态）。
-func nodeSnapHash(ns policy.NodeIPSnapshot) string {
-	b, _ := json.Marshal(ns)
-	return string(b)
 }

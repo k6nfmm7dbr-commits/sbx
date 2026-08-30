@@ -2,6 +2,8 @@ package policy
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"strconv"
 	"time"
 
@@ -9,24 +11,43 @@ import (
 	"github.com/k6nfmm7dbr-commits/sbx/internal/nodes"
 )
 
+// selfIPsTTL 是本机地址集合的缓存时长（网卡增删/DHCP 换址后自动跟上）。
+const selfIPsTTL = 30 * time.Second
+
 // reconcile 执行一轮策略同步：
-//  1. 读节点列表与策略配置；
-//  2. 算每个节点的 quota used；
+//  1. 读节点列表（严格）与策略配置；
+//  2. 算每个节点的 quota used（单条 totals 查询）；
 //  3. 读 conntrack（主）与 /proc（回退）采集客户端 IP 活动；
 //  4. 更新 Slot Manager（observed → active → granted/rejected），严格 admission；
-//  5. 用 granted 集合生成 nft allow set（Rejected 绝不进入）。
+//  5. 用 granted 集合生成 nft allow set（Rejected 绝不进入）；
+//  6. 在 mu 下发布不可变快照（states / ipSnaps / activeIPs）。
 //
-// 并发安全：runMu 串行化所有 reconcile 调用（Run goroutine 周期调用与
-// API 保存/重置时的同步调用可能并发），否则并发写 map 会 fatal error。
+// 并发安全（v3.0.6）：
+//   - runMu 串行化所有 reconcile 调用，并且是 ipStates / flows 的唯一守卫；
+//   - 读侧只看第 6 步发布的不可变快照，绝不遍历 ipStates。
+//
+// fail-closed：nodes.json 损坏时**保持上一轮 enforcement 不动**并返回错误，
+// 绝不以「零节点」重写策略表（那会解除所有配额/IP 阻断，而 sing-box 仍在服务）。
 func (s *Service) reconcile(ctx context.Context) error {
 	s.runMu.Lock()
 	defer s.runMu.Unlock()
 
-	nodeList := nodes.LoadPanelNodes(s.nodesPath())
+	nodeList, err := nodes.LoadPanelNodesStrict(s.nodesPath())
+	if err != nil {
+		// 关键：不调用 applyEnforcement，不清空 states —— 上一轮阻断继续有效。
+		return fmt.Errorf("nodes.json 不可用, 已保持上一轮策略 enforcement 不变: %w", err)
+	}
 	cfgs, err := s.loadConfigs(ctx)
 	if err != nil {
 		return err
 	}
+
+	alive := make(map[string]bool, len(nodeList))
+	for _, n := range nodeList {
+		alive[nodes.IDString(n)] = true
+	}
+	// 节点删除走 nodes CLI 的 candidate/commit，不经过 DeleteNode → 清孤儿行。
+	s.purgeOrphanConfigs(ctx, alive, cfgs)
 
 	now := s.now()
 
@@ -51,9 +72,18 @@ func (s *Service) reconcile(ctx context.Context) error {
 	// 本轮不释放已有 slot。
 	partial := procPartial || cr.Partial || cr.Err != nil
 
+	s.refreshSelfIPs(now)
 	active, candidates := s.buildActivity(nodeList, cr, procSplit, now)
 
+	// 单条查询取全部节点 lifetime（旧实现每节点一次 SELECT）。
+	lifetimes, err := s.lifetimeBytesAll(ctx)
+	if err != nil {
+		return err
+	}
+
 	newStates := map[string]State{}
+	newSnaps := map[string]NodeIPSnapshot{}
+	newActiveIPs := map[string][]string{}
 	quotaBlocked := map[string]bool{}
 	ipBlocked := map[string]map[string]bool{}
 
@@ -61,9 +91,22 @@ func (s *Service) reconcile(ctx context.Context) error {
 		id := nodes.IDString(n)
 		cfg := cfgs[id]
 
-		life, err := s.lifetimeBytes(ctx, id)
-		if err != nil {
-			return err
+		life := lifetimes[id]
+		// 自愈（defense-in-depth，主修复在 service.Reset 的同事务清零）：
+		// totals 只会单调增长（commitTick 全是 rx=rx+delta），因此
+		// baseline > lifetime 只可能是统计被清空过。此时历史已丢，唯一诚实的
+		// 口径是「把 totals 里现有的量全算作已用」→ 基线归零。
+		//
+		// 不能校正为 lifetime：那会把 reset 之后已经跑掉的流量一并抹掉，
+		// 配额继续失效；归零则偏向「多算用量、配额更早生效」，方向正确。
+		if cfg.QuotaResetBaseline > life {
+			slog.Info("配额基线高于累计流量(统计被重置?), 已将基线归零",
+				"node", id, "baseline", cfg.QuotaResetBaseline, "lifetime", life)
+			if err := s.setResetBaseline(ctx, id, 0); err != nil {
+				return err
+			}
+			cfg.QuotaResetBaseline = 0
+			cfgs[id] = cfg
 		}
 		used := life - cfg.QuotaResetBaseline
 		if used < 0 {
@@ -131,30 +174,58 @@ func (s *Service) reconcile(ctx context.Context) error {
 		}
 
 		newStates[id] = st
+		newSnaps[id] = buildNodeIPSnapshot(id, ipState)
+		newActiveIPs[id] = buildActiveIPsFromState(ipState)
 	}
 
-	// 清理已删除节点的运行时状态（slot 由 flow tracker 的 GC 兜底；这里清 ipStates）。
+	// 清理已删除节点的运行时状态（flows 由 buildActivity 的 GC 兜底）。
 	for id := range s.ipStates {
-		if _, ok := newStates[id]; !ok {
+		if !alive[id] {
 			delete(s.ipStates, id)
 		}
 	}
 
 	// 生成并应用 nft 规则（只影响达限节点）。
-	if err := s.applyEnforcement(ctx, quotaBlocked, ipBlocked, nodeList); err != nil {
-		return err
-	}
+	// enforceErr 不阻断状态发布：iptables-only 主机上策略无法执行，但面板
+	// 必须照常显示真实用量，并把「不支持」如实呈现，而不是每秒失败一次
+	// 导致 states 永远为空、UI 全显示「不限」。
+	enforceErr := s.applyEnforcement(ctx, quotaBlocked, ipBlocked, nodeList)
 
 	s.mu.Lock()
 	s.states = newStates
+	s.ipSnaps = newSnaps
+	s.activeIPs = newActiveIPs
 	s.ready = true
-	s.lastErr = ""
-	s.appliedQuota = quotaBlocked
-	s.appliedIPLimit = ipBlocked
+	if enforceErr != nil {
+		s.lastErr = enforceErr.Error()
+	} else {
+		s.lastErr = ""
+	}
 	s.mu.Unlock()
 
 	s.signalNotify()
-	return nil
+	return enforceErr
+}
+
+// refreshSelfIPs 周期刷新本机地址集合（用于排除服务器自身发起的出站流）。
+func (s *Service) refreshSelfIPs(now time.Time) {
+	if s.selfIPs != nil && now.Sub(s.selfIPsAt) < selfIPsTTL {
+		return
+	}
+	if s.localAddrs == nil {
+		return
+	}
+	ips, err := s.localAddrs()
+	if err != nil {
+		slog.Debug("读取本机地址失败, 出站流过滤本轮降级", "err", err)
+		if s.selfIPs == nil {
+			s.selfIPs = map[string]bool{}
+		}
+		s.selfIPsAt = now
+		return
+	}
+	s.selfIPs = ips
+	s.selfIPsAt = now
 }
 
 // buildActivity 产出每个节点的「活跃 IP」与「候选 IP」。
@@ -163,7 +234,25 @@ func (s *Service) reconcile(ctx context.Context) error {
 // active；SYN_SENT/SYN_RECV 流 → candidate。绝不把 /proc 残留 ESTABLISHED 重新判活
 // （否则断开的客户端会一直残留）。
 //
-// conntrack 不可用/读失败时：回退 /proc ESTABLISHED / connected。
+// 两条必须遵守的过滤/降级规则（都曾是线上 bug）：
+//
+//  1. 排除本机出站流：conntrack 原方向元组是 src=本机 dst=远端 dport=远端端口。
+//     若节点监听 443/8443 这类常见端口，服务器自己 curl https:// 的流会被
+//     误判成「该节点的客户端」，占 slot、虚报在线 IP，IP 限制下挤掉真实用户。
+//     判据：SrcIP ∈ 本机地址集合 → 跳过。
+//
+//  2. 无字节计费的流按「conntrack 在跟踪即在线」处理：内核
+//     net.netfilter.nf_conntrack_acct=0 时（Debian/Ubuntu 默认）
+//     /proc/net/nf_conntrack 不输出 bytes= → Bytes 恒为 0 → 字节增量判活
+//     永远判不出「有流量」→ ipIdle 到点后把正在使用的连接判死并踢出 allow set。
+//
+//     判据是**逐流**的 `f.Bytes == 0`，而不是全局开关。原因：运行中执行
+//     `sysctl -w nf_conntrack_acct=1` 只对新建流生效，此前建立的流终生没有
+//     计数；真机验证过这种混合状态。若用「全局全零才降级」，混合时那些老流
+//     会被判死。acct 开启时 ESTABLISHED 流的 bytes 必然 > 0（握手包也算），
+//     所以 Bytes==0 可以可靠地判定「这条流没有计费数据」。
+//
+//     全局探测仍保留，但只用于打一次提示日志（告诉用户开 sysctl 更精确）。
 func (s *Service) buildActivity(nodeList []nodes.Node, cr connection.ConntrackResult, procSplit map[string]connection.RemoteIPSet, now time.Time) (map[string]map[string]IPActivity, map[string]map[string]IPActivity) {
 	portNode := map[int]string{}
 	for _, n := range nodeList {
@@ -189,9 +278,38 @@ func (s *Service) buildActivity(nodeList []nodes.Node, cr connection.ConntrackRe
 	currentFlowKeys := map[string]bool{}
 
 	if cr.Available {
+		// 全局探测：仅用于提示用户开启 sysctl（判活本身是逐流的，见下）。
+		relevant, withBytes := 0, 0
+		for _, f := range cr.Flows {
+			if portNode[f.DstPort] == "" || s.selfIPs[f.SrcIP] {
+				continue
+			}
+			relevant++
+			if f.Bytes != 0 {
+				withBytes++
+			}
+		}
+		if relevant > 0 {
+			acctOff := withBytes == 0
+			if acctOff != s.acctDisabled {
+				if acctOff {
+					slog.Warn("检测到 nf_conntrack 未开启字节计费(nf_conntrack_acct=0)，" +
+						"已降级为「ESTABLISHED 即在线」；建议执行 " +
+						"sysctl -w net.netfilter.nf_conntrack_acct=1 以恢复精确判活")
+				} else {
+					slog.Info("nf_conntrack 字节计费已可用，恢复字节增量判活")
+				}
+			}
+			s.acctDisabled = acctOff
+		}
+
 		for _, f := range cr.Flows {
 			nodeID := portNode[f.DstPort]
 			if nodeID == "" {
+				continue
+			}
+			// 规则 1：本机自身发起的出站流不是客户端。
+			if s.selfIPs[f.SrcIP] {
 				continue
 			}
 			// 候选：TCP 握手尚未完成。
@@ -208,18 +326,26 @@ func (s *Service) buildActivity(nodeList []nodes.Node, cr connection.ConntrackRe
 			fkey := nodeID + "\x00" + f.SrcIP + ":" + strconv.Itoa(f.SrcPort)
 			currentFlowKeys[fkey] = true
 			traffic := false
-			prev := s.flows[fkey]
 			switch {
-			case prev == nil:
+			case f.Bytes == 0:
+				// 规则 2：这条流没有计费数据 → 无从判断流量增减，
+				// conntrack 仍在跟踪就视为活跃（宁可多留，不误踢在用连接）。
 				s.flows[fkey] = &flowState{Bytes: f.Bytes, LastSeen: now}
 				traffic = true
-			case f.Bytes != prev.Bytes:
-				s.flows[fkey] = &flowState{Bytes: f.Bytes, LastSeen: now}
-				traffic = true
-			case now.Sub(prev.LastSeen) <= s.ipIdle:
-				// 静默但仍在 grace → 活跃
 			default:
-				continue // 死连接：整条流不活跃
+				prev := s.flows[fkey]
+				switch {
+				case prev == nil:
+					s.flows[fkey] = &flowState{Bytes: f.Bytes, LastSeen: now}
+					traffic = true
+				case f.Bytes != prev.Bytes:
+					s.flows[fkey] = &flowState{Bytes: f.Bytes, LastSeen: now}
+					traffic = true
+				case now.Sub(prev.LastSeen) <= s.ipIdle:
+					// 静默但仍在 grace → 活跃
+				default:
+					continue // 死连接：整条流不活跃
+				}
 			}
 
 			m := agg(active, nodeID)
@@ -245,12 +371,18 @@ func (s *Service) buildActivity(nodeList []nodes.Node, cr connection.ConntrackRe
 			}
 			m := agg(active, id)
 			for ip := range cur.TCP {
+				if s.selfIPs[ip] {
+					continue
+				}
 				a := m[ip]
 				a.IP = ip
 				a.TCPSessions++
 				m[ip] = a
 			}
 			for ip := range cur.UDP {
+				if s.selfIPs[ip] {
+					continue
+				}
 				a := m[ip]
 				a.IP = ip
 				a.UDPSessions++

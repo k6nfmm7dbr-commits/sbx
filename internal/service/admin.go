@@ -13,6 +13,7 @@ import (
 	"github.com/k6nfmm7dbr-commits/sbx/internal/firewall"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/fsx"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/nodes"
+	"github.com/k6nfmm7dbr-commits/sbx/internal/policy"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/traffic"
 )
 
@@ -112,6 +113,12 @@ func Reset(scope string) error {
 				return err
 			}
 		}
+	}
+	// 同事务清零配额基线：used = lifetime(totals) - baseline 且 clamp 到 0，
+	// totals 被删后 lifetime 归零，若基线仍停在旧高水位，配额要重新跑满
+	// 该水位才恢复生效——期间限额完全失效。
+	if err := policy.ClearBaselineTx(tx, scope); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err

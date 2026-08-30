@@ -25,7 +25,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/
 ## 当前版本
 
 ```text
-v3.0.5
+v3.0.6
 ```
 
 源码在 `main` 分支，二进制从 `dist` 分支分发（rolling latest），不使用 Tag。
@@ -74,11 +74,23 @@ v3.0.5
 
 - 按服务端可见的公网源 IP 统计（NAT 下多设备算一个出口 IP），支持 TCP/UDP、IPv4/IPv6
 - 达限只阻止新 IP，不随机踢已在线 IP；UDP slot 超时自动释放
+- 只发 SYN 未完成握手的 IP 拿到的是临时名额，真实客户端优先级更高，不会被扫描流量挤掉
 - 基于 conntrack 判活：移动端异常断开（无 FIN）的连接，字节增量停止后按空闲窗口释放；
-  conntrack 不可用时回退 `/proc` ESTABLISHED
+  内核未开 `nf_conntrack_acct`（Debian/Ubuntu 默认）时自动降级为「ESTABLISHED 即在线」，
+  安装器会尝试开启并持久化；conntrack 不可用时回退 `/proc` ESTABLISHED
+- 服务器自身发起的出站连接不会被计入客户端（即使目的端口与节点监听端口相同）
 - 内核执行：nft allow set 只放行已获 slot 的 IP，新 IP 的 SYN 放行、established 数据拦截（避免「第二个 IP 永远连不上」的死锁）
 
 两种策略默认「不限」，旧节点升级后行为不变。
+
+### 前提与边界
+
+- 策略 enforcement（配额阻断 / IP allow set）依赖 **nftables**。生效后端为
+  iptables 时，用量与在线 IP 照常统计展示，但阻断不会执行，面板会提示需要 nftables。
+- 策略规则写入 `/etc/sbx/policy.nft`（独立表 `sbx_policy`），与计数规则
+  `/etc/sbx/nft.conf`（表 `sbx_traffic`）完全分离，互不覆盖。
+- `sbx-core reset [scope]` 清空统计时会同事务清零对应节点的配额基线，
+  避免「统计归零后配额长期失效」。
 
 ## 升级
 
@@ -112,6 +124,9 @@ sbx-core node list | links | add | edit | remove | sync
 - 架构：amd64、arm64、armv7、armv6、386、s390x、riscv64（`CGO_ENABLED=0`）
 - 依赖：curl、openssl、tar、jq、nftables 或 iptables（计数后端）、iproute2 `ss`（连接数回退，随系统自带）
 - 注意：Ubuntu 20.04 等使用 iptables-legacy 的系统，面板服务已带 `CAP_NET_RAW` 适配，避免「计数器不存在 / filter table Permission denied」
+- 节点策略（配额阻断 / IP 上限）需要 nftables；安装器会尝试开启
+  `net.netfilter.nf_conntrack_acct=1` 并写入 `/etc/sysctl.d/99-sbx-conntrack.conf`
+  以获得精确的在线判活（失败不阻断安装，后端自动降级）
 
 ## 文件
 
@@ -121,6 +136,7 @@ sbx-core node list | links | add | edit | remove | sync
 /etc/sbx/panel.json            面板配置（端口 / token / 时区 / 后端）
 /etc/sbx/nodes.json            节点数据（含凭据，0600）
 /etc/sbx/state.json            ID 游标 / 分享地址
+/etc/sbx/policy.nft            策略规则（配额阻断 / IP allow set，表 sbx_policy）
 /etc/sbx/traffic.db            SQLite 流量库（WAL）
 /etc/sbx/nft.conf              计数规则（nftables）
 /etc/sbx/iptables.sh           计数规则（iptables 回退）

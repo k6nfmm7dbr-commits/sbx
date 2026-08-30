@@ -36,6 +36,8 @@ v2.x 支持从磁盘 `$APP_DIR/web` 读前端；v3.0.0 改为 //go:embed 内嵌�
 
 前端目前 2s 轮询 `/api/live`。服务端已是内存快照读取（无 SQL），
 轮询成本极低；WebSocket/SSE 会增加连接管理与代理兼容性问题，暂不做。
+（注：在线 IP 已走 `/api/events` SSE 增量推送，v3.0.6 起 SSE 只靠
+reconcile 的 notify 唤醒 + 5s 保险 tick，不再每秒全量快照。）
 
 ## 5. 配置 JSON 键序
 
@@ -87,3 +89,50 @@ v2.x 支持从磁盘 `$APP_DIR/web` 读前端；v3.0.0 改为 //go:embed 内嵌�
 - **跨进程 mutation 锁**：`/run/lock/sbx.lock` flock 覆盖整个节点事务。
 - **sing-box 供应链**：官方无逐文件 checksum，改为 pin 版本 + sha256 校验。
 - **dist 供应链**：binary 与 SHA256SUMS 绑定同一 immutable commit。
+
+## 11. v3.0.6 代码复审修复（全部已落实）
+
+一轮全仓复审发现并修复的问题，均带回归测试并在真机（Debian 12）验证：
+
+- **策略层并发崩溃（P0）**：`reconcile` 只持 `runMu` 就改 `ipStates` 及其内部 map，
+  而 SSE / HTTP 读侧只持 `mu.RLock` 遍历同一批 map，多核上必然
+  `fatal error: concurrent map read and map write`。改为
+  「`ipStates`/`flows` 为 reconcile 私有（runMu 唯一守卫）+ 每轮末在 mu 下发布
+  不可变快照（`ipSnaps`/`activeIPs`）」，读侧只看快照。
+- **策略脚本覆盖计数规则（P0）**：`serve` 把 `cfg.NftConf` 当策略脚本路径传入，
+  策略生效即覆盖 `nft.conf` 的 `sbx_traffic` 定义，且 `Nft.Repair` 自愈时重放
+  策略脚本 → 计数器永久建不回来。改为独立 `policy.nft`。
+- **`nf_conntrack_acct=0` 误踢在线用户（P1）**：Debian/Ubuntu 默认不开计费，
+  conntrack 无 `bytes=` → 字节增量判活永远判不出流量 → 空闲窗口后把在用连接判死。
+  后端自动降级为「ESTABLISHED 即在线」，安装器同时尝试开启并持久化 sysctl。
+- **本机出站流被算成客户端（P1）**：conntrack 原方向 `src=本机`，若节点监听
+  443/8443 等常见端口，服务器自身 HTTPS 出站会占 slot、虚报在线 IP。
+  按本机地址集合过滤（`connection.LocalIPs`，30s 缓存）。
+- **`nodes.json` 损坏导致策略 fail-open（P1）**：宽松读取得到「零节点」→ 策略表被
+  清空、所有阻断解除。改为严格读取，损坏时保持上一轮 enforcement 并报错；
+  策略 API 同步区分 503（文件不可用）与 404（节点不存在）。
+- **iptables-only 主机策略永久不可用（P1）**：`nft -f` 每轮失败 → `states` 从不发布，
+  面板全显示「不限」且每秒刷 WARN。改为 enforcement 失败不阻断状态发布，
+  并以 `ErrEnforceUnsupported` 明确提示需要 nftables。
+- **仅发 SYN 的陌生 IP 抢占名额（P1）**：provisional slot 优先级高于真实客户端，
+  攻击者每 10s 重发 SYN 即可持续拒服。admission 排序改为
+  「已建立且持正式 slot > 已建立 > 持 provisional > 其它候选」，
+  名额满时真实客户端可抢占最早的 provisional。
+- **统计 reset 后配额长期失效（P1）**：`used = totals - baseline` 被 clamp 到 0，
+  `reset` 删掉 totals 但基线仍在旧高水位。`Reset` 同事务清零基线，
+  reconcile 侧另加「基线 > lifetime 即归零」自愈。
+- **`genPolicyNFT` 输出非确定性（P2）**：遍历 map 生成规则行，相同输入产出不同文本。
+  端口与节点 id 均排序后输出。
+- **`main` 分支入库 67MB 过期二进制（P2）**：`dist/` 在 `.gitignore` 里却被跟踪，
+  内嵌版本停留在 v3.0.0。已 `git rm --cached`。
+- **CI 发布 dist 分支夹带整个源码树（P2）**：`git rm -r --cached . || true` 在
+  产物被重建时报错并被吞掉，索引未清空 → dist 分支 120 文件 / 142MB，
+  且含一份过期二进制副本。改用 `git read-tree --empty` + 索引断言 + 发布前内容断言。
+- **`node_policy` 孤儿行（P2）**：节点删除走 CLI candidate/commit 流程不经过
+  `DeleteNode`。reconcile 按当前节点集合清理。
+- **登录无失败节流（P2）**：同源 IP 连续失败 5 次后每次强制延迟 2s（5 分钟窗口，
+  成功即清零）；节流键只用 `RemoteAddr`，不信任可伪造的 `X-Forwarded-For`。
+- **SSE / reconcile 固定开销（P2）**：SSE 去掉 1s 轮询（改 notify 唤醒 + 5s 保险）、
+  序列化结果复用为 payload（原先每节点 Marshal 两次）；reconcile 的
+  per-node `SELECT totals` 合并为单条查询。
+- **死代码**：`nft.go` 的 `portRanges`、`ipslot.go` 中 `lastActive` 未使用的 `ip` 参数。

@@ -44,20 +44,31 @@ func (s *Server) handlePolicyAPI(w http.ResponseWriter, r *http.Request, idStr s
 	}
 }
 
-// policyNodeExists 校验节点 id 是否真实存在。
-func (s *Server) policyNodeExists(nodeID string) bool {
-	list := nodes.LoadPanelNodes(s.cfg.NodesFile)
+// requireNode 校验节点 id 是否真实存在，并把「文件不可用」与「节点不存在」
+// 区分开。返回 false 时已写好响应，调用方直接 return。
+//
+// 为什么必须区分：旧实现用宽松 LoadPanelNodes，nodes.json 损坏/不可读时得到
+// 空列表 → 所有策略端点一律 404 "not found"，用户看到的是「节点没了」，
+// 而真实情况是「配置文件坏了，策略仍按上一轮生效」。误导性极强。
+func (s *Server) requireNode(w http.ResponseWriter, r *http.Request, nodeID string) bool {
+	list, err := nodes.LoadPanelNodesStrict(s.cfg.NodesFile)
+	if err != nil {
+		s.sendJSON(w, r, http.StatusServiceUnavailable, map[string]string{
+			"error": "节点配置文件不可用，策略维持上一轮状态: " + err.Error(),
+		})
+		return false
+	}
 	for _, n := range list {
 		if nodes.IDString(n) == nodeID {
 			return true
 		}
 	}
+	s.sendJSON(w, r, http.StatusNotFound, map[string]string{"error": "not found"})
 	return false
 }
 
 func (s *Server) getPolicy(w http.ResponseWriter, r *http.Request, nodeID string) {
-	if !s.policyNodeExists(nodeID) {
-		s.sendJSON(w, r, http.StatusNotFound, map[string]string{"error": "not found"})
+	if !s.requireNode(w, r, nodeID) {
 		return
 	}
 	states, _ := s.policy.Snapshot()
@@ -78,8 +89,7 @@ type putPolicyRequest struct {
 }
 
 func (s *Server) putPolicy(w http.ResponseWriter, r *http.Request, nodeID string) {
-	if !s.policyNodeExists(nodeID) {
-		s.sendJSON(w, r, http.StatusNotFound, map[string]string{"error": "not found"})
+	if !s.requireNode(w, r, nodeID) {
 		return
 	}
 	var req putPolicyRequest
@@ -125,8 +135,7 @@ func (s *Server) putPolicy(w http.ResponseWriter, r *http.Request, nodeID string
 }
 
 func (s *Server) resetQuota(w http.ResponseWriter, r *http.Request, nodeID string) {
-	if !s.policyNodeExists(nodeID) {
-		s.sendJSON(w, r, http.StatusNotFound, map[string]string{"error": "not found"})
+	if !s.requireNode(w, r, nodeID) {
 		return
 	}
 	if _, err := s.policy.ResetQuota(r.Context(), nodeID); err != nil {
@@ -138,8 +147,7 @@ func (s *Server) resetQuota(w http.ResponseWriter, r *http.Request, nodeID strin
 }
 
 func (s *Server) activeIPs(w http.ResponseWriter, r *http.Request, nodeID string) {
-	if !s.policyNodeExists(nodeID) {
-		s.sendJSON(w, r, http.StatusNotFound, map[string]string{"error": "not found"})
+	if !s.requireNode(w, r, nodeID) {
 		return
 	}
 	ips := s.policy.ActiveIPs(nodeID)
@@ -150,8 +158,7 @@ func (s *Server) activeIPs(w http.ResponseWriter, r *http.Request, nodeID string
 }
 
 func (s *Server) ipState(w http.ResponseWriter, r *http.Request, nodeID string) {
-	if !s.policyNodeExists(nodeID) {
-		s.sendJSON(w, r, http.StatusNotFound, map[string]string{"error": "not found"})
+	if !s.requireNode(w, r, nodeID) {
 		return
 	}
 	s.sendJSON(w, r, http.StatusOK, s.policy.NodeIPSnapshot(nodeID))

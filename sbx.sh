@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 APP_NAME="SBX"
-APP_VERSION="3.0.5"
+APP_VERSION="3.0.6"
 RAW_URL="${SBX_RAW_URL:-https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh}"
 
 # SBX_ROOT 仅用于测试/沙箱安装（把整套目录挪到前缀下），正常安装留空
@@ -126,8 +126,42 @@ install_deps() {
     pkg_install nftables || pkg_install iptables \
       || die "无法安装 nftables/iptables，流量统计依赖其中之一"
   fi
+  ensure_conntrack_acct
   ok "依赖就绪（Go 单二进制后端，无需 Python）"
 }
+
+# >>> conntrack-acct
+# ensure_conntrack_acct 开启 conntrack 字节计费并持久化。
+#
+# 为什么必需：Debian/Ubuntu 默认 net.netfilter.nf_conntrack_acct=0，此时
+# /proc/net/nf_conntrack 不输出 bytes= 字段。面板的「在线 IP / TCP 连接」
+# 判活依赖字节增量，全零会导致正在使用的连接在空闲窗口后被判死——
+# IP 限制开启时会把真实客户端从 allow set 移除（真的踢线）。
+#
+# 后端已内置降级（检测到全零则退回「ESTABLISHED 即在线」），因此这里
+# 失败只告警不阻断安装。
+ensure_conntrack_acct() {
+  local cur=""
+  cur=$(sysctl -n net.netfilter.nf_conntrack_acct 2>/dev/null || true)
+  if [[ "$cur" == "1" ]]; then
+    return 0
+  fi
+  # 模块可能尚未加载：加载失败不算错误（内核可能已内建或稍后由 nft 触发）
+  modprobe nf_conntrack 2>/dev/null || true
+  if sysctl -w net.netfilter.nf_conntrack_acct=1 >/dev/null 2>&1; then
+    info "已开启 conntrack 字节计费（nf_conntrack_acct=1）"
+  else
+    warn "无法开启 nf_conntrack_acct，在线 IP 判活将降级为「ESTABLISHED 即在线」"
+    return 0
+  fi
+  # 持久化，重启后仍生效
+  if [[ -d /etc/sysctl.d ]]; then
+    printf '# 由 sbx 写入：面板在线 IP/连接判活依赖 conntrack 字节计费\nnet.netfilter.nf_conntrack_acct = 1\n' \
+      > /etc/sysctl.d/99-sbx-conntrack.conf 2>/dev/null \
+      || warn "写入 /etc/sysctl.d/99-sbx-conntrack.conf 失败（重启后需手工设置）"
+  fi
+}
+# <<< conntrack-acct
 
 # ---------------------------------------------------------------- 通用工具
 rand_hex() {  # crypto/rand 优先，fallback openssl
