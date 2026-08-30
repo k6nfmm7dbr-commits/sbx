@@ -107,6 +107,10 @@ type Summary struct {
 	RateKnown     bool          `json:"rate_known"`
 	ConnsTotal    int64         `json:"conns_total"`
 	ConnsUDPTotal int64         `json:"conns_udp_total"`
+	// PolicyError 是策略层最近一次 enforcement 错误（由 API 层填充）：
+	// 典型场景是生效后端为 iptables 时配额/IP 限制「状态照算但不执行」——
+	// 必须让用户在面板看到，而不是误以为已被阻断。
+	PolicyError string `json:"policy_error,omitempty"`
 }
 
 // BuildSummary 汇总今日/累计/速率/连接数。src 为 nil 时不读采集器缓存

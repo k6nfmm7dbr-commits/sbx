@@ -108,6 +108,8 @@ func (s *Server) attachPolicyToSummary(sum *traffic.Summary) {
 	if s.policy == nil {
 		return
 	}
+	// enforcement 错误（如后端为 iptables 时阻断不执行）必须透出给面板。
+	sum.PolicyError = s.policy.LastError()
 	states, _ := s.policy.Snapshot()
 	for i := range sum.Nodes {
 		id := strconv.FormatInt(toI64(sum.Nodes[i].ID), 10)

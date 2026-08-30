@@ -80,6 +80,7 @@ function kickEase() {
 }
 
 /* ---------- 渲染：概览（低频 summary） ---------- */
+var lastPolicyErr = '';
 function renderSummary(s) {
   state.summary = s;
   easeTo('kpi-today-total', s.today.rx + s.today.tx, fmtBytes);
@@ -88,6 +89,11 @@ function renderSummary(s) {
   renderNodeCards(s);
   renderNodeSelect(s);
   if (s.error) toast(s.error);
+  // 策略 enforcement 错误（如 iptables 后端下阻断不执行）：变化时提醒一次，
+  // 不每 8s 重复弹——它是稳态条件而非瞬时事件。
+  var pe = s.policy_error || '';
+  if (pe && pe !== lastPolicyErr) toast(pe);
+  lastPolicyErr = pe;
 }
 
 /* ---------- 节点卡片 ---------- */
