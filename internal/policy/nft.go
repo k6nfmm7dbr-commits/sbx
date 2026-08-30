@@ -152,6 +152,16 @@ func writeIPSet(b *strings.Builder, name, typ string, elements []string) {
 // 后端限制：策略 enforcement 只实现了 nft（allow set + ct state 规则在
 // iptables 上没有等价的低成本实现）。非 nft 后端时直接返回
 // ErrEnforceUnsupported，不去执行必然失败的 nft -f，避免每秒刷一条 WARN。
+//
+// 应用节流（v3.0.7）：
+//   - 立即应用：quota 达限集合变化 / IP 受限节点集合变化 / 节点端口形态变化
+//     （这些改变「谁被限」，延迟意味着该拦的没拦或误拦）；
+//   - 节流合并：仅 allow set 的 IP 内容变化（slot 授予/释放/provisional 超时）。
+//     此类变化在名额未满的受限节点上可被扫描者用 SYN churn 诱发成
+//     「每秒一次整表 nft -f 重写」；合并到 enforceMinInterval 窗口后，
+//     最坏情况是已被拒的 IP 多等一个窗口才重试、新 grant 的 IP 多等一个窗口
+//     才完全生效（其 SYN 本就靠 provisional 放行），语义可接受。
+//     合并不是丢弃：applied 与目标持续不一致，间隔一到下一轮立即应用，收敛。
 func (s *Service) applyEnforcement(ctx context.Context, quotaBlocked map[string]bool,
 	ipBlocked map[string]map[string]bool, list []nodes.Node) error {
 
@@ -175,8 +185,27 @@ func (s *Service) applyEnforcement(ctx context.Context, quotaBlocked map[string]
 	}
 
 	// 与上次应用状态比较，无变化则跳过（幂等，避免每次 reconcile 重写 nft）。
-	if sameQuota(s.appliedQuota, quotaBlocked) && sameIPLimits(s.appliedIPLimit, ipBlocked) {
+	quotaChanged := !sameQuota(s.appliedQuota, quotaBlocked)
+	ipKeysChanged := !sameIPLimitKeys(s.appliedIPLimit, ipBlocked)
+	ipContentChanged := !sameIPLimits(s.appliedIPLimit, ipBlocked)
+	// 端口形态比较：节点改端口但 allow set 不变时，appliedQuota/appliedIPLimit
+	// 比较完全看不出来（规则按端口生成，比较键却是节点 id）——必须单独跟踪，
+	// 否则 nft 里会留下指向旧端口的死规则、新端口失去 enforcement。
+	shape := nodesShape(list)
+	// 只有「当前有需要 enforcement 的规则」或「上次应用过非空规则」时，
+	// 端口漂移才有意义；两边都为空时端口怎么变都不需要重写。
+	shapeChanged := shape != s.appliedShape &&
+		(needEnforce || len(s.appliedQuota) > 0 || len(s.appliedIPLimit) > 0)
+	if !quotaChanged && !ipContentChanged && !shapeChanged {
 		return nil
+	}
+
+	// 仅 IP 内容变化时走节流窗口；其余（谁被限变了/端口变了）立即应用。
+	now := s.now()
+	if ipContentChanged && !quotaChanged && !ipKeysChanged && !shapeChanged &&
+		s.enforceMinInterval > 0 && !s.lastEnforceAt.IsZero() &&
+		now.Sub(s.lastEnforceAt) < s.enforceMinInterval {
+		return nil // 合并到后续轮次：目标态持续不一致，间隔一到下一轮即应用
 	}
 
 	script := genPolicyNFT(quotaPorts, ipBlocked, list)
@@ -208,7 +237,38 @@ func (s *Service) applyEnforcement(ctx context.Context, quotaBlocked map[string]
 	// 只有真正应用成功才记账，否则下一轮会因「无变化」而跳过重试。
 	s.appliedQuota = quotaBlocked
 	s.appliedIPLimit = ipBlocked
+	s.appliedShape = shape
+	s.lastEnforceAt = now
 	return nil
+}
+
+// nodesShape 生成「节点 id→端口集合」的规范化摘要（排序、确定输出），
+// 用于感知节点端口变化——规则文本按端口生成，但 applied 比较的键是节点 id，
+// 不看端口就会在节点改端口后跳过应用，留下指向旧端口的死规则。
+func nodesShape(list []nodes.Node) string {
+	parts := make([]string, 0, len(list))
+	for _, n := range list {
+		ports := make([]string, 0, 2)
+		for _, r := range nodes.ParsePorts(n) {
+			ports = append(ports, fmt.Sprintf("%d-%d", r[0], r[1]))
+		}
+		sort.Strings(ports)
+		parts = append(parts, nodes.IDString(n)+"="+strings.Join(ports, ","))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ";")
+}
+
+func sameIPLimitKeys(a, b map[string]map[string]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for id := range a {
+		if _, ok := b[id]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func sameQuota(a map[string]bool, b map[string]bool) bool {

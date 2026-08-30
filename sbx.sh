@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 APP_NAME="SBX"
-APP_VERSION="3.0.6"
+APP_VERSION="3.0.7"
 RAW_URL="${SBX_RAW_URL:-https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh}"
 
 # SBX_ROOT 仅用于测试/沙箱安装（把整套目录挪到前缀下），正常安装留空
@@ -630,10 +630,11 @@ fw_clear() {
   # 先停面板（停掉采集线程，避免其 repair() 自愈机制把刚删的表重建回来）
   svc_do stop sbx-panel >/dev/null 2>&1 || true
   "$CORE_BIN" clear >/dev/null 2>&1 || true
-  # 兜底：直删一次并确认，保证卸载后内核里不残留 sbx_traffic 表
+  # 兜底：直删计数表 + 策略 enforcement 表（sbx_policy），
+  # 保证卸载后内核里不残留 quota/IP 限制的 drop 规则（残留到重启会误拦其它服务）。
   if command -v nft >/dev/null 2>&1; then
     nft delete table inet sbx_traffic >/dev/null 2>&1 || true
-    nft delete table inet sbx_traffic >/dev/null 2>&1 || true
+    nft delete table inet sbx_policy  >/dev/null 2>&1 || true
   fi
 }
 
@@ -703,6 +704,8 @@ sbx_lock() {
   mkdir -p "$(dirname "$SBX_LOCK")" 2>/dev/null || true
   (
     flock 9 || { err "检测到另一个 sbx 节点操作正在进行，请稍后重试"; exit 75; }
+    # 告知 sbx-core 本进程已持锁，Go 侧跳过自锁（否则会对自己死锁等待）
+    export SBX_LOCK_HELD=1
     "$@"
   ) 9>"$SBX_LOCK"
 }
@@ -812,11 +815,13 @@ commit_node() {
     rm -f "$NODES_JSON.candidate"
   }
 
-  mv -f "$cand" "$SB_CONF"
-  # config 已提交；nodes 提交失败绝不允许静默继续（否则两者状态分叉）
+  # 提交 config + nodes 统一交给 sbx-core node commit：
+  # 它用 rename + fsync 父目录 提交两个候选文件（v3.0.7 之前 config 由 shell
+  # `mv -f` 提交，无目录 fsync，与 nodes.json 的耐久性不一致）。
+  # config 先提交、nodes 后提交；nodes 提交失败绝不允许静默继续（否则两者状态分叉）。
   local cerr
   if ! cerr=$("$CORE_BIN" node commit 2>&1); then
-    warn "节点数据提交失败，正在回滚: $cerr"
+    warn "配置/节点数据提交失败，正在回滚: $cerr"
     restore_old
     sb_restart || true   # 让 sing-box 回到原有效配置
     warn "已回滚到操作前状态（config 与 nodes 保持一致）"
@@ -1476,6 +1481,8 @@ uninstall_all() {
       done ;;
   esac
   rm -rf "$APP_DIR" "$SB_DIR" "$SB_BIN" "$CMD_PATH" "$CORE_BIN" "$BIN_DIR/libcronet.so"
+  # 清理安装期写入的 sysctl 持久化文件（conntrack 字节计费）
+  rm -f /etc/sysctl.d/99-sbx-conntrack.conf 2>/dev/null || true
   ok "已卸载"
   exit 0
 }
@@ -1707,8 +1714,8 @@ apply_update() {
         if [[ -f "$SB_CONF" ]] && ! cp -f "$SB_CONF" "$SB_CONF.upd-bak"; then
           warn "升级前配置备份创建失败，已中止本次配置迁移"
           rm -f "$SB_CONF.candidate"; core_node rollback >/dev/null 2>&1 || true
-        elif mv -f "$SB_CONF.candidate" "$SB_CONF" \
-           && "$CORE_BIN" node commit >/dev/null 2>&1; then
+        elif "$CORE_BIN" node commit >/dev/null 2>&1; then
+          # commit 现在一并提交 config 候选 + nodes 候选（rename + fsync）
           rm -f "$SB_CONF.upd-bak" 2>/dev/null || true
         else
           # 升级路径的提交失败同样必须回滚，避免 config/nodes 分叉。

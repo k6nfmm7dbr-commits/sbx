@@ -112,19 +112,19 @@ func TestSnellLinkFor(t *testing.T) {
 	v5 := Node{"id": json.Number("1"), "type": "snell", "port": json.Number("23000"),
 		"version": json.Number("5"), "psk": "cWndcrlUgCnvsInq", "name": "snell-v5-23000"}
 	link := s.LinkFor(v5, "91.110.232.102", "")
-	want := "snell://cWndcrlUgCnvsInq@91.110.232.102:23000#snell-v5-23000 (Snell v5)"
+	want := "snell://cWndcrlUgCnvsInq@91.110.232.102:23000#snell-v5-23000%20%28Snell%20v5%29"
 	if link != want {
 		t.Errorf("Snell v5 URI 格式异常:\n got  %q\n want %q", link, want)
 	}
 	v6 := Node{"id": json.Number("1"), "type": "snell", "port": json.Number("23000"),
 		"version": json.Number("6"), "psk": "cWndcrlUgCnvsInq", "name": "snell-v6-23000"}
-	if link := s.LinkFor(v6, "91.110.232.102", ""); !strings.Contains(link, "(Snell v6)") {
+	if link := s.LinkFor(v6, "91.110.232.102", ""); !strings.Contains(link, "%28Snell%20v6%29") {
 		t.Errorf("Snell v6 应标注 (Snell v6): %q", link)
 	}
 	// 无 name 时回退类型名
 	anon := Node{"id": json.Number("1"), "type": "snell", "port": json.Number("23000"),
 		"version": json.Number("5"), "psk": "x"}
-	if link := s.LinkFor(anon, "1.2.3.4", ""); !strings.HasPrefix(link, "snell://x@1.2.3.4:23000#snell (Snell v5)") {
+	if link := s.LinkFor(anon, "1.2.3.4", ""); !strings.HasPrefix(link, "snell://x@1.2.3.4:23000#snell%20%28Snell%20v5%29") {
 		t.Errorf("无 name 应回退 snell: %q", link)
 	}
 }

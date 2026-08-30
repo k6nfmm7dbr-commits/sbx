@@ -101,13 +101,15 @@ func (s *Store) LinkFor(n Node, host, labelSuffix string) string {
 
 	case "snell":
 		// URI 格式（Shadowrocket / sing-box / Stash / Loon 等支持 snell:// 导入的客户端）
-		label := name
+		// 名称含版本后缀（v5/v6），且整个 fragment 需一并百分号编码——
+		// v3.0.7 之前只在 name 上编码、再拼 " (Snell v5)"，末尾空格是未编码裸字符。
+		label := baseName + labelSuffix
 		if v, _ := toInt(n["version"]); v == 6 {
-			label = name + " (Snell v6)"
+			label += " (Snell v6)"
 		} else {
-			label = name + " (Snell v5)"
+			label += " (Snell v5)"
 		}
-		return "snell://" + PyQuote(Str(n, "psk"), "/") + "@" + h + ":" + port + "#" + label
+		return "snell://" + PyQuote(Str(n, "psk"), "/") + "@" + h + ":" + port + "#" + PyQuote(label, "/")
 	}
 	return ""
 }

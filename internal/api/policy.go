@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"strconv"
 
@@ -88,12 +89,22 @@ type putPolicyRequest struct {
 	IPLimitMax      int   `json:"ip_limit_max"`
 }
 
+// maxPolicyBody 限制策略请求体大小（实际请求只有 4 个字段，1 MiB 已极宽裕）。
+const maxPolicyBody = 1 << 20
+
 func (s *Server) putPolicy(w http.ResponseWriter, r *http.Request, nodeID string) {
 	if !s.requireNode(w, r, nodeID) {
 		return
 	}
 	var req putPolicyRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	dec := json.NewDecoder(io.LimitReader(r.Body, maxPolicyBody+1))
+	if err := dec.Decode(&req); err != nil {
+		s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	// 单个 JSON 值之后只允许 EOF：拒绝尾随数据与超限 body（不得截断后继续）。
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
 		s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}

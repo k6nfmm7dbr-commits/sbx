@@ -25,7 +25,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/
 ## 当前版本
 
 ```text
-v3.0.6
+v3.0.7
 ```
 
 源码在 `main` 分支，二进制从 `dist` 分支分发（rolling latest），不使用 Tag。
@@ -97,6 +97,12 @@ v3.0.6
   上一轮状态」，而不是误报 404「节点不存在」；此期间 enforcement 不会 fail-open。
 - 策略规则生成是确定性的：同一份配置反复保存产生字节一致的 `policy.nft`（端口升序），
   不会因 map 遍历顺序而无意义重写。
+- enforcement 生命周期：面板单独停止时策略刻意**冻结在最后一轮状态**
+  （fail-closed，不放开）；仅「重建/清除计数规则」（`sbx --clear-firewall` /
+  `sbx-core clear`）或**卸载**时，`sbx_policy` 表才与计数表一并从内核清除。
+- 策略 nft 应用是节流的：达限状态翻转、受限节点集合变化、节点改端口会立即
+  生效；仅在线 IP 集合（allow set）的增删在 3 秒窗口内合并应用，避免被
+  扫描流量诱发高频整表重写。
 
 ## 升级
 

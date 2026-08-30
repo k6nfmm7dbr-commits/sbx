@@ -288,6 +288,13 @@ func Clear() int {
 			slog.Error("nft 计数表删除失败", "err", errMsg)
 			return 1
 		}
+		// 策略 enforcement 表（sbx_policy）同样清理。v3.0.7 之前这里只删计数表，
+		// 卸载/清除后 quota/IP 限制的 drop 规则会残留内核直到重启，被限端口继续被拦。
+		rc, _, errMsg = firewall.RunCmd(context.Background(), "nft", "delete", "table", "inet", policy.PolicyTable)
+		if rc != 0 && !firewall.IsMissingMsg(errMsg) {
+			slog.Error("nft 策略表删除失败", "err", errMsg)
+			return 1
+		}
 	}
 	if _, err := os.Stat(cfg.IptScript); err == nil {
 		rc, _, errMsg := firewall.RunCmd(context.Background(), "sh", cfg.IptScript, "clear")

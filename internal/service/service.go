@@ -60,6 +60,9 @@ func Serve() int {
 	// sbx_traffic 计数表定义；更糟的是 firewall.Nft.Repair 自愈时重放的
 	// 也是这个文件，导致计数器永远建不回来（统计与配额一起停摆）。
 	policySvc := policy.New(db.DB, config.AppDir(), policy.DefaultPolicyConf(config.AppDir()))
+	// 节点文件路径必须与 panel.json 的 nodes_file 一致，否则自定义路径下
+	// 策略层会读回默认 appDir/nodes.json，与面板读的不是同一个文件。
+	policySvc.SetNodesFile(cfg.NodesFile)
 	// 策略 enforcement 只支持 nft；把「当前生效后端」告诉策略层，
 	// 使 iptables 主机上状态照常发布并明确提示不支持，而不是每秒失败一次。
 	policySvc.SetEnforceBackend(func() string { return firewall.EffectiveBackend(cfg.Backend) })

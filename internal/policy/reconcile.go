@@ -2,6 +2,7 @@ package policy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -84,6 +85,7 @@ func (s *Service) reconcile(ctx context.Context) error {
 	newStates := map[string]State{}
 	newSnaps := map[string]NodeIPSnapshot{}
 	newActiveIPs := map[string][]string{}
+	newActiveTCP := map[string]int{}
 	quotaBlocked := map[string]bool{}
 	ipBlocked := map[string]map[string]bool{}
 
@@ -161,7 +163,7 @@ func (s *Service) reconcile(ctx context.Context) error {
 
 		// 「在线 IP」= 已建立（非 provisional）的 granted 数量。
 		st.ActiveIPs = ipState.activeGrantedCount()
-		st.ActiveTCPConn = activeTCPCount(nodeActive)
+		newActiveTCP[id] = activeTCPCount(nodeActive)
 
 		if cfg.IPLimitEnabled {
 			if hasRejected {
@@ -195,6 +197,7 @@ func (s *Service) reconcile(ctx context.Context) error {
 	s.states = newStates
 	s.ipSnaps = newSnaps
 	s.activeIPs = newActiveIPs
+	s.activeTCP = newActiveTCP
 	s.ready = true
 	if enforceErr != nil {
 		s.lastErr = enforceErr.Error()
@@ -204,6 +207,15 @@ func (s *Service) reconcile(ctx context.Context) error {
 	s.mu.Unlock()
 
 	s.signalNotify()
+
+	// ErrEnforceUnsupported 不上抛：它是「后端能力缺失」的稳态提示，
+	// 已经经 lastErr 完整呈现给面板；上抛会让 Run 循环每秒刷一条 WARN，
+	// 且让「保存策略」类 API 在配置已落库、状态已发布的情况下仍返回 500。
+	// 其余 enforcement 错误（nft 执行失败等瞬态故障）继续上抛，
+	// 调用方需要知道本轮应用没有成功。
+	if errors.Is(enforceErr, ErrEnforceUnsupported) {
+		return nil
+	}
 	return enforceErr
 }
 

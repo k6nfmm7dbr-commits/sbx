@@ -136,3 +136,44 @@ reconcile 的 notify 唤醒 + 5s 保险 tick，不再每秒全量快照。）
   序列化结果复用为 payload（原先每节点 Marshal 两次）；reconcile 的
   per-node `SELECT totals` 合并为单条查询。
 - **死代码**：`nft.go` 的 `portRanges`、`ipslot.go` 中 `lastActive` 未使用的 `ip` 参数。
+
+## 12. v3.0.7 复审修复（全部已落实）
+
+第三轮复审（在 §11 之后）发现的残余问题，均带回归测试：
+
+- **`sbx_policy` 表无清理路径（P1）**：`fw_clear` / `sbx-core clear` / 卸载只删
+  `sbx_traffic`，从不清 `inet sbx_policy`。卸载后 quota/IP 限制的 drop 规则残留
+  内核直到重启，被限端口继续被拦。现在 `Clear()` 与 `fw_clear()` 一并删除
+  `sbx_policy`（`IsMissingMsg` 容错），并卸载时清理
+  `/etc/sysctl.d/99-sbx-conntrack.conf`。注：面板单独停止时 enforcement
+  仍刻意冻结在最后一轮状态（fail-closed），仅在显式 clear/卸载时清除。
+- **`ErrEnforceUnsupported` 每秒刷 WARN + 保存必 500（P1）**：`reconcile` 上抛该错误，
+  但 `Run` 对任何 reconcile error 都 `slog.Warn`（iptables 主机启用策略后每秒一条），
+  且 `putPolicy`/`resetQuota` 在配置已落库、状态已发布时仍返回 500。现在
+  `reconcile` 对该错误只写 `lastErr` 返回 `nil`；瞬态 enforcement 故障仍上抛。
+- **SSE notify 单 chan 共享（P2）**：`Notify()` 返回同一 cap=1 chan，一次 signal
+  只唤醒一个订阅者，多客户端时其余靠 5s fallback。改为 `Subscribe()` 扇出——
+  每订阅者独立带缓冲 chan，发布时向全部订阅者非阻塞广播。
+- **策略 nft 整表重写无节流（P2）**：仅 allow set 内容变化（slot 授予/释放）可被
+  扫描者 SYN churn 诱发成每秒一次整表 `nft -f`。现在 quota 翻转 / 受限节点集合
+  变化 / 节点端口形态变化仍立即应用，仅 IP 内容变化在 `enforceMinInterval`
+  （3s）窗口内合并（持续不一致 → 间隔一到即收敛）。
+- **节点改端口后 nft 死规则（P2，修复中附带发现）**：`applied` 比较的键是节点 id，
+  规则却按端口生成——改端口但 allow set 不变时跳过应用，nft 残留旧端口规则、
+  新端口失去 enforcement。新增 `nodesShape` 端口形态摘要比较，漂移即立即重写。
+- **policy 节点文件路径与 `nodes_file` 分叉（P2）**：`policy` 写死
+  `appDir/nodes.json`，忽略 `panel.json` 的 `nodes_file`。现在 `serve` 经
+  `SetNodesFile(cfg.NodesFile)` 传入，两处读同一文件。
+- **Go CLI 节点变更无内建锁（P2）**：flock 只在 sbx.sh；直接并发跑
+  `sbx-core node add/edit/remove` 有 NextID 竞态 / candidate 串写。现在
+  `sbx-core node` 的 mutation 子命令内建 flock（`SBX_LOCK`），经菜单调用时
+  shell 持锁并导出 `SBX_LOCK_HELD=1` 跳过自锁；锁不可用 fail-open。
+- **shell 提交 config.json 无目录 fsync（P2）**：nodes.json 走 `RenameAtomic`
+  （rename + fsync 父目录），config 走 shell `mv -f`。现在 `sbx-core node commit`
+  一并提交两个候选文件，统一 rename+fsync 语义（shell 不再自行 mv）。
+- **P3**：`putPolicy` 加 1 MiB body 限制并拒绝尾随数据；snell 分享链接 fragment
+  全量百分号编码（空格/括号不再裸出）；`fw_clear` 去掉重复的 `nft delete` 行；
+  `config-get` 缺失键打印空行（不再输出 Go 的 `<nil>`）；
+  `State.ActiveTCPConn` 从 JSON DTO 移除（从未被任何 API 消费方使用，
+  数据保留在包内 `activeTCP` 供测试断言）。
+

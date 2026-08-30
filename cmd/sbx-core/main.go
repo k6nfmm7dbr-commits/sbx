@@ -60,7 +60,12 @@ func main() {
 		if len(args) < 2 {
 			usageFatal()
 		}
-		fmt.Println(fmt.Sprint(config.Load().Get(args[1])))
+		// 缺失键打印空行而非 Go 的 "<nil>"，便于 shell 用 $(config-get k) 判空。
+		if v := config.Load().Get(args[1]); v != nil {
+			fmt.Println(fmt.Sprint(v))
+		} else {
+			fmt.Println()
+		}
 	case "config-set":
 		if len(args) < 3 {
 			usageFatal()

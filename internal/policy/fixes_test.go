@@ -2,7 +2,6 @@ package policy
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,8 +37,8 @@ func TestOutboundFlowNotCountedAsClient(t *testing.T) {
 	if st["1"].ActiveIPs != 0 {
 		t.Errorf("本机出站流被误判为客户端: ActiveIPs=%d (期望 0)", st["1"].ActiveIPs)
 	}
-	if st["1"].ActiveTCPConn != 0 {
-		t.Errorf("本机出站流被计入节点 TCP 连接数: %d (期望 0)", st["1"].ActiveTCPConn)
+	if n := s.activeTCPConn("1"); n != 0 {
+		t.Errorf("本机出站流被计入节点 TCP 连接数: %d (期望 0)", n)
 	}
 }
 
@@ -123,8 +122,8 @@ func TestAcctDisabledKeepsEstablishedOnline(t *testing.T) {
 	if st["1"].ActiveIPs != 1 {
 		t.Errorf("acct=0 时活跃连接被误判离线: ActiveIPs=%d (期望 1)", st["1"].ActiveIPs)
 	}
-	if st["1"].ActiveTCPConn != 1 {
-		t.Errorf("acct=0 时 TCP 连接数被误判归零: %d (期望 1)", st["1"].ActiveTCPConn)
+	if n := s.activeTCPConn("1"); n != 1 {
+		t.Errorf("acct=0 时 TCP 连接数被误判归零: %d (期望 1)", n)
 	}
 }
 
@@ -282,8 +281,10 @@ func TestUnsupportedBackendStillPublishesState(t *testing.T) {
 	}
 
 	err := s.reconcile(ctx)
-	if !errors.Is(err, ErrEnforceUnsupported) {
-		t.Fatalf("应返回 ErrEnforceUnsupported, got %v", err)
+	if err != nil {
+		// v3.0.7：ErrEnforceUnsupported 不再上抛（否则 Run 每秒刷 WARN、
+		// 保存策略 API 必 500），只记进 lastErr；状态仍照常发布。
+		t.Fatalf("ErrEnforceUnsupported 不应上抛, got %v", err)
 	}
 	states, ready := s.Snapshot()
 	if !ready {

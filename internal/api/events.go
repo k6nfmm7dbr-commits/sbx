@@ -53,8 +53,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		last[id] = marshalSnap(ns)
 	}
 
-	notify := s.policy.Notify()
-	// 只靠 notify 唤醒（reconcile 每轮都会 signal），去掉额外的 1s 轮询 ticker：
+	notify, unsub := s.policy.Subscribe()
+	defer unsub()
+	// 只靠 notify 唤醒（reconcile 每轮都会向所有订阅者扇出 signal），
 	// 无状态变化时不再做任何全量快照与序列化。fallbackTick 仅作保险，
 	// 万一 notify 通道因故未触发也能在 5s 内自愈。
 	fallback := time.NewTicker(5 * time.Second)

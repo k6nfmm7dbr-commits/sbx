@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/k6nfmm7dbr-commits/sbx/internal/fsx"
 )
@@ -32,17 +34,17 @@ func (c *CLI) Run(args []string) int {
 	cmd, rest := args[0], args[1:]
 	switch cmd {
 	case "add":
-		return c.cmdAdd(rest)
+		return c.mutationLocked(func() int { return c.cmdAdd(rest) })
 	case "remove":
-		return c.cmdRemove(rest)
+		return c.mutationLocked(func() int { return c.cmdRemove(rest) })
 	case "edit":
-		return c.cmdEdit(rest)
+		return c.mutationLocked(func() int { return c.cmdEdit(rest) })
 	case "sync":
-		return c.cmdSync()
+		return c.mutationLocked(c.cmdSync)
 	case "commit":
-		return c.cmdCommit()
+		return c.mutationLocked(c.cmdCommit)
 	case "rollback":
-		return c.cmdRollback()
+		return c.mutationLocked(c.cmdRollback)
 	case "ss2022-key":
 		return c.cmdSS2022Key(rest)
 	case "list":
@@ -76,6 +78,35 @@ func (c *CLI) usageError(msg string) int {
 	fmt.Fprintln(c.Stderr, msg)
 	fmt.Fprintln(c.Stderr, "用法: sbx-core node <add|edit|remove|list|count|last|info|links|sync|commit|rollback|ss2022-key|port-used|set-host|get-host|set-host6|get-host6>")
 	return exitUsage
+}
+
+// mutationLocked 在跨进程排他锁内执行节点变更。锁文件与 sbx.sh 的 sbx_lock 共用
+// （SBX_LOCK，默认 /run/lock/sbx.lock）：经菜单操作时 shell 已持锁并导出
+// SBX_LOCK_HELD=1，这里跳过自锁避免自死锁；绕过菜单直接跑 sbx-core node 时，
+// 这里补上锁，缩小 lost-update / candidate 串写的窗口。
+//
+// 锁不可用（目录不可写等）时 fail-open 放行——与修复前行为一致，绝不因锁故障
+// 阻断本就单机串行的手工操作。
+func (c *CLI) mutationLocked(fn func() int) int {
+	if os.Getenv("SBX_LOCK_HELD") != "" {
+		return fn()
+	}
+	path := os.Getenv("SBX_LOCK")
+	if path == "" {
+		path = "/run/lock/sbx.lock"
+	}
+	if dir := filepath.Dir(path); dir != "" {
+		_ = os.MkdirAll(dir, 0o755)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fn() // 锁不可用不阻断（fail-open，与历史行为一致）
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return fn()
+	}
+	return fn()
 }
 
 func (c *CLI) fail(msg string) int {
@@ -410,6 +441,16 @@ func (c *CLI) cmdSync() int {
 // ---- commit / rollback ---------------------------------------------------
 
 func (c *CLI) cmdCommit() int {
+	// 先提交 sing-box 候选配置（若有），再提交 nodes.json。
+	// 两者都走 RenameAtomic（rename + fsync 父目录），保证掉电场景下目录项同样持久。
+	// v3.0.7 之前 config 由 shell `mv -f` 提交（无目录 fsync），与 nodes.json 的
+	// 耐久性不一致；收拢到 Go 后统一语义，失败时由 shell 的 restore_old 回滚。
+	confCand := c.Store.SBConf + ".candidate"
+	if _, err := os.Stat(confCand); err == nil {
+		if err := fsx.RenameAtomic(confCand, c.Store.SBConf); err != nil {
+			return c.fail("config 提交失败: " + err.Error())
+		}
+	}
 	cand := c.Store.NodesPath() + ".candidate"
 	if _, err := os.Stat(cand); err == nil {
 		// durable rename：rename 成功后 fsync 父目录，掉电场景下目录项不丢

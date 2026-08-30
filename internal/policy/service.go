@@ -41,9 +41,6 @@ type State struct {
 	ActiveIPs    int    `json:"active_ip_count"`
 	IPLimitState string `json:"ip_limit_state"` // unlimited / ok / exceeded
 
-	// ActiveTCPConn 是节点「活跃」TCP 连接数：有近期流量（conntrack 字节增判）的
-	// 连接才计入；conntrack 不可用时回退为 /proc ESTABLISHED 数。UDP 型节点为 0。
-	ActiveTCPConn int `json:"active_tcp_conns,omitempty"`
 }
 
 // Config 是持久化的策略配置（node_policy 表一行）。
@@ -75,6 +72,7 @@ type Service struct {
 	db         *sql.DB
 	appDir     string
 	policyConf string
+	nodesFile  string // 节点文件路径；默认 appDir/nodes.json，须与 panel.json 的 nodes_file 一致
 
 	runMu   sync.Mutex   // 串行化 reconcile；同时保护 ipStates / flows
 	mu      sync.RWMutex // 保护下列「已发布」内存态
@@ -86,6 +84,13 @@ type Service struct {
 	// 发布后绝不原地修改），读侧可安全并发读取。
 	ipSnaps   map[string]NodeIPSnapshot
 	activeIPs map[string][]string
+
+	// activeTCP 是每节点「活跃 TCP 连接数」（conntrack 字节增判口径），
+	// 与 states 同一时机发布。不进入任何 JSON API：/proc 回退路径下它退化为
+	// 唯一 IP 数（NAT 下多条连接被压成 1），语义与面板展示的全局 socket 计数
+	// 不同，贸然下发会误导；保留它是因为 conntrack 路径下它是验证
+	// 「本机出站过滤 / acct=0 降级」行为的最直接观测量（测试使用）。
+	activeTCP map[string]int
 
 	// ipStates 是 reconcile 私有工作区（runMu 保护，绝不给读侧）：
 	//   nodeID -> NodeIPState（Slots=Granted / Observed / Rejected）。
@@ -122,8 +127,22 @@ type Service struct {
 	selfIPsAt  time.Time
 	localAddrs func() (map[string]bool, error)
 
-	// notify 在每次 reconcile 发布新状态后非阻塞 signal，供 SSE 广播层唤醒。
-	notify chan struct{}
+	// subs 是 SSE 订阅者注册表：每个订阅者持有独立带缓冲 chan，
+	// reconcile 发布新状态后向所有订阅者非阻塞广播（扇出）。
+	// 旧实现是单一共享 chan——一个 signal 只唤醒一个订阅者，
+	// 多客户端时其余只能等 5s fallback，更新延迟被放大。
+	subsMu sync.Mutex
+	subs   map[chan struct{}]struct{}
+
+	// 策略 nft 应用节流：仅 allow set 内容变化（slot 授予/释放）时，
+	// 距上次应用不足 enforceMinInterval 则合并到后续轮次，
+	// 避免扫描者用 SYN churn 诱发每秒一次整表 nft -f 重写。
+	// quota 状态翻转 / 受限节点集合变化 / 节点端口形态变化仍立即应用。
+	enforceMinInterval time.Duration
+	lastEnforceAt      time.Time // runMu 保护（reconcile 私有）
+	// appliedShape 是上次应用时「节点 id→端口」形态的规范化摘要，
+	// 用于发现「端口变了但 allow set 没变」这种 applied 比较看不出来的漂移。
+	appliedShape string // runMu 保护
 
 	// nftApply 执行 nft 脚本（测试可替换为 no-op，规避 CI 无 nft 权限）。
 	nftApply func(ctx context.Context, scriptPath string) error
@@ -150,25 +169,28 @@ func New(db *sql.DB, appDir, policyConf string) *Service {
 		policyConf = appDir + "/policy.nft"
 	}
 	return &Service{
-		db:             db,
-		appDir:         appDir,
-		policyConf:     policyConf,
-		states:         map[string]State{},
-		ipSnaps:        map[string]NodeIPSnapshot{},
-		activeIPs:      map[string][]string{},
-		ipStates:       map[string]*NodeIPState{},
-		appliedQuota:   map[string]bool{},
-		appliedIPLimit: map[string]map[string]bool{},
-		now:            time.Now,
-		ipIdle:         ipIdleTimeout,
-		rejectedTTL:    rejectedTTL,
-		provisionalTTL: provisionalTTL,
-		conntrack:      connection.ReadConntrack,
-		flows:          map[string]*flowState{},
-		notify:         make(chan struct{}, 1),
-		nftApply:       nil, // nil 表示用真实 nft 执行
-		localAddrs:     connection.LocalIPs,
-		enforceBackend: nil, // nil 视为 nft（默认后端）
+		db:                 db,
+		appDir:             appDir,
+		policyConf:         policyConf,
+		nodesFile:          appDir + "/nodes.json",
+		states:             map[string]State{},
+		ipSnaps:            map[string]NodeIPSnapshot{},
+		activeIPs:          map[string][]string{},
+		activeTCP:          map[string]int{},
+		ipStates:           map[string]*NodeIPState{},
+		appliedQuota:       map[string]bool{},
+		appliedIPLimit:     map[string]map[string]bool{},
+		now:                time.Now,
+		ipIdle:             ipIdleTimeout,
+		rejectedTTL:        rejectedTTL,
+		provisionalTTL:     provisionalTTL,
+		conntrack:          connection.ReadConntrack,
+		flows:              map[string]*flowState{},
+		subs:               map[chan struct{}]struct{}{},
+		enforceMinInterval: enforceMinInterval,
+		nftApply:           nil, // nil 表示用真实 nft 执行
+		localAddrs:         connection.LocalIPs,
+		enforceBackend:     nil, // nil 视为 nft（默认后端）
 	}
 }
 
@@ -184,7 +206,15 @@ func (s *Service) SetLocalAddrs(fn func() (map[string]bool, error)) { s.localAdd
 // PolicyConfPath 返回策略脚本落盘路径（供诊断/测试）。
 func (s *Service) PolicyConfPath() string { return s.policyConf }
 
-func (s *Service) nodesPath() string { return s.appDir + "/nodes.json" }
+func (s *Service) nodesPath() string { return s.nodesFile }
+
+// SetNodesFile 覆盖节点文件路径。serve 必须把 panel.json 的 nodes_file
+// 传进来——否则自定义 nodes_file 时策略层与面板读的不是同一个文件。
+func (s *Service) SetNodesFile(p string) {
+	if p != "" {
+		s.nodesFile = p
+	}
+}
 
 // SetClock 注入时钟（测试用）。
 func (s *Service) SetClock(fn func() time.Time) { s.now = fn }
@@ -205,6 +235,13 @@ const rejectedTTL = 60 * time.Second
 // 避免端口扫描/失败握手占用名额。
 const provisionalTTL = 10 * time.Second
 
+// enforceMinInterval 是「仅 allow set 内容变化」时两次 nft 整表应用的最小间隔。
+// quota 翻转 / 受限节点集合变化 / 端口形态变化不受此限（立即应用）。
+const enforceMinInterval = 3 * time.Second
+
+// SetEnforceMinInterval 覆盖应用节流间隔（测试用；0 = 不节流）。
+func (s *Service) SetEnforceMinInterval(d time.Duration) { s.enforceMinInterval = d }
+
 // SetIPIdle 覆盖判活/grace 窗口（测试用）。
 func (s *Service) SetIPIdle(d time.Duration) { s.ipIdle = d }
 
@@ -222,8 +259,24 @@ func (s *Service) SetRemoteIPs(fn func(list []nodes.Node) (map[string]connection
 	s.remoteIPs = fn
 }
 
-// Notify 返回 reconcile 发布新状态时被 signal 的只读通道（SSE 广播层等待它）。
-func (s *Service) Notify() <-chan struct{} { return s.notify }
+// Subscribe 注册一个 reconcile 发布通知订阅者（SSE 广播层使用）。
+// 返回的 channel 带缓冲 1：发布时若订阅者尚未取走上一条 signal，
+// 新 signal 直接丢弃（合并唤醒，订阅者醒来总会拉最新快照，不会丢状态）。
+// 返回的取消函数必须在订阅结束（连接断开）时调用，防止注册表泄漏。
+func (s *Service) Subscribe() (<-chan struct{}, func()) {
+	ch := make(chan struct{}, 1)
+	s.subsMu.Lock()
+	s.subs[ch] = struct{}{}
+	s.subsMu.Unlock()
+	var once sync.Once
+	return ch, func() {
+		once.Do(func() {
+			s.subsMu.Lock()
+			delete(s.subs, ch)
+			s.subsMu.Unlock()
+		})
+	}
+}
 
 // Snapshot 返回策略状态快照。ready=false 表示尚未完成首次 reconcile。
 func (s *Service) Snapshot() (map[string]State, bool) {
@@ -300,10 +353,21 @@ type flowState struct {
 }
 
 func (s *Service) signalNotify() {
-	select {
-	case s.notify <- struct{}{}:
-	default:
+	s.subsMu.Lock()
+	defer s.subsMu.Unlock()
+	for ch := range s.subs {
+		select {
+		case ch <- struct{}{}:
+		default: // 订阅者繁忙：合并唤醒（它醒来总会拉最新快照）
+		}
 	}
+}
+
+// activeTCPConn 读已发布的活跃 TCP 连接数快照（测试观测用；不进任何 JSON API）。
+func (s *Service) activeTCPConn(nodeID string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.activeTCP[nodeID]
 }
 
 // IPEntry 是单个客户端 IP 的展示快照。
@@ -554,6 +618,7 @@ func (s *Service) DeleteNode(ctx context.Context, nodeID string) error {
 	delete(s.states, nodeID)
 	delete(s.ipSnaps, nodeID)
 	delete(s.activeIPs, nodeID)
+	delete(s.activeTCP, nodeID)
 	s.mu.Unlock()
 	s.runMu.Unlock()
 	// reconcile 会重建 nft（该节点已不在 list，规则自然清除）。

@@ -43,6 +43,9 @@ cat > "$FAKE_BIN/core_node" <<EOF
 sub="\$2"
 case "\$sub" in
   commit)
+    # 真实 sbx-core node commit：先提交 config 候选，再提交 nodes 候选。
+    # FAIL_FLAG 模拟「config 已提交、nodes 提交失败」——与真实失败点一致。
+    [[ -f "$SB_CONF.candidate" ]] && mv -f "$SB_CONF.candidate" "$SB_CONF"
     if [[ -e "$FAIL_FLAG" ]]; then echo "simulated nodes commit failure" >&2; exit 9; fi
     [[ -f "$NODES_JSON.candidate" ]] && mv -f "$NODES_JSON.candidate" "$NODES_JSON"
     echo ok ;;
