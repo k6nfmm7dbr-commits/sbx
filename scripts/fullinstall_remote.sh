@@ -30,7 +30,7 @@ section "3. 命令行冒烟"
 PORT=$(jq -r '.port' /etc/sbx/panel.json)
 TOKEN=$(jq -r '.token' /etc/sbx/panel.json)
 curl -fsS "http://127.0.0.1:$PORT/healthz" | grep -q '"ok":true'; ck "面板 API 健康" $?
-sbx --version | grep -q "3.0.7"; ck "sbx --version" $?
+sbx --version | grep -q "3.0.8"; ck "sbx --version" $?
 sbx --show >/dev/null 2>&1; ck "sbx --show" $?
 sbx --links >/dev/null 2>&1; ck "sbx --links" $?
 [[ "$(sbx-core node count)" == "0" ]] || [[ "$(sbx-core node count)" == "" ]]; ck "node count(全新无节点)" $?

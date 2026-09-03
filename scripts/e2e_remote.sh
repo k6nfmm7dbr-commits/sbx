@@ -42,7 +42,7 @@ ck "安装脚本退出码 0" $?
 grep -q "安装完成" /tmp/e2e-install.log; ck "输出含「安装完成」" $?
 [[ -x "$CORE" ]]; ck "sbx-core 已安装" $?
 [[ -x "$ROOT/usr/local/bin/sing-box" ]]; ck "sing-box 已安装" $?
-"$CORE" version | grep -q "v3.0.7"; ck "core 版本 3.0.7 ($("$CORE" version))" $?
+"$CORE" version | grep -q "v3.0.8"; ck "core 版本 3.0.8 ($("$CORE" version))" $?
 jq -e '.token and (.port|type)=="number" and .port>=1 and .port<=65535' "$PANEL_CONF" >/dev/null 2>&1
 ck "panel.json 合法(token+port)" $?
 
@@ -165,7 +165,7 @@ grep -qE "今日|累计|rx|tx|RX|TX" /tmp/e2e-show.txt; ck "sbx-core show 输出
 # show 的维度字样：概览段（总览）+ 节点段（节点流量/合计）
 grep -qE "总览" /tmp/e2e-show.txt && grep -qE "节点流量|合计" /tmp/e2e-show.txt; ck "show 含总览/节点维度" $?
 
-# ---------------------------------------------------------------- 8. 策略层（v3.0.7 修复点）
+# ---------------------------------------------------------------- 8. 策略层（v3.0.8 修复点）
 section "8. 策略 enforcement（配额阻断 / 表清理 / 外部删除自愈）"
 policy_put() { # policy_put <json>
   curl -fsS -m 10 -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \

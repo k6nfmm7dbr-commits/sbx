@@ -25,7 +25,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/
 ## 当前版本
 
 ```text
-v3.0.7
+v3.0.8
 ```
 
 源码在 `main` 分支，二进制从 `dist` 分支分发（rolling latest），不使用 Tag。
@@ -91,6 +91,10 @@ v3.0.7
   iptables 时，用量与在线 IP 照常统计展示，但阻断不会执行，面板会提示需要 nftables。
 - 策略规则写入 `/etc/sbx/policy.nft`（独立表 `sbx_policy`），与计数规则
   `/etc/sbx/nft.conf`（表 `sbx_traffic`）完全分离，互不覆盖。
+- 「在线 IP」判活以 conntrack 为主数据源。因为内核只在存在引用 `ct` 的规则时才建
+  conntrack 条目，计数表里包含一条 `sbx_ct` 链（`policy accept`，唯一动作是
+  `ct state new counter`）用于激活跟踪——它不做任何放行/拦截决策。若 conntrack
+  未在跟踪（例如规则被外部清空），判活会自动降级为 `/proc` 并在日志提示一次。
 - `sbx-core reset [scope]` 清空统计时会同事务清零对应节点的配额基线，
   避免「统计归零后配额长期失效」。
 - `nodes.json` 损坏或不可读时，策略端点返回 503 并说明「配置文件不可用，策略维持

@@ -184,4 +184,40 @@ reconcile 的 notify 唤醒 + 5s 保险 tick，不再每秒全量快照。）
   `sbx --clear-firewall` 必报「iptables 计数链清除失败」并以 1 退出。
   `clear_one` 末尾显式 `return 0`——「链本就不存在」对 clear 语义即成功。
 
+## 13. v3.0.8 修复：conntrack 未激活导致「有连接数但在线 IP 恒为 0」
+
+真机（Debian 12，7 台家宽 VPS）暴露的缺陷：面板节点卡片显示 TCP 连接数正常，
+但「在线 IP」永远是 0。
+
+**根因链条**：内核只在**存在引用 conntrack 的 netfilter 规则**时才真正为连接建立
+conntrack 条目。这批机器很干净——没有任何防火墙规则，而 SBX 的计数表 `sbx_traffic`
+只有 named counter、不引用 `ct`，于是 `nf_conntrack` 模块虽已加载、
+`/proc/net/nf_conntrack` 存在可读，内容却恒为空（`nf_conntrack_count=0`）。
+
+而策略层的在线 IP 判活以 conntrack 为主数据源，且刻意规定「conntrack 可用时绝不
+回退 /proc」（防止已断开的 socket 残留复活成在线 IP）。判定「可用」的依据是文件能否
+读到——文件确实在，只是永远 0 行。于是：**conntrack 判定可用 → 0 条流 → 不回退 →
+在线 IP 恒为 0**；连接数走另一条路径（直读 `/proc/net/tcp`）所以正常，
+表现就是「有连接数、在线 IP 是 0」。
+
+诊断决定性实验：临时加一条 `ct state new counter` 规则，5 秒后 conntrack 立刻开始
+跟踪（count 0 → 2），删掉规则后恢复为 0。
+
+**两处修复（缺一不可）**：
+
+1. `firewall.GenNFT` 增加 `sbx_ct` 链（`hook input priority -150; policy accept;`
+   + 唯一动作 `ct state new counter name sbx_ct_activate`）。它不做任何放行/拦截
+   决策，唯一作用是让内核为流量建 conntrack 条目。写进 `nft.conf` 后随
+   `sbx-firewall` 开机自动生效，重启不丢。计数器名刻意不匹配
+   `ParseCounterName` 的 `sbx_(n<id>|sys)_(i|o)` 形态，不会被采集器当流量入账。
+2. `connection.ReadConntrack` 对「文件可读但整表 0 条」返回
+   `Available=false, Inactive=true`，让判活自然走 /proc 回退；策略层用 `ctInactive`
+   在状态变化时提示一次原因（不每秒刷屏）。这是对旧规则集、或规则被外部清空
+   场景的兜底——单靠第 1 条，存量机器在 `apply` 前仍是坏的。
+
+**为什么「整表 0 条」是可靠判据**：一台有网络活动的服务器不可能一条 conntrack 都
+没有（SSH/DNS 自身就会产生条目）。而「conntrack 正常但当前无客户端连接」时表里仍有
+其它流（`Entries > 0`），仍走 conntrack 口径，原有的「不复活已死 IP」语义完整保留。
+
+
 

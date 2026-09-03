@@ -28,7 +28,7 @@ func keepTCPState(s string) bool {
 }
 
 // ConntrackResult 是 conntrack 读取结果。必须区分三种情况：
-//   - Available=true, Flows 可能为空：conntrack 正常，只是当前 0 条流；
+//   - Available=true, Flows 可能为空：conntrack 正常，只是当前 0 条相关流；
 //   - Available=false, Err==nil：conntrack 根本不可用（模块未加载 / 文件不存在）；
 //   - Err!=nil：读取失败（不完整），此时 Partial=true。
 type ConntrackResult struct {
@@ -36,6 +36,21 @@ type ConntrackResult struct {
 	Available bool
 	Partial   bool
 	Err       error
+
+	// Entries 是 conntrack 文件里的**总条目数**（未经协议/状态过滤）。
+	// 用途：区分「conntrack 正常但当前没有相关流」与「conntrack 根本没在跟踪」。
+	Entries int
+
+	// Inactive 表示「文件可读但整表 0 条」——内核没在真正跟踪连接。
+	// 出现在没有任何引用 ct 的 netfilter 规则的干净机器上：nf_conntrack 模块
+	// 已加载、/proc/net/nf_conntrack 存在可读，但内核不建条目，内容恒为空。
+	// 此时 Available 一并置 false（它作为数据源确实不可用），Inactive 仅供
+	// 上层区分「模块缺失」与「未激活跟踪」以给出精准提示。
+	//
+	// 一台有网络活动的服务器不可能一条 conntrack 都没有（SSH/DNS 自身就会
+	// 产生条目），因此「整表为 0」是可靠判据，不会与「conntrack 正常但当前
+	// 无客户端连接」混淆——后者表里仍有其它流，Entries > 0。
+	Inactive bool
 }
 
 const defaultConntrackPath = "/proc/net/nf_conntrack"
@@ -53,10 +68,30 @@ func ReadConntrack(path string) ConntrackResult {
 		}
 		return ConntrackResult{Available: false, Partial: true, Err: err}
 	}
-	return ConntrackResult{
-		Flows:     ParseConntrack(string(b)),
-		Available: true,
+	text := string(b)
+	entries := countEntries(text)
+	if entries == 0 {
+		// 文件存在可读却一条都没有：内核未真正跟踪连接（缺少引用 ct 的规则）。
+		// 作为判活数据源它不可用，必须让上层回退 /proc；Inactive 用于区分
+		// 「模块缺失」（Available=false, Inactive=false）与本情况，以给出精准提示。
+		return ConntrackResult{Available: false, Inactive: true}
 	}
+	return ConntrackResult{
+		Flows:     ParseConntrack(text),
+		Available: true,
+		Entries:   entries,
+	}
+}
+
+// countEntries 统计 conntrack 文件的非空行数（= 内核当前跟踪的条目总数）。
+func countEntries(text string) int {
+	n := 0
+	for _, line := range strings.Split(text, "\n") {
+		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // ParseConntrack 解析 conntrack 文本，保留 tcp ESTABLISHED 与 udp 已建立流。

@@ -18,6 +18,11 @@ const (
 	IptChainIn  = "SBX_IN"
 	IptChainOut = "SBX_OUT"
 
+	// CTActivateCounter 是 conntrack 激活链使用的计数器名。
+	// 刻意不匹配 ParseCounterName 的 `sbx_(n<id>|sys)_(i|o)` 形态，
+	// 因此不会被采集器当成流量计数入账（它只是让 ct hook 有个合法动作）。
+	CTActivateCounter = "sbx_ct_activate"
+
 	execTimeout = 15 * time.Second
 )
 

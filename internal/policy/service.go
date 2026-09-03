@@ -121,6 +121,11 @@ type Service struct {
 	// runMu 保护。
 	acctDisabled bool
 
+	// ctInactive 记录「conntrack 可读但整表 0 条」——内核没在真正跟踪连接
+	// （缺少引用 ct 的 netfilter 规则）。仅用于状态变化时打一次日志，
+	// 避免每秒刷屏。runMu 保护。
+	ctInactive bool
+
 	// selfIPs 是本机地址集合（含回环），用于排除「服务器自身发起的出站流」
 	// 被误判成节点客户端。runMu 保护，周期刷新。
 	selfIPs    map[string]bool

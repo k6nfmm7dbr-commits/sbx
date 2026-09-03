@@ -57,6 +57,24 @@ func (s *Service) reconcile(ctx context.Context) error {
 	if s.conntrack != nil {
 		cr = s.conntrack("")
 	}
+	// conntrack 未激活跟踪（文件可读但整表 0 条）：ReadConntrack 已把
+	// Available 置 false 并置 Inactive，这里只负责在状态变化时提示一次原因，
+	// 避免每秒刷屏。判活会自然走 /proc 回退分支。
+	//
+	// 为什么必须回退：干净机器上没有任何引用 ct 的 netfilter 规则时，内核
+	// 虽已加载 nf_conntrack 但不建条目。若把它当「可用且 0 条流」处理，
+	// 在线 IP 会恒为 0，而连接数（读 /proc/net/tcp）却正常，用户看到
+	// 「有连接数但在线 IP 是 0」。v3.0.8 起 GenNFT 会挂 sbx_ct 链主动激活
+	// conntrack；此处是对旧规则集/规则被外部清空场景的兜底。
+	if cr.Inactive != s.ctInactive {
+		if cr.Inactive {
+			slog.Warn("conntrack 已加载但未跟踪任何连接(缺少引用 ct 的 netfilter 规则), " +
+				"在线 IP 判活已降级为 /proc；执行 sbx --apply-firewall 可重建 conntrack 激活链")
+		} else {
+			slog.Info("conntrack 已恢复跟踪, 在线 IP 判活回到 conntrack 口径")
+		}
+		s.ctInactive = cr.Inactive
+	}
 
 	var procSplit map[string]connection.RemoteIPSet
 	procPartial := false

@@ -26,4 +26,9 @@ table inet sbx_traffic {
         tcp sport { 8388 } counter name sbx_n2_o
         udp sport { 8388 } counter name sbx_n2_o
     }
+    counter sbx_ct_activate { }
+    chain sbx_ct {
+        type filter hook input priority -150; policy accept;
+        ct state new counter name sbx_ct_activate
+    }
 }
