@@ -1,5 +1,8 @@
-// Package firewall 实现流量计数后端：nftables named counter（exec nft -j）
-// 与 iptables 自定义链回退，以及计数规则文件的生成。
+// Package firewall 实现基于 nftables 的流量计数后端：named counter 读取
+// （exec `nft -j list counters`）与计数规则文件生成。
+//
+// 架构（v3.0.9 起）：**nftables-only**。不存在后端选择、不存在 iptables 回退。
+// nft 不可用时明确失败（fail-closed），绝不静默降级。
 package firewall
 
 import (
@@ -12,11 +15,8 @@ import (
 )
 
 const (
-	// NFTTable 是 nftables 计数表名，与旧实现一致。
+	// NFTTable 是 nftables 计数表名。
 	NFTTable = "sbx_traffic"
-	// IptChainIn / IptChainOut 是 iptables 自定义链名。
-	IptChainIn  = "SBX_IN"
-	IptChainOut = "SBX_OUT"
 
 	// CTActivateCounter 是 conntrack 激活链使用的计数器名。
 	// 刻意不匹配 ParseCounterName 的 `sbx_(n<id>|sys)_(i|o)` 形态，
@@ -27,8 +27,7 @@ const (
 )
 
 // RunCmd 执行外部命令，返回 (rc, stdout, stderr)。找不到命令时 rc=127，
-// 超时 rc=124 —— 对齐旧 run_cmd 的约定。参数直接列表传入，
-// 用户数据永远不进入 shell。
+// 超时 rc=124。参数直接列表传入，用户数据永远不进入 shell。
 func RunCmd(ctx context.Context, args ...string) (int, string, string) {
 	if len(args) == 0 {
 		return 127, "", "empty command"
@@ -72,7 +71,7 @@ func Which(name string) bool {
 	return err == nil
 }
 
-// ErrLookup 表示计数器/规则不存在（可自愈），等价旧 LookupError。
+// ErrLookup 表示计数器/规则不存在（可自愈）。
 type ErrLookup struct{ Msg string }
 
 func (e *ErrLookup) Error() string { return e.Msg }
@@ -93,36 +92,37 @@ var (
 type Snapshot map[string][2]int64
 
 // Backend 是计数器读取后端接口。
+//
+// 生产实现只有一个：*Nft（见 nft.go）。保留 interface 是为了让 Collector 的
+// 单元测试能注入 fake backend 做故障注入（读失败 / 部分快照 / Repair 行为），
+// 而不是为了支持多种后端——绝不要重新引入“运行时选择后端”。
 type Backend interface {
 	Name() string
 	Read(ctx context.Context) (Snapshot, error)
 	Repair(ctx context.Context) error
 }
 
-// DetectBackend 对齐 detect_backend（纯探测，不读持久化状态）：
-// 配置强制 nft/ipt；auto 时优先探测 nft（`nft list tables` 成功），
-// 再看 iptables；两者都缺失仍返回 nft（由后续 Read 报错自愈）。
-// 注意：会改变系统状态的路径请用 EffectiveBackend（单一事实源），
-// 不要用这个纯探测结果——否则 auto 下可能与 Apply 实际后端分叉。
-func DetectBackend(forced string) string {
-	return probeBackendForced(forced)
+// BackendName 是对外报告的后端名称，恒为 "nft"。
+// 保留该常量是为了 /api/summary 的 `backend` 字段保持 schema 兼容。
+const BackendName = "nft"
+
+// NftAvailable 报告 nftables 是否真正可用：nft 命令在 PATH 且能列出表
+// （能列表说明有权限且内核支持）。nftables-only 架构下这是硬前置条件，
+// 不可用时调用方必须明确失败，绝不降级到其它后端。
+func NftAvailable(ctx context.Context) bool {
+	if !whichFn("nft") {
+		return false
+	}
+	rc, _, _ := runCmdFn(ctx, "nft", "list", "tables")
+	return rc == 0
 }
 
-// probeBackendForced：forced=nft/iptables 直接返回；auto 走 probeBackend。
-func probeBackendForced(forced string) string {
-	switch normalizeBackend(forced) {
-	case "nft":
-		return "nft"
-	case "iptables":
-		return "iptables"
-	}
-	return probeBackend()
-}
-
-// New 按 EffectiveBackend 构造后端（Collector 通过这里读取与 Apply 一致的后端）。
-func New(forced string, nftConf, iptScript string) Backend {
-	if EffectiveBackend(forced) == "nft" {
-		return NewNft(nftConf)
-	}
-	return NewIptables(iptScript)
+// IsMissingMsg 判断 nft 错误信息是否为「目标不存在」类（可自愈 / 对删除即成功）。
+// 供 nft.go 分类 ErrLookup，以及 service.Clear 判断「删除时表本就不存在」。
+func IsMissingMsg(msg string) bool {
+	m := strings.ToLower(msg)
+	return strings.Contains(m, "no such file or directory") ||
+		strings.Contains(m, "does not exist") ||
+		strings.Contains(m, "no such table") ||
+		strings.Contains(m, "no such chain")
 }

@@ -77,3 +77,42 @@ func TestPolicyConfPathIsSeparateFromCounterRules(t *testing.T) {
 		t.Fatalf("空 policyConf 未回退到 policy.nft: %s", s.PolicyConfPath())
 	}
 }
+
+// ---- 安全边界：策略脚本只操作 sbx_policy 表 --------------------------------
+//
+// 强制要求（不可回归）：SBX 只能管理自己创建的表。策略脚本绝不允许
+// flush ruleset、绝不允许操作非 sbx_policy 的表/链，也绝不引用 iptables。
+func TestPolicyNFTOnlyTouchesOwnTable(t *testing.T) {
+	list := []nodes.Node{{
+		"id": json.Number("1"), "type": "vless", "port": json.Number("443"),
+	}}
+	script := genPolicyNFT(map[int64]bool{443: true},
+		map[string]map[string]bool{"1": {"1.1.1.1": true}}, list)
+
+	if !strings.HasPrefix(script, "#!/usr/sbin/nft -f") {
+		t.Errorf("策略脚本必须是 nft 脚本, 首行: %q", strings.SplitN(script, "\n", 2)[0])
+	}
+	if strings.Contains(script, "flush ruleset") {
+		t.Fatalf("策略脚本绝不允许 flush ruleset:\n%s", script)
+	}
+	for _, bad := range []string{"iptables", "ip6tables", "SBX_IN", "SBX_OUT", "-A ", "-N "} {
+		if strings.Contains(script, bad) {
+			t.Errorf("策略脚本不应包含 iptables 痕迹 %q:\n%s", bad, script)
+		}
+	}
+	// table / delete table 只能针对 sbx_policy
+	for _, line := range strings.Split(script, "\n") {
+		l := strings.TrimSpace(line)
+		if !strings.HasPrefix(l, "table ") && !strings.HasPrefix(l, "delete ") &&
+			!strings.HasPrefix(l, "flush ") {
+			continue
+		}
+		if !strings.Contains(l, PolicyTable) {
+			t.Errorf("策略脚本操作了非 %s 的对象: %q", PolicyTable, l)
+		}
+	}
+	// 计数表绝不能出现在策略脚本里（否则会覆盖计数表定义）
+	if strings.Contains(script, "sbx_traffic") {
+		t.Errorf("策略脚本不得引用计数表 sbx_traffic:\n%s", script)
+	}
+}

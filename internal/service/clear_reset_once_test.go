@@ -11,7 +11,7 @@ import (
 // ---- Clear：最终采样失败必须取消清除（数据保护） ---------------------------
 
 func TestClearAbortsWhenFinalSampleFails(t *testing.T) {
-	a := setupApp(t, "nft")
+	a := setupApp(t)
 	a.writeConf("127.0.0.1", "t")
 	mustWriteFile(t, a.nodesPath, validNode)
 	readBaseline := seedBaseline(t, a.dbPath)
@@ -41,7 +41,7 @@ func TestClearAbortsWhenFinalSampleFails(t *testing.T) {
 // ---- Clear：LookupError（规则本就不存在）仍允许清除 ------------------------
 
 func TestClearAllowsLookupError(t *testing.T) {
-	a := setupApp(t, "nft")
+	a := setupApp(t)
 	a.writeConf("127.0.0.1", "t")
 	mustWriteFile(t, a.nodesPath, validNode)
 
@@ -66,7 +66,7 @@ func TestClearAllowsLookupError(t *testing.T) {
 // ---- Clear：正常路径回归 ----------------------------------------------------
 
 func TestClearHappyPath(t *testing.T) {
-	a := setupApp(t, "nft")
+	a := setupApp(t)
 	a.writeConf("127.0.0.1", "t")
 	mustWriteFile(t, a.nodesPath, validNode)
 
@@ -92,10 +92,59 @@ exit 0
 	}
 }
 
+// ---- Clear 安全边界：只删 SBX 自己的两张表，绝不误伤用户防火墙 --------------
+//
+// 强制要求（不可回归）：Clear 不得 flush ruleset、不得动 INPUT/OUTPUT、
+// 不得删除任何非 sbx_* 的表，也不得执行 iptables。
+func TestClearOnlyDeletesOwnTables(t *testing.T) {
+	a := setupApp(t)
+	a.writeConf("127.0.0.1", "t")
+	mustWriteFile(t, a.nodesPath, validNode)
+
+	nftScript := `if [ "$1" = "-j" ]; then cat <<'JSON'
+` + nftListJSON() + `
+JSON
+exit 0
+fi
+exit 0
+`
+	a.installStubs(t, nftScript)
+	if rc := Clear(); rc != 0 {
+		t.Fatal("Clear 应成功")
+	}
+
+	deleted := map[string]bool{}
+	for _, c := range stubCalls(t, a) {
+		if strings.HasPrefix(c, "iptables") || strings.HasPrefix(c, "ip6tables") {
+			t.Fatalf("Clear 不得执行 iptables: %q", c)
+		}
+		for _, forbidden := range []string{"flush ruleset", "flush table", "INPUT", "OUTPUT", "-F", "-X"} {
+			if strings.Contains(c, forbidden) {
+				t.Fatalf("Clear 出现危险操作 %q: %q", forbidden, c)
+			}
+		}
+		if fields := strings.Fields(c); len(fields) == 5 &&
+			fields[1] == "delete" && fields[2] == "table" && fields[3] == "inet" {
+			deleted[fields[4]] = true
+		}
+	}
+	want := map[string]bool{"sbx_traffic": true, "sbx_policy": true}
+	for name := range deleted {
+		if !want[name] {
+			t.Errorf("Clear 删除了非 SBX 表: %s", name)
+		}
+	}
+	for name := range want {
+		if !deleted[name] {
+			t.Errorf("Clear 未删除 SBX 自己的表: %s", name)
+		}
+	}
+}
+
 // ---- Reset：panel.json 损坏时必须失败且 DB 完全不变 -------------------------
 
 func TestResetRejectsCorruptConfig(t *testing.T) {
-	a := setupApp(t, "ipt")
+	a := setupApp(t)
 	a.writeConf("127.0.0.1", "t")
 	// 预置统计数据
 	db, err := database.Open(a.dbPath)
@@ -149,7 +198,7 @@ func TestResetRejectsCorruptConfig(t *testing.T) {
 // ---- Once：panel.json 损坏时必须失败且不写任何数据库 ------------------------
 
 func TestOnceRejectsCorruptConfig(t *testing.T) {
-	a := setupApp(t, "ipt")
+	a := setupApp(t)
 	a.writeConf("127.0.0.1", "t")
 	readBaseline := seedBaseline(t, a.dbPath)
 	want := readBaseline(t)
@@ -176,7 +225,7 @@ func TestOnceRejectsCorruptConfig(t *testing.T) {
 // ---- 防回归：samples 目录不落任何新文件（Once 损坏配置时零写入） -----------
 
 func TestOnceCorruptConfigWritesNothing(t *testing.T) {
-	a := setupApp(t, "ipt")
+	a := setupApp(t)
 	a.writeConf("127.0.0.1", "t")
 	mustWriteFile(t, a.confPath, "{ invalid")
 	_ = Once()

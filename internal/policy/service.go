@@ -19,7 +19,6 @@ package policy
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"log/slog"
 	"sort"
 	"strings"
@@ -157,18 +156,7 @@ type Service struct {
 
 	// nftApply 执行 nft 脚本（测试可替换为 no-op，规避 CI 无 nft 权限）。
 	nftApply func(ctx context.Context, scriptPath string) error
-
-	// enforceBackend 报告当前生效的防火墙后端（"nft" / "iptables"）。
-	// 策略 enforcement 目前只实现 nft 后端；非 nft 时必须「状态照常发布 +
-	// 明确告知不支持」，而不是每轮 reconcile 在 nft -f 处失败导致
-	// states 永远不发布（面板全显示「不限」且每秒刷 WARN）。
-	enforceBackend func() string
 }
-
-// ErrEnforceUnsupported 表示当前防火墙后端不支持策略 enforcement。
-// reconcile 仍会发布状态（面板可见真实用量），但阻断不会生效。
-var ErrEnforceUnsupported = errors.New(
-	"策略 enforcement 需要 nftables：当前生效后端为 iptables，配额/IP 限制不会被执行")
 
 // New 构造策略服务。
 //
@@ -201,15 +189,11 @@ func New(db *sql.DB, appDir, policyConf string) *Service {
 		enforceMinInterval: enforceMinInterval,
 		nftApply:           nil, // nil 表示用真实 nft 执行
 		localAddrs:         connection.LocalIPs,
-		enforceBackend:     nil, // nil 视为 nft（默认后端）
 	}
 }
 
 // DefaultPolicyConf 返回默认策略脚本路径（与计数规则 nft.conf 分离）。
 func DefaultPolicyConf(appDir string) string { return appDir + "/policy.nft" }
-
-// SetEnforceBackend 注入「当前生效防火墙后端」查询函数。
-func (s *Service) SetEnforceBackend(fn func() string) { s.enforceBackend = fn }
 
 // SetLocalAddrs 注入本机地址读取函数（测试用）。
 func (s *Service) SetLocalAddrs(fn func() (map[string]bool, error)) { s.localAddrs = fn }

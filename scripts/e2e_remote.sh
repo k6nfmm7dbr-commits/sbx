@@ -42,9 +42,14 @@ ck "安装脚本退出码 0" $?
 grep -q "安装完成" /tmp/e2e-install.log; ck "输出含「安装完成」" $?
 [[ -x "$CORE" ]]; ck "sbx-core 已安装" $?
 [[ -x "$ROOT/usr/local/bin/sing-box" ]]; ck "sing-box 已安装" $?
-"$CORE" version | grep -q "v3.0.8"; ck "core 版本 3.0.8 ($("$CORE" version))" $?
+"$CORE" version | grep -q "v3.0.9"; ck "core 版本 3.0.9 ($("$CORE" version))" $?
 jq -e '.token and (.port|type)=="number" and .port>=1 and .port<=65535' "$PANEL_CONF" >/dev/null 2>&1
 ck "panel.json 合法(token+port)" $?
+# nftables-only（v3.0.9）：新装配置不得含废弃后端键，必须含 nft_conf
+jq -e 'has("backend")==false and has("ipt_script")==false and has("nft_conf")' "$PANEL_CONF" >/dev/null 2>&1
+ck "panel.json 无 backend/ipt_script 且有 nft_conf" $?
+[[ ! -e "$APP_DIR/iptables.sh" ]]; ck "不生成 iptables.sh" $?
+grep -q '^#!/usr/sbin/nft -f' "$APP_DIR/nft.conf"; ck "nft.conf 是 nft 脚本" $?
 
 # ---------------------------------------------------------------- 2. 菜单加节点
 section "2. 菜单添加 Shadowsocks 2022 节点"
@@ -259,15 +264,51 @@ done
 ck "策略表被外部删除后自动重建" $REBUILT
 grep -q "策略表被外部移除" /tmp/e2e-panel.log; ck "日志明确记录重建原因" $?
 
-# 8.6 clear 清除计数表与策略表，且退出码 0（iptables 链不存在不得报错）
+# 8.6 clear 清除计数表与策略表，且退出码 0（表本就不存在不得报错）
 policy_put '{"quota_enabled":false,"quota_limit_bytes":0,"ip_limit_enabled":false,"ip_limit_max":0}' >/dev/null 2>&1
 kill -TERM "$CORE_PID" 2>/dev/null; wait "$CORE_PID" 2>/dev/null
+# 防误伤前置：放一张「用户自己的」nft 表，clear 之后它必须完好无损
+nft add table inet e2e_user_guard 2>/dev/null
+nft add chain inet e2e_user_guard guard '{ type filter hook input priority 0; policy accept; }' 2>/dev/null
 env SBX_CONF="$PANEL_CONF" "$CORE" clear >/tmp/e2e-clear.log 2>&1
 ck "sbx-core clear 退出码 0" $?
 ! nft list tables 2>/dev/null | grep -q 'inet sbx_'; ck "clear 后无 sbx_* 表残留（含 sbx_policy）" $?
+nft list table inet e2e_user_guard >/dev/null 2>&1; ck "clear 未误伤用户自己的 nft 表" $?
+nft delete table inet e2e_user_guard 2>/dev/null
+# clear 全程不得触碰 iptables（nftables-only）
+! grep -qi 'iptables' /tmp/e2e-clear.log; ck "clear 输出无 iptables 痕迹" $?
 env SBX_CONF="$PANEL_CONF" "$CORE" serve >>/tmp/e2e-panel.log 2>&1 &
 CORE_PID=$!
 sleep 2
+
+# ---------------------------------------------------------------- 9. nftables-only 收口
+section "9. nftables-only 架构收口（v3.0.9）"
+# 9.1 后端字段恒为 nft（API schema 兼容，只读）
+curl -fsS -m 10 -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/api/summary" \
+  | jq -e '.backend=="nft"' >/dev/null 2>&1; ck "/api/summary backend==nft" $?
+# 9.2 老 panel.json（backend=iptables + ipt_script）升级后仍可运行且被清理
+cp "$PANEL_CONF" "$PANEL_CONF.e2e-bak"
+jq '. + {backend:"iptables", ipt_script:"'"$APP_DIR"'/iptables.sh"}' "$PANEL_CONF.e2e-bak" > "$PANEL_CONF"
+printf 'legacy-stub\n' > "$APP_DIR/iptables.sh"
+env SBX_CONF="$PANEL_CONF" "$CORE" config-migrate >/tmp/e2e-migrate.log 2>&1
+ck "config-migrate 退出码 0" $?
+jq -e 'has("backend")==false and has("ipt_script")==false' "$PANEL_CONF" >/dev/null 2>&1
+ck "迁移后废弃键已删除" $?
+TOK_AFTER=$(jq -r '.token' "$PANEL_CONF"); TOK_BEFORE=$(jq -r '.token' "$PANEL_CONF.e2e-bak")
+[[ "$TOK_AFTER" == "$TOK_BEFORE" && -n "$TOK_AFTER" ]]; ck "迁移保留 token" $?
+PORT_AFTER=$(jq -r '.port' "$PANEL_CONF"); PORT_BEFORE=$(jq -r '.port' "$PANEL_CONF.e2e-bak")
+[[ "$PORT_AFTER" == "$PORT_BEFORE" ]]; ck "迁移保留 port" $?
+[[ "$(stat -c %a "$PANEL_CONF")" == "600" ]]; ck "迁移后权限仍为 600" $?
+env SBX_CONF="$PANEL_CONF" "$CORE" config-migrate 2>&1 | grep -q '无需迁移'; ck "迁移幂等（二次无变更）" $?
+rm -f "$PANEL_CONF.e2e-bak" "$APP_DIR/iptables.sh"
+# 9.3 nft 不可用时 apply 明确失败（不降级、不谎报成功）
+mkdir -p /tmp/e2e-nonft
+env PATH=/tmp/e2e-nonft:/usr/bin:/bin SBX_CONF="$PANEL_CONF" "$CORE" apply >/tmp/e2e-nonft.log 2>&1
+[[ $? != 0 ]]; ck "nft 缺失时 apply 返回非 0" $?
+! grep -qi 'iptables' /tmp/e2e-nonft.log; ck "失败路径不提及 iptables 回退" $?
+rm -rf /tmp/e2e-nonft
+# 9.4 恢复计数规则（后续收尾断言依赖）
+env SBX_CONF="$PANEL_CONF" "$CORE" apply >/dev/null 2>&1; ck "真实 nft 下 apply 恢复成功" $?
 
 # ---------------------------------------------------------------- 收尾
 section "结果"

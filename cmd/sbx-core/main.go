@@ -108,6 +108,19 @@ func main() {
 		default:
 			usageFatal()
 		}
+	case "config-migrate":
+		// 一次性清理已废弃的配置键（backend / ipt_script）。
+		// nftables-only 收敛后这两个键不再有任何作用；升级路径调用此命令，
+		// 只删这两个键、其余配置（token/port/db/nodes_file/tz/自定义键）原样保留。
+		changed, err := config.MigrateLegacy()
+		if err != nil {
+			fail(err)
+		}
+		if changed {
+			fmt.Println("已清理废弃配置键: backend, ipt_script")
+		} else {
+			fmt.Println("配置无需迁移")
+		}
 	case "version", "--version", "-v":
 		fmt.Printf("sbx-core v%s\n", version.Version)
 	case "help", "-h", "--help":
@@ -154,6 +167,7 @@ func printUsage() {
   sbx-core config-get <key>               读配置项
   sbx-core config-set <key> <value>       写配置项
   sbx-core config-ensure-token            保证访问令牌存在
+  sbx-core config-migrate                 清理废弃配置键(backend/ipt_script)
   sbx-core node <sub-command> [...]       节点管理（add/edit/remove/...）
   sbx-core secret <hex|base64> <n>         生成随机 secret（crypto/rand）
   sbx-core version                        版本信息

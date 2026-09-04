@@ -7,8 +7,11 @@ import (
 	"github.com/k6nfmm7dbr-commits/sbx/internal/nodes"
 )
 
-// GenNFT 逐字节复刻旧 gen_nft：幂等建表（先 delete 再建）+ epoch/system/节点
-// 计数器 + sbx_in/sbx_out 两条 hook priority 300 的计数链（lo 直接 RETURN）。
+// GenNFT 生成 nftables 计数规则脚本：幂等建表（先 delete 再建）+ epoch/system/节点
+// 计数器 + sbx_in/sbx_out 两条 hook priority 300 的计数链（lo 直接 RETURN）
+// + sbx_ct conntrack 激活链。
+//
+// 这是 SBX 唯一的规则生成器（nftables-only 架构）。
 func GenNFT(list []nodes.Node, epoch uint64) string {
 	var b strings.Builder
 	w := b.WriteString
@@ -89,64 +92,4 @@ func GenNFT(list []nodes.Node, epoch uint64) string {
 
 	b.WriteString("}\n")
 	return b.String()
-}
-
-// GenIPTables 逐字节复刻旧 gen_iptables：自包含脚本（apply|clear），
-// 计数链插在 INPUT/OUTPUT 首位（与旧行为一致），epoch 以注释标记。
-func GenIPTables(list []nodes.Node, epoch uint64) string {
-	sh := []string{
-		"#!/bin/sh",
-		"# 由 sbx 自动生成，请勿手工编辑",
-		"# 用法: sh iptables.sh apply|clear",
-		"IN=" + IptChainIn,
-		"OUT=" + IptChainOut,
-		"",
-		"clear_one() {",
-		"  B=\"$1\"",
-		"  \"$B\" -w -D INPUT -j \"$IN\" 2>/dev/null",
-		"  \"$B\" -w -D OUTPUT -j \"$OUT\" 2>/dev/null",
-		"  \"$B\" -w -F \"$IN\" 2>/dev/null; \"$B\" -w -X \"$IN\" 2>/dev/null",
-		"  \"$B\" -w -F \"$OUT\" 2>/dev/null; \"$B\" -w -X \"$OUT\" 2>/dev/null",
-		"  # 「链本就不存在」对 clear 语义即成功；最后一条 -X 的 rc 不得透出，",
-		"  # 否则 nft-only 主机上 `sh iptables.sh clear` 永远非 0 退出。",
-		"  return 0",
-		"}",
-		"",
-		"apply_one() {",
-		"  B=\"$1\"",
-		"  command -v \"$B\" >/dev/null 2>&1 || return 0",
-		"  clear_one \"$B\"",
-		"  \"$B\" -w -N \"$IN\"  2>/dev/null",
-		"  \"$B\" -w -N \"$OUT\" 2>/dev/null",
-		"  \"$B\" -w -I INPUT 1 -j \"$IN\"",
-		"  \"$B\" -w -I OUTPUT 1 -j \"$OUT\"",
-		fmt.Sprintf("  \"$B\" -w -A \"$IN\"  -m comment --comment \"sbx:epoch:%d\"", epoch),
-		"  \"$B\" -w -A \"$IN\"  -i lo -j RETURN",
-		"  \"$B\" -w -A \"$OUT\" -o lo -j RETURN",
-		"  \"$B\" -w -A \"$IN\"  -m comment --comment \"sbx:sys:i\"",
-		"  \"$B\" -w -A \"$OUT\" -m comment --comment \"sbx:sys:o\"",
-	}
-	for _, n := range list {
-		for _, r := range nodes.ParsePorts(n) {
-			pspec := fmt.Sprintf("%d", r[0])
-			if r[0] != r[1] {
-				pspec = fmt.Sprintf("%d:%d", r[0], r[1])
-			}
-			for _, proto := range nodes.Protocols(n) {
-				id := nodes.IDString(n)
-				sh = append(sh,
-					fmt.Sprintf("  \"$B\" -w -A \"$IN\"  -p %s --dport %s -m comment --comment \"sbx:n%s:i\"", proto, pspec, id),
-					fmt.Sprintf("  \"$B\" -w -A \"$OUT\" -p %s --sport %s -m comment --comment \"sbx:n%s:o\"", proto, pspec, id))
-			}
-		}
-	}
-	sh = append(sh,
-		"}",
-		"",
-		"case \"${1:-apply}\" in",
-		"  apply) apply_one iptables; apply_one ip6tables ;;",
-		"  clear) clear_one iptables; clear_one ip6tables ;;",
-		"  *) echo \"用法: $0 apply|clear\" >&2; exit 2 ;;",
-		"esac")
-	return strings.Join(sh, "\n") + "\n"
 }

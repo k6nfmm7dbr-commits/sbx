@@ -27,6 +27,10 @@ import (
 // v3.0.3 fail-closed：panel.json 存在但损坏时拒绝启动（绝不带默认值上线）；
 // 非 loopback 监听 + 空 token 直接拒绝启动（原为仅告警后继续，存在
 // 无认证公网暴露风险）。
+//
+// v3.0.9 nftables-only：nft 不可用只告警不拒绝启动——面板与节点管理仍应可用
+// （用户需要能登录面板排查、改配置），但流量统计与策略 enforcement 会失败并
+// 在 policy_error / 采集错误里如实呈现。真正的硬失败在 apply 路径（见 Apply）。
 func Serve() int {
 	cfg, err := config.LoadStrict()
 	if err != nil {
@@ -53,6 +57,14 @@ func Serve() int {
 
 	collector := traffic.NewCollector(cfg, db)
 
+	// nftables 是硬依赖：不可用时明确告警（不拒绝启动，见函数注释），
+	// 让用户从日志一眼看到原因，而不是只看到「采集异常」。
+	if !firewall.NftAvailable(context.Background()) {
+		slog.Error("nftables 不可用（nft 命令缺失或无权限/内核不支持）: " +
+			"流量统计与配额/IP 限制将无法工作。SBX 只支持 nftables，不提供其它后端降级。" +
+			"请安装 nftables 后执行 sbx --apply-firewall")
+	}
+
 	// 策略服务（Quota / IP Limit）：与采集器并行运行，复用同一 SQLite。
 	//
 	// 脚本路径必须与计数规则 cfg.NftConf 分离：旧版把 cfg.NftConf 传进来，
@@ -63,9 +75,6 @@ func Serve() int {
 	// 节点文件路径必须与 panel.json 的 nodes_file 一致，否则自定义路径下
 	// 策略层会读回默认 appDir/nodes.json，与面板读的不是同一个文件。
 	policySvc.SetNodesFile(cfg.NodesFile)
-	// 策略 enforcement 只支持 nft；把「当前生效后端」告诉策略层，
-	// 使 iptables 主机上状态照常发布并明确提示不支持，而不是每秒失败一次。
-	policySvc.SetEnforceBackend(func() string { return firewall.EffectiveBackend(cfg.Backend) })
 
 	addr := net.JoinHostPort(cfg.Listen, fmt.Sprint(cfg.Port))
 

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/k6nfmm7dbr-commits/sbx/internal/config"
@@ -131,11 +132,13 @@ func Reset(scope string) error {
 	return nil
 }
 
-// Rules 生成计数规则文件（旧 cmd_rules），返回世代号。
+// Rules 生成 nftables 计数规则文件（旧 cmd_rules），返回世代号。
 // 配置与 nodes.json 均为严格读取：任一文件存在但损坏时拒绝生成，
 // 防止以空节点列表重建规则、清空 per-node counter 基线。
 // epoch 使用 UnixNano（v3.0.3 起弃用秒级）：同一秒内连续两次 Apply
 // 不再产生相同世代号，Collector 能可靠识别规则集换代。
+//
+// nftables-only：只生成 nft.conf，不再产出任何 iptables 脚本。
 func Rules() (uint64, error) {
 	cfg, err := config.LoadStrict()
 	if err != nil {
@@ -153,12 +156,8 @@ func Rules() (uint64, error) {
 		[]byte(firewall.GenNFT(list, epoch)), 0o644); err != nil {
 		return 0, err
 	}
-	if err := fsx.WriteFileAtomic(cfg.IptScript,
-		[]byte(firewall.GenIPTables(list, epoch)), 0o755); err != nil {
-		return 0, err
-	}
-	fmt.Printf("已生成计数规则: %s / %s (%d 个节点, 世代 %d)\n",
-		cfg.NftConf, cfg.IptScript, len(list), epoch)
+	fmt.Printf("已生成计数规则: %s (%d 个节点, 世代 %d)\n",
+		cfg.NftConf, len(list), epoch)
 	return epoch, nil
 }
 
@@ -191,41 +190,18 @@ func Apply() int {
 		slog.Error("规则生成失败", "err", err)
 		return 1
 	}
-	// 后端选择单一事实源：auto 下优先读持久化状态，无状态则探测；
-	// 真正应用成功后写回状态，Collector/Repair 据此读取同一后端。
-	backend := firewall.EffectiveBackend(cfg.Backend)
-	auto := firewall.IsAutoBackend(cfg.Backend)
-	if backend == "nft" {
-		rc, _, errMsg := firewall.RunCmd(context.Background(), "nft", "-f", cfg.NftConf)
-		if rc == 0 {
-			_ = firewall.WriteEffectiveBackend("nft")
-			fmt.Println("nftables 计数规则已生效")
-			return 0
-		}
-		if !auto {
-			// forced nft：失败即失败，绝不偷偷 fallback
-			slog.Error("nft 应用失败(backend=nft 强制), 已中止", "err", errMsg)
-			return 1
-		}
-		// auto：nft 失败回退 iptables
-		slog.Warn("nft 应用失败, 回退 iptables", "err", errMsg)
-		rc, _, errMsg = firewall.RunCmd(context.Background(), "sh", cfg.IptScript, "apply")
-		if rc != 0 {
-			slog.Error("iptables 应用失败", "err", errMsg)
-			return 1
-		}
-		_ = firewall.WriteEffectiveBackend("iptables")
-		fmt.Println("iptables 计数规则已生效")
-		return 0
-	}
-	// backend == iptables
-	rc, _, errMsg := firewall.RunCmd(context.Background(), "sh", cfg.IptScript, "apply")
+	// nftables-only：唯一后端。应用失败即失败，绝不降级到其它后端。
+	rc, _, errMsg := firewall.RunCmd(context.Background(), "nft", "-f", cfg.NftConf)
 	if rc != 0 {
-		slog.Error("iptables 应用失败", "err", errMsg)
+		detail := strings.TrimSpace(errMsg)
+		if rc == 127 {
+			detail = "未找到 nft 命令，请先安装 nftables"
+		}
+		slog.Error("nft 计数规则应用失败, 已中止(SBX 依赖 nftables, 不提供其它后端降级)",
+			"rc", rc, "err", detail)
 		return 1
 	}
-	_ = firewall.WriteEffectiveBackend("iptables")
-	fmt.Println("iptables 计数规则已生效")
+	fmt.Println("nftables 计数规则已生效")
 	return 0
 }
 
@@ -255,9 +231,13 @@ func finalSampleForRebuild(ctx context.Context, cfg *config.Config) error {
 // Clear 移除内核计数规则，保留历史统计（旧 cmd_clear）。
 //
 // v3.0.x 数据保护：与 Apply 同一原则——最终采样失败时禁止清除计数器。
-// 若 Tick 失败仍删除 nftables/iptables 计数器，最后一次采样到删除之间
-// 的流量将永久丢失。仅明确的 LookupError（规则本就不存在/首次运行）放行。
+// 若 Tick 失败仍删除计数器，最后一次采样到删除之间的流量将永久丢失。
+// 仅明确的 LookupError（规则本就不存在/首次运行）放行。
 // systemd ExecStop 走同一路径，同样受保护。
+//
+// 安全边界（必须保持）：只删除 SBX 自己创建的两张表
+// （inet sbx_traffic / inet sbx_policy），绝不 flush ruleset、
+// 绝不触碰用户已有的其它 nftables 表或链。
 func Clear() int {
 	cfg, err := config.LoadStrict()
 	if err != nil {
@@ -282,25 +262,16 @@ func Clear() int {
 		return 1
 	}
 	if firewall.Which("nft") {
+		// 逐表删除，只针对 SBX 自己的表：
+		//   sbx_traffic — 流量计数；sbx_policy — Quota/IP Limit enforcement。
 		// 表本就不存在 = 成功；其它失败（权限/语法）必须如实报错。
-		rc, _, errMsg := firewall.RunCmd(context.Background(), "nft", "delete", "table", "inet", firewall.NFTTable)
-		if rc != 0 && !firewall.IsMissingMsg(errMsg) {
-			slog.Error("nft 计数表删除失败", "err", errMsg)
-			return 1
-		}
-		// 策略 enforcement 表（sbx_policy）同样清理。v3.0.7 之前这里只删计数表，
-		// 卸载/清除后 quota/IP 限制的 drop 规则会残留内核直到重启，被限端口继续被拦。
-		rc, _, errMsg = firewall.RunCmd(context.Background(), "nft", "delete", "table", "inet", policy.PolicyTable)
-		if rc != 0 && !firewall.IsMissingMsg(errMsg) {
-			slog.Error("nft 策略表删除失败", "err", errMsg)
-			return 1
-		}
-	}
-	if _, err := os.Stat(cfg.IptScript); err == nil {
-		rc, _, errMsg := firewall.RunCmd(context.Background(), "sh", cfg.IptScript, "clear")
-		if rc != 0 {
-			slog.Error("iptables 计数链清除失败", "err", errMsg)
-			return 1
+		for _, table := range []string{firewall.NFTTable, policy.PolicyTable} {
+			rc, _, errMsg := firewall.RunCmd(context.Background(),
+				"nft", "delete", "table", "inet", table)
+			if rc != 0 && !firewall.IsMissingMsg(errMsg) {
+				slog.Error("nft 表删除失败", "table", table, "err", strings.TrimSpace(errMsg))
+				return 1
+			}
 		}
 	}
 	fmt.Println("计数规则已移除（历史统计数据保留）")
@@ -310,7 +281,7 @@ func Clear() int {
 // SelfTest 验证计数器存在且在增长（旧 cmd_selftest）。
 func SelfTest() int {
 	cfg := config.Load()
-	b := firewall.New(cfg.Backend, cfg.NftConf, cfg.IptScript)
+	b := firewall.NewNft(cfg.NftConf)
 	fmt.Println("后端:", b.Name())
 
 	ctx := context.Background()

@@ -19,7 +19,7 @@ type step struct {
 	err  error
 }
 
-func (b *scriptBackend) Name() string { return "iptables" }
+func (b *scriptBackend) Name() string { return "nft" }
 func (b *scriptBackend) Read(context.Context) (firewall.Snapshot, error) {
 	if b.i >= len(b.steps) {
 		return nil, &firewall.ErrLookup{Msg: "脚本耗尽"}

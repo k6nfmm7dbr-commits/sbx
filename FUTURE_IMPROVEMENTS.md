@@ -17,8 +17,10 @@
 - `google/nftables` 对 named counter 的批量读取 API 与 `nft -j` 输出存在
   细微口径差异需要逐一验证（如 epoch counter 的出现顺序）。
 
-重启该工作的入口：给 `firewall.Backend` 增加第二个实现 `NftNetlink`，
-用构建标签或配置项灰度切换；先在 shadow 模式双读比对一个版本周期。
+重启该工作的入口：给 `firewall.Backend` 增加第二个 **nftables** 实现 `NftNetlink`
+（不是别的 netfilter 后端——SBX 是 nftables-only），用构建标签灰度切换；
+先在 shadow 模式双读比对一个版本周期。注意 `firewall.Backend` interface 现在只为
+「测试注入 fake backend」和这类同后端不同实现保留，绝不用于运行时后端选择。
 
 ## 2. armv6 的说明
 
@@ -92,6 +94,11 @@ reconcile 的 notify 唤醒 + 5s 保险 tick，不再每秒全量快照。）
 
 ## 11. v3.0.6 代码复审修复（全部已落实）
 
+> **历史语境**：本节（及 §12）记录 v3.0.6 / v3.0.7 时期的修复。当时 SBX 仍是
+> 「nftables 优先 + iptables 回退」的双后端架构，因此文中出现的 iptables 相关
+> 问题描述属于**当时的行为**。自 v3.0.9 起 SBX 为 nftables-only，iptables 后端
+> 已完全移除，这些条目仅作历史记录，不描述现行能力（见 §14）。
+
 一轮全仓复审发现并修复的问题，均带回归测试并在真机（Debian 12）验证：
 
 - **策略层并发崩溃（P0）**：`reconcile` 只持 `runMu` 就改 `ipStates` 及其内部 map，
@@ -138,6 +145,9 @@ reconcile 的 notify 唤醒 + 5s 保险 tick，不再每秒全量快照。）
 - **死代码**：`nft.go` 的 `portRanges`、`ipslot.go` 中 `lastActive` 未使用的 `ip` 参数。
 
 ## 12. v3.0.7 复审修复（全部已落实）
+
+> **历史语境**：同 §11——本节描述双后端时期（v3.0.7）的行为，其中 iptables
+> 相关条目已随 v3.0.9 的 nftables-only 收敛失效。
 
 第三轮复审（在 §11 之后）发现的残余问题，均带回归测试：
 
@@ -219,5 +229,55 @@ conntrack 条目。这批机器很干净——没有任何防火墙规则，而 
 没有（SSH/DNS 自身就会产生条目）。而「conntrack 正常但当前无客户端连接」时表里仍有
 其它流（`Entries > 0`），仍走 conntrack 口径，原有的「不复活已死 IP」语义完整保留。
 
+## 14. v3.0.9 架构收敛：nftables-only（iptables 后端彻底移除）
 
+SBX 从「nftables 优先 + iptables 回退」的双后端项目收敛为 **nftables-only**。
+自本版本起，netfilter / 流量统计 / 策略执行的唯一后端是 nftables；不支持
+iptables 与 ip6tables，不存在 `backend=auto|nft|iptables` 运行时选择，
+也不存在任何形式的降级路径。
 
+**删除的实现**：`internal/firewall/iptables.go`（`Iptables` 后端：自定义链读取、
+双栈聚合、partial snapshot 保护、Repair）、`rules.go` 的 `GenIPTables`
+（`SBX_IN` / `SBX_OUT` 链脚本生成）、`backend.go` 的 `New` / `DetectBackend` /
+`probeBackend` / `probeBackendForced` / `normalizeBackend`、`state.go` 的
+effective-backend 状态文件机制（`/run/sbx/effective-backend`，双后端下用于
+「Apply 后端 == Collector 后端」的单一事实源，单后端后失去意义）、
+`policy` 的 `ErrEnforceUnsupported` / `SetEnforceBackend`，以及对应测试与
+`testdata/gen_iptables.golden`。
+
+**保留的抽象**：`firewall.Backend` interface 仍在，但只服务两件事——Collector
+单测注入 fake backend 做故障注入，以及未来同后端不同实现（见 §1 的 netlink 直读）。
+生产代码唯一构造器是 `firewall.NewNft(cfg.NftConf)`。`BackendName` 常量固定为
+`"nft"`，`/api/summary` 的 `backend` 字段维持 schema 兼容（只读上报，不再可配）。
+
+**fail-closed 行为**：安装/升级时确认 nftables 可用（`nft` 在 PATH 且
+`nft list tables` 成功——命令存在但无 netlink 权限/内核不支持同样算不可用），
+装不上即中止；`sbx-core apply` 的 `nft -f` 失败直接返回非 0（旧版会 fallback
+到 `sh iptables.sh apply` 并谎报成功）；策略层 nft 应用失败上抛并写入
+`policy_error`，同时状态照常发布（面板仍显示真实用量）。
+
+**升级兼容**（老用户数据一律不动：nodes.json / traffic.db / token / port / tz）：
+
+- `panel.json` 的废弃键 `backend`（含值 `iptables`）与 `ipt_script` 被**忽略**而
+  非拒绝——`Validate` 不再校验 backend，老配置照常启动；
+- `sbx-core config-migrate`（升级路径显式调用，也由 `config-set` / `EnsureToken`
+  顺带完成）只删这两个键，走 `fsx.WriteFileAtomic`（临时文件 + fsync + 原子
+  rename，0600），其余键含用户自定义键原样保留；幂等，损坏配置拒绝迁移；
+- 安装器 `cleanup_legacy_backend` 删除 `$APP_DIR/iptables.sh`，并 best-effort
+  删除旧版自建的 `SBX_IN` / `SBX_OUT` 链及其 INPUT/OUTPUT 跳转。**这是清理旧版
+  残留的一次性 migration，不是重新支持 iptables**；绝不 flush INPUT/OUTPUT/filter、
+  不改默认 policy、不触碰其它程序或用户自己的链；
+- Collector 的 partial-snapshot 守卫对老库里 `sbx:n1:i@v4` 形态的历史基线键
+  豁免（新快照里必然缺失，若计入守卫会导致升级后每轮拒绝提交、统计停摆），
+  首次成功提交时随 `counter_state` 整表重写自然清除。
+
+**capability 收敛**：`sbx-panel.service` 去掉 `CAP_NET_RAW`。它是 v3.0.6 为
+iptables-legacy（AF_INET SOCK_RAW）加的；nft 走 AF_NETLINK/NETLINK_NETFILTER
+只需 `CAP_NET_ADMIN`，连接数与 conntrack 判活读 `/proc` 不需要 capability。
+
+**防误伤（不可回归的强制要求）**：SBX 只管理自己创建的
+`table inet sbx_traffic` 与 `table inet sbx_policy`。安装、升级、清除、卸载
+全程不执行 `nft flush ruleset`、不清空系统 INPUT/OUTPUT、不修改默认 policy。
+回归测试锁定：`GenNFT` 输出不含 `flush ruleset` 且 `delete` 只针对 SBX 自己的表
+（`internal/firewall`），`Clear` 只发出 `nft delete table inet sbx_{traffic,policy}`
+且不出现 flush/INPUT/OUTPUT/-F/-X 与任何 iptables 调用（`internal/service`）。

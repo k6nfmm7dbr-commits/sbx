@@ -2,7 +2,6 @@ package policy
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -206,9 +205,9 @@ func (s *Service) reconcile(ctx context.Context) error {
 	}
 
 	// 生成并应用 nft 规则（只影响达限节点）。
-	// enforceErr 不阻断状态发布：iptables-only 主机上策略无法执行，但面板
-	// 必须照常显示真实用量，并把「不支持」如实呈现，而不是每秒失败一次
-	// 导致 states 永远为空、UI 全显示「不限」。
+	// enforceErr 不阻断状态发布：nft 应用暂时失败（权限/瞬时错误）时面板
+	// 必须照常显示真实用量，并把错误如实呈现（policy_error），
+	// 而不是让 states 永远为空、UI 全显示「不限」。
 	enforceErr := s.applyEnforcement(ctx, quotaBlocked, ipBlocked, nodeList)
 
 	s.mu.Lock()
@@ -225,15 +224,6 @@ func (s *Service) reconcile(ctx context.Context) error {
 	s.mu.Unlock()
 
 	s.signalNotify()
-
-	// ErrEnforceUnsupported 不上抛：它是「后端能力缺失」的稳态提示，
-	// 已经经 lastErr 完整呈现给面板；上抛会让 Run 循环每秒刷一条 WARN，
-	// 且让「保存策略」类 API 在配置已落库、状态已发布的情况下仍返回 500。
-	// 其余 enforcement 错误（nft 执行失败等瞬态故障）继续上抛，
-	// 调用方需要知道本轮应用没有成功。
-	if errors.Is(enforceErr, ErrEnforceUnsupported) {
-		return nil
-	}
 	return enforceErr
 }
 

@@ -50,7 +50,7 @@ func TestTruncDisp(t *testing.T) {
 
 func mkSummary(nodes []traffic.SummaryNode, today, total traffic.Counters) *traffic.Summary {
 	return &traffic.Summary{
-		Backend: "nftables",
+		Backend: "nft",
 		Day:     "2026-08-25",
 		TZ:      "Asia/Shanghai",
 		Nodes:   nodes,

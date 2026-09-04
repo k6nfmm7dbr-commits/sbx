@@ -20,7 +20,7 @@ PANEL_CONF="$TMPD/panel.json"
 
 cat > "$CORE_BIN" <<EOF
 #!/usr/bin/env bash
-# \$1 = 子命令 (apply / config-ensure-token)
+# \$1 = 子命令 (apply / config-ensure-token / config-migrate)
 case "\$1" in
   apply)
     if [[ -e "$TMPD/fail-apply" ]]; then echo "simulated apply failure" >&2; exit 1; fi
@@ -28,6 +28,11 @@ case "\$1" in
   config-ensure-token)
     if [[ -e "$TMPD/fail-ensure" ]]; then echo "simulated ensure failure" >&2; exit 1; fi
     echo tok ;;
+  config-migrate)
+    # nftables-only 迁移（清理废弃键 backend/ipt_script）
+    echo "config-migrate" >> "$TMPD/core.calls"
+    if [[ -e "$TMPD/fail-migrate" ]]; then echo "simulated migrate failure" >&2; exit 1; fi
+    echo "配置无需迁移" ;;
   *) echo "unexpected: \$*" >&2; exit 70 ;;
 esac
 EOF
@@ -68,6 +73,7 @@ touch "$TMPD/fail-ensure"
 cat >> "$TMPD/ensure.sh" <<'STUBS'
 err()  { echo "[err] $*" >&2; }
 info() { echo "[info] $*"; }
+warn() { echo "[warn] $*" >&2; }
 STUBS
 OUT=$( { source "$TMPD/ensure.sh"; ensure_panel_conf; } 2>&1 ); RC=$?
 ck "损坏 panel.json + ensure 失败 → 非零退出" 1 "$([ "$RC" != 0 ] && echo 1 || echo 0)"
@@ -87,6 +93,106 @@ rm -f "$PANEL_CONF"
 # 生成路径依赖 rand_hex/pick_port/cat 等，这里仅验证“文件不存在时不调用 ensure-token”
 OUT=$( { source "$TMPD/ensure.sh"; rand_hex() { echo deadbeef; }; pick_port() { echo 18345; }; APP_DIR="$TMPD/app"; NODES_JSON="$PANEL_CONF.nodes"; mkdir -p "$APP_DIR"; ensure_panel_conf; } 2>&1 ); RC=$?
 [[ -f "$PANEL_CONF" ]]; ck "配置不存在时按原逻辑生成新配置" 0 $?
+
+# ---- nftables-only（v3.0.9）：生成的 panel.json 不得含 backend / ipt_script ----
+rm -f "$PANEL_CONF"
+OUT=$( { source "$TMPD/ensure.sh"; rand_hex() { echo deadbeef; }; pick_port() { echo 18345; }; APP_DIR="$TMPD/app"; WEB_DIR="$TMPD/app/web"; NODES_JSON="$PANEL_CONF.nodes"; mkdir -p "$APP_DIR"; ensure_panel_conf; } 2>&1 )
+grep -q '"nft_conf"' "$PANEL_CONF"; ck "新 panel.json 含 nft_conf" 0 $?
+grep -q '"ipt_script"' "$PANEL_CONF"; [[ $? -ne 0 ]]; ck "新 panel.json 不含 ipt_script" 0 $?
+grep -q '"backend"' "$PANEL_CONF"; [[ $? -ne 0 ]]; ck "新 panel.json 不含 backend" 0 $?
+# 其余必需字段仍在（不能因为删键把配置写坏）
+for k in db nodes_file listen port token interval tz; do
+  grep -q "\"$k\"" "$PANEL_CONF"; ck "新 panel.json 保留字段 $k" 0 $?
+done
+# 已存在的配置：ensure_panel_conf 必须调用 config-migrate 摘掉废弃键
+: > "$TMPD/core.calls"
+printf '{"token":"t","backend":"iptables","ipt_script":"/etc/sbx/iptables.sh"}' > "$PANEL_CONF"
+OUT=$( { source "$TMPD/ensure.sh"; ensure_panel_conf; } 2>&1 ); RC=$?
+ck "已存在配置 → ensure 成功" 0 "$RC"
+grep -qx 'config-migrate' "$TMPD/core.calls"; ck "已存在配置时调用 config-migrate 清理废弃键" 0 $?
+# 迁移失败只告警，不阻断（废弃键存在不影响新版运行）
+touch "$TMPD/fail-migrate"
+OUT=$( { source "$TMPD/ensure.sh"; ensure_panel_conf; } 2>&1 ); RC=$?
+ck "config-migrate 失败仍返回 0（只告警）" 0 "$RC"
+printf '%s' "$OUT" | grep -q '\[warn\]'; ck "config-migrate 失败输出告警" 0 $?
+rm -f "$TMPD/fail-migrate"
+
+# ---- nftables-only：install_deps 无 iptables fallback，且 nft 缺失即 die ----
+sed -n '/^install_deps()/,/^}/p' "$TPL" > "$TMPD/deps.sh"
+grep -q 'iptables' "$TMPD/deps.sh"; [[ $? -ne 0 ]]; ck "install_deps 不再提及 iptables" 0 $?
+grep -q 'pkg_install nftables' "$TMPD/deps.sh"; ck "install_deps 安装 nftables" 0 $?
+grep -q 'nft list tables' "$TMPD/deps.sh"; ck "install_deps 探测 nft 是否真的可用" 0 $?
+run_deps() { # $1 = 是否有 nft (yes/no)，$2 = nft list tables 是否成功 (yes/no)
+  set +u
+  local havenft="$1" listok="$2"
+  local bin="$TMPD/depbin"; rm -rf "$bin"; mkdir -p "$bin"
+  if [[ "$havenft" == yes ]]; then
+    if [[ "$listok" == yes ]]; then printf '#!/bin/sh\nexit 0\n' > "$bin/nft"
+    else printf '#!/bin/sh\nexit 1\n' > "$bin/nft"; fi
+    chmod +x "$bin/nft"
+  fi
+  # 必要工具桩（避免真的去装包）
+  for t in curl tar openssl jq; do printf '#!/bin/sh\nexit 0\n' > "$bin/$t"; chmod +x "$bin/$t"; done
+  PATH="$bin:/usr/bin:/bin"
+  PKG="none"
+  pkg_install() { return 1; }          # 装不上（模拟无源/无网）
+  ensure_conntrack_acct() { return 0; }
+  info() { :; }; ok() { :; }; warn() { echo "[warn] $*" >&2; }
+  die() { echo "[die] $*" >&2; exit 1; }
+  source "$TMPD/deps.sh"
+  install_deps
+}
+OUT=$( run_deps yes yes 2>&1 ); RC=$?
+ck "nft 可用 → install_deps 成功" 0 "$([ "$RC" == 0 ] && echo 0 || echo 1)"
+OUT=$( run_deps no no 2>&1 ); RC=$?
+ck "nft 缺失且装不上 → 非 0 中止" 1 "$([ "$RC" != 0 ] && echo 1 || echo 0)"
+printf '%s' "$OUT" | grep -q 'nftables'; ck "缺失时错误信息点明 nftables" 0 $?
+printf '%s' "$OUT" | grep -qi 'iptables'; [[ $? -ne 0 ]]; ck "缺失时不得提及 iptables 回退" 0 $?
+OUT=$( run_deps yes no 2>&1 ); RC=$?
+ck "nft 存在但不可用 → 非 0 中止（不降级）" 1 "$([ "$RC" != 0 ] && echo 1 || echo 0)"
+
+# ---- legacy cleanup：只删 SBX 自己的链，绝不动系统链 ----
+sed -n '/^# >>> legacy-cleanup/,/^# <<< legacy-cleanup/p' "$TPL" > "$TMPD/legacy.sh"
+grep -q 'cleanup_legacy_backend()' "$TMPD/legacy.sh" || { echo "未找到 cleanup_legacy_backend（标记被破坏？）"; exit 1; }
+# 静态检查只看可执行行（注释里出现「绝不 flush …」这类说明文字属正常）
+sed 's/#.*$//' "$TMPD/legacy.sh" > "$TMPD/legacy.code"
+for bad in 'flush' '\-F INPUT' '\-F OUTPUT' '\-P INPUT' '\-P OUTPUT' 'nft delete table' ; do
+  grep -q "$bad" "$TMPD/legacy.code"; [[ $? -ne 0 ]]; ck "legacy cleanup 不含危险操作 [$bad]" 0 $?
+done
+run_legacy() {
+  set +u
+  local bin="$TMPD/lbin"; rm -rf "$bin"; mkdir -p "$bin"
+  IPT_LOG="$TMPD/ipt.calls"; : > "$IPT_LOG"
+  # iptables 桩：-S SBX_IN/SBX_OUT 返回 0（链存在），其余记录并返回 0
+  cat > "$bin/iptables" <<EOF
+#!/bin/sh
+echo "iptables \$*" >> "$IPT_LOG"
+exit 0
+EOF
+  chmod +x "$bin/iptables"
+  # 只装 v4 桩：v6 命令缺失必须被安全跳过
+  PATH="$bin:/usr/bin:/bin"
+  APP_DIR="$TMPD/legacyapp"; mkdir -p "$APP_DIR"; printf 'old' > "$APP_DIR/iptables.sh"
+  info() { :; }; warn() { echo "[warn] $*" >&2; }
+  source "$TMPD/legacy.sh"
+  cleanup_legacy_backend
+}
+OUT=$( run_legacy 2>&1 ); RC=$?
+ck "legacy cleanup 返回 0（best-effort）" 0 "$([ "$RC" == 0 ] && echo 0 || echo 1)"
+[[ ! -f "$TMPD/legacyapp/iptables.sh" ]]; ck "删除旧版 \$APP_DIR/iptables.sh" 0 $?
+grep -q -- '-X SBX_IN' "$TMPD/ipt.calls"; ck "删除旧链 SBX_IN" 0 $?
+grep -q -- '-X SBX_OUT' "$TMPD/ipt.calls"; ck "删除旧链 SBX_OUT" 0 $?
+grep -q -- '-D INPUT -j SBX_IN' "$TMPD/ipt.calls"; ck "摘除 INPUT 的 SBX_IN 跳转" 0 $?
+grep -q -- '-D OUTPUT -j SBX_OUT' "$TMPD/ipt.calls"; ck "摘除 OUTPUT 的 SBX_OUT 跳转" 0 $?
+# 只允许 -F/-X 作用于 SBX_IN/SBX_OUT；绝不能出现裸 -F INPUT / -F OUTPUT / -P
+BAD=0
+while read -r line; do
+  case "$line" in
+    *"-F INPUT"*|*"-F OUTPUT"*|*"-X INPUT"*|*"-X OUTPUT"*|*"-P "*|*flush*) BAD=1 ;;
+  esac
+done < "$TMPD/ipt.calls"
+ck "legacy cleanup 未触碰系统链/默认 policy" 0 "$BAD"
+grep -c 'ip6tables' "$TMPD/ipt.calls" | grep -qx 0; ck "ip6tables 缺失时安全跳过" 0 $?
 
 # ---- 升级路径：upd-bak 恢复失败必须显式报错且返回非 0（不得提示已恢复成功） ----
 # 提取 apply_update 内的迁移回滚块做行为级验证：模拟 cp 失败（upd-bak 不存在）

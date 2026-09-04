@@ -122,9 +122,8 @@ func decodeNodesFile(data []byte) ([]Node, bool, error) {
 // LoadPanelNodes 对齐 panel.load_nodes：容忍 {"nodes":[...]} 包装，
 // 且只保留含 "id" 字段的对象。
 //
-// 注意：宽松读取仅限纯展示场景。所有会生成/覆盖防火墙规则
-// （nftables / iptables）或改写 counter_state / epoch 的路径必须使用
-// LoadPanelNodesStrict。
+// 注意：宽松读取仅限纯展示场景。所有会生成/覆盖 nftables 规则或改写
+// counter_state / epoch 的路径必须使用 LoadPanelNodesStrict。
 func LoadPanelNodes(path string) []Node {
 	data, err := os.ReadFile(path)
 	if err != nil {

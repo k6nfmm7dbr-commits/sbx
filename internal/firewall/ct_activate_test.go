@@ -12,7 +12,7 @@ func TestCTActivateCounterNotParsedAsTraffic(t *testing.T) {
 	if _, ok := ParseEpochName(CTActivateCounter); ok {
 		t.Errorf("%s 不应被识别为 epoch 标记", CTActivateCounter)
 	}
-	// 带 @family 后缀（iptables 形态）同样不得命中
+	// 带 @family 后缀（历史 counter_state 里的旧键形态）同样不得命中
 	if _, _, ok := ParseCounterName(CTActivateCounter + "@v4"); ok {
 		t.Errorf("%s@v4 不应被识别为流量计数器", CTActivateCounter)
 	}

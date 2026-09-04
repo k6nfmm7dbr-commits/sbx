@@ -40,15 +40,35 @@ func defaultConf() map[string]any {
 		"db":         filepath.Join(dir, "traffic.db"),
 		"nodes_file": filepath.Join(dir, "nodes.json"),
 		"nft_conf":   filepath.Join(dir, "nft.conf"),
-		"ipt_script": filepath.Join(dir, "iptables.sh"),
 		"web_root":   filepath.Join(dir, "web"),
-		"backend":    "auto",
 		"listen":     "0.0.0.0",
 		"port":       json.Number("8080"),
 		"token":      "",
 		"interval":   json.Number("2"),
 		"tz":         "Asia/Shanghai",
 	}
+}
+
+// legacyKeys 是已废弃的历史配置键（v3.0.9 nftables-only 收敛后移除）。
+// 语义：SBX 曾支持 nftables/iptables 双后端，用 backend 选择、ipt_script
+// 指向生成的 iptables 脚本。现在只有 nftables，这两个键不再有任何作用。
+//
+// 处理策略（不能因为存在旧键就拒绝读取，那会让老用户升级即炸）：
+//   - 读取：忽略其值，不参与任何决策（后端恒为 nftables）；
+//   - 写回（config-set / EnsureToken）：顺带删除这两个键，一次性完成迁移，
+//     其余用户配置（token/port/db/nodes_file/tz/未知自定义键）一律原样保留。
+var legacyKeys = []string{"backend", "ipt_script"}
+
+// dropLegacyKeys 从 raw 配置里剔除废弃键，返回是否发生了删除。
+func dropLegacyKeys(raw map[string]any) bool {
+	changed := false
+	for _, k := range legacyKeys {
+		if _, ok := raw[k]; ok {
+			delete(raw, k)
+			changed = true
+		}
+	}
+	return changed
 }
 
 // Config 是合并后的运行配置。raw 保持原始键值（含未知键），供 config-get / config-set。
@@ -58,9 +78,7 @@ type Config struct {
 	DB           string
 	NodesFile    string
 	NftConf      string
-	IptScript    string
 	WebRoot      string // 兼容保留：Go 版前端内嵌于二进制，此键不再被读取
-	Backend      string
 	Listen       string
 	Port         int
 	Token        string
@@ -150,14 +168,12 @@ func decodeConfig(data []byte) (map[string]any, error) {
 // Validate 语义校验：拒绝明确会导致服务异常/不安全的配置。
 // listen 与 timezone 不做强校验——空 listen 属「未配置」（服务层已按公网拒绝
 // 空 token），timezone 由 traffic.Location 宽容兜底（UTC+8 等也合法）。
+//
+// 注意：不校验 backend——nftables-only 架构下它已不是配置项。老 panel.json 里
+// 残留的 backend 值（含 "iptables"）一律忽略，绝不因此拒绝启动。
 func (c *Config) Validate() error {
 	if c.Port < 1 || c.Port > 65535 {
 		return fmt.Errorf("port 必须在 1-65535: %d", c.Port)
-	}
-	switch c.Backend {
-	case "auto", "nft", "iptables":
-	default:
-		return fmt.Errorf("backend 非法: %q", c.Backend)
 	}
 	if c.Interval < 1 {
 		return fmt.Errorf("interval 必须 > 0")
@@ -168,8 +184,8 @@ func (c *Config) Validate() error {
 	if c.DB == "" || c.NodesFile == "" {
 		return fmt.Errorf("db/nodes 路径不能为空")
 	}
-	if c.NftConf == "" || c.IptScript == "" {
-		return fmt.Errorf("防火墙脚本路径不能为空")
+	if c.NftConf == "" {
+		return fmt.Errorf("nft 规则文件路径不能为空")
 	}
 	return nil
 }
@@ -178,16 +194,7 @@ func (c *Config) normalize() {
 	c.DB = c.Str("db")
 	c.NodesFile = c.Str("nodes_file")
 	c.NftConf = c.Str("nft_conf")
-	c.IptScript = c.Str("ipt_script")
 	c.WebRoot = c.Str("web_root")
-	c.Backend = strings.ToLower(c.Str("backend"))
-	// 归一化常见缩写，与 firewall 的 normalizeBackend 口径一致。
-	switch c.Backend {
-	case "nftables":
-		c.Backend = "nft"
-	case "ipt":
-		c.Backend = "iptables"
-	}
 	c.Listen = c.Str("listen")
 	c.Port = int(c.Int("port"))
 	c.Token = strings.TrimSpace(c.Str("token"))
@@ -270,6 +277,10 @@ func (c *Config) Int(key string) int64 {
 // 并把合并后的完整配置原子写回 CONF_PATH，权限 600。
 // 读取阶段使用 LoadStrict：panel.json 存在但损坏时拒绝修改并原样返回错误，
 // 绝不允许“损坏→回退 defaults→把默认值写回正式文件”的覆盖路径。
+//
+// 顺带完成 nftables-only 迁移：写回时剔除已废弃的 backend / ipt_script。
+// 只删这两个 SBX 自己废弃的键——token/port/db/nodes_file/tz 以及用户自定义的
+// 未知键一律原样保留，且走 fsx 的「临时文件 → fsync → 原子 rename」。
 func Set(key, value string) error {
 	c, err := LoadStrict()
 	if err != nil {
@@ -281,6 +292,9 @@ func Set(key, value string) error {
 		v = json.Number(strconv.FormatInt(i, 10))
 	}
 	c.raw[key] = v
+	if dropLegacyKeys(c.raw) {
+		slog.Info("已移除废弃配置键(nftables-only)", "keys", legacyKeys)
+	}
 	c.normalize()
 	data, err := fsx.MarshalIndent(c.raw)
 	if err != nil {
@@ -288,6 +302,37 @@ func Set(key, value string) error {
 	}
 	data = append(data, '\n')
 	return fsx.WriteFileAtomic(ConfPath(), data, 0o600)
+}
+
+// MigrateLegacy 一次性清理已废弃的配置键（backend / ipt_script）。
+// 幂等：没有旧键时不写盘、返回 (false, nil)。
+//
+// 由升级路径显式调用（sbx-core config-migrate）。刻意与 Set 分开：
+// 升级时不一定需要修改任何配置值，只想把废弃键摘掉。
+//
+// 安全性：只删 legacyKeys 里的键，其余内容（含未知自定义键）原样保留；
+// 写回走 fsx.WriteFileAtomic（临时文件 + fsync + 原子 rename），权限 600。
+// panel.json 不存在时视为无需迁移；损坏时返回错误、绝不覆盖。
+func MigrateLegacy() (bool, error) {
+	if _, err := os.Stat(ConfPath()); os.IsNotExist(err) {
+		return false, nil
+	}
+	c, err := LoadStrict()
+	if err != nil {
+		return false, fmt.Errorf("拒绝迁移配置: %w", err)
+	}
+	if !dropLegacyKeys(c.raw) {
+		return false, nil
+	}
+	data, err := fsx.MarshalIndent(c.raw)
+	if err != nil {
+		return false, err
+	}
+	data = append(data, '\n')
+	if err := fsx.WriteFileAtomic(ConfPath(), data, 0o600); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // EnsureToken 保证 token 非空；为空则生成 32 位十六进制随机令牌并写回。
@@ -309,6 +354,7 @@ func EnsureToken() (string, error) {
 	}
 	tok = hex.EncodeToString(b)
 	c.raw["token"] = tok
+	dropLegacyKeys(c.raw) // 顺带完成 nftables-only 迁移
 	data, err := fsx.MarshalIndent(c.raw)
 	if err != nil {
 		return "", err

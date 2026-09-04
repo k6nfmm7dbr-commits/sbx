@@ -108,7 +108,8 @@ func (s *Server) attachPolicyToSummary(sum *traffic.Summary) {
 	if s.policy == nil {
 		return
 	}
-	// enforcement 错误（如后端为 iptables 时阻断不执行）必须透出给面板。
+	// enforcement 错误（如 nft 应用失败）必须透出给面板，
+	// 否则用户会误以为配额/IP 限制已在生效。
 	sum.PolicyError = s.policy.LastError()
 	states, _ := s.policy.Snapshot()
 	for i := range sum.Nodes {

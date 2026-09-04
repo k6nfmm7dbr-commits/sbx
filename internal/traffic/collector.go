@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +20,17 @@ import (
 
 // sampleKeepSeconds 实时速率窗口（旧 SAMPLE_KEEP_SECONDS）。
 const sampleKeepSeconds = int64(120)
+
+// legacyBaselineKey 判断 counter_state 里的键是否是升级前旧后端写入的历史形态
+// （`sbx:n1:i@v4` —— 冒号分隔 + @family 后缀）。
+//
+// 为什么需要它：nftables-only 之后新快照只有 `sbx_n1_i` 这种形态，老库里的
+// 历史键必然「在快照中缺失」。若把它们计入 partial-snapshot 保护，升级后
+// 每一轮 Tick 都会判定快照不完整而永久拒绝提交（统计彻底停摆）。
+// 这类键只是历史残留，第一次成功提交时会被 counter_state 的 DELETE+重写自然清掉。
+func legacyBaselineKey(name string) bool {
+	return strings.ContainsAny(name, "@:")
+}
 
 // Clock 可注入时钟，测试用固定时间回放。
 type Clock func() time.Time
@@ -43,24 +55,26 @@ type Collector struct {
 	done     chan struct{}
 }
 
-// NewCollector 构造采集器（按配置自动选择 nftables / iptables 后端）。
+// NewCollector 构造采集器。nftables-only：唯一后端是 nftables named counter，
+// 不存在后端选择与回退。
 func NewCollector(cfg *config.Config, db *database.DB) *Collector {
 	return &Collector{
 		cfg:     cfg,
 		db:      db,
-		backend: firewall.New(cfg.Backend, cfg.NftConf, cfg.IptScript),
+		backend: firewall.NewNft(cfg.NftConf),
 		now:     time.Now,
 		done:    make(chan struct{}),
 	}
 }
 
-// SetBackend 替换后端与时钟（仅测试使用）。
+// SetBackend 替换后端（仅测试使用：注入 fake backend 做故障注入）。
 func (c *Collector) SetBackend(b firewall.Backend) { c.backend = b }
 
 // SetClock 注入时钟（仅测试使用）。
 func (c *Collector) SetClock(fn Clock) { c.now = fn }
 
-// BackendName 返回当前后端名（nft / iptables）。
+// BackendName 返回后端名。nftables-only 架构下恒为 "nft"；
+// 保留该方法是为了 /api/summary 的 backend 字段维持 schema 兼容。
 func (c *Collector) BackendName() string { return c.backend.Name() }
 
 // Done 在 Run 返回后被关闭。
@@ -294,16 +308,25 @@ func (c *Collector) Tick(ctx context.Context) error {
 			return err
 		}
 		// 跨进程重启保护：同一 epoch 内，历史基线中存在的计数器若在本轮
-		// 快照中缺失，说明快照不完整（典型场景：服务重启后 ip6tables 单侧
-		// 读取失败被上游当作完整快照返回）。此时禁止提交任何变更，
-		// 否则 DELETE+重写的 counter_state 会丢掉缺失家族的基线，
-		// 恢复后该家族被当成新计数器全量重复入账。
+		// 快照中缺失，说明快照不完整。此时禁止提交任何变更，否则
+		// DELETE+重写的 counter_state 会丢掉缺失计数器的基线，
+		// 恢复后它被当成新计数器全量重复入账。
+		//
+		// 这条保护对 nftables 同样必要（不是 iptables 专属逻辑）：nft 读取可能
+		// 因权限、内核瞬时错误、表被外部部分修改而返回不完整的 counter 集合。
 		//
 		// 合法消失只有一条路径：规则重建 ⇒ epoch 变化（上方 freshRuleset
 		// 分支已整体换基线，不会走到这里）。本系统的计数器集合由单次
-		// gen_nft/gen_iptables 一次性生成，同 epoch 内集合恒定。
+		// GenNFT 一次性生成，同 epoch 内集合恒定。
+		//
+		// 兼容：老库里可能残留旧后端写入的 `sbx:n1:i@v4` 形态基线键，它们在
+		// 新快照里必然缺失。这类历史键不参与保护判定（否则升级后永远无法提交），
+		// 由 legacyBaselineKey 识别并跳过。
 		if len(state) > 0 {
 			for name := range state {
+				if legacyBaselineKey(name) {
+					continue
+				}
 				if _, ok := snapshot[name]; !ok {
 					return fmt.Errorf("快照缺少既有计数器 %s（epoch 未变化）——疑似部分读取, 本轮放弃提交", name)
 				}

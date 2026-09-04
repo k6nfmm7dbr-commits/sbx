@@ -6,6 +6,12 @@
 > **历史存档说明**：本文档记录 v2.8.0 的旧 Python 实现（`src/panel.py`、
 > `src/nodes_tool.py`）行为，作为 Go 重构的行为依据。这些 Python 文件已随
 > 全 Go 化彻底移除，本文仅保留作迁移依据与数据口径溯源，不再描述现行实现。
+>
+> 尤其注意：文中关于 **iptables / ip6tables 后端、`backend=auto` 自动探测、
+> `ipt_script`** 的描述都是 v2.8.0 的历史事实。自 **v3.0.9** 起 SBX 是
+> **nftables-only** —— iptables 后端、后端选择与回退路径已全部移除，
+> `panel.json` 不再有 `backend` / `ipt_script` 键。现行行为以 README.md 与
+> FUTURE_IMPROVEMENTS.md §14 为准，请勿把本文的旧行为当作当前能力引用。
 
 ## 1. panel.py 功能全景（src/panel.py, 1290 行）
 
@@ -84,6 +90,9 @@
 
 1. Python config-set 会把全部默认键写回 panel.json（保持兼容复刻）
 2. parse_qs 丢弃空值参数（`?token=` 视为未提供）——Go 需显式模拟
-3. iptables 后端插 INPUT/OUTPUT 首位会计入随后被丢弃的包（nft prio300 不计）——口径差异既有，保持
+3. iptables 后端插 INPUT/OUTPUT 首位会计入随后被丢弃的包（nft prio300 不计）——
+   当年迁移期的口径差异记录。**已失效**：自 v3.0.9 起 SBX 为 nftables-only，
+   iptables 后端已彻底移除，只存在 nft prio300 一种口径（见
+   FUTURE_IMPROVEMENTS.md §14）
 4. uninstall 的 fw_clear 偶发残留 nft 表（shell 双删兜底已存在）
 5. armv6：Go 本身支持 linux/arm，但纯 Go SQLite(modernc libc) 需要 GOARM≥7 → 见 FUTURE_IMPROVEMENTS

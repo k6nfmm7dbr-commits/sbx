@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 APP_NAME="SBX"
-APP_VERSION="3.0.8"
+APP_VERSION="3.0.9"
 RAW_URL="${SBX_RAW_URL:-https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh}"
 
 # SBX_ROOT 仅用于测试/沙箱安装（把整套目录挪到前缀下），正常安装留空
@@ -120,12 +120,18 @@ install_deps() {
   command -v jq      >/dev/null 2>&1 || need+=(jq)
   ((${#need[@]})) && { info "安装: ${need[*]}"; pkg_install "${need[@]}"; }
 
-  # 计数后端：优先 nftables
-  if ! command -v nft >/dev/null 2>&1 && ! command -v iptables >/dev/null 2>&1; then
-    info "安装计数后端 nftables"
-    pkg_install nftables || pkg_install iptables \
-      || die "无法安装 nftables/iptables，流量统计依赖其中之一"
+  # 计数/策略后端：nftables 是唯一后端（v3.0.9 起 nftables-only）。
+  # 不存在回退：装不上或装完仍不可用一律中止安装，绝不静默降级到其它后端。
+  if ! command -v nft >/dev/null 2>&1; then
+    info "安装 nftables（SBX 的唯一防火墙后端）"
+    pkg_install nftables || true
   fi
+  command -v nft >/dev/null 2>&1 \
+    || die "未找到 nft 命令：SBX 依赖 nftables（流量统计 / 配额 / IP 限制均由其实现），请先安装 nftables 后重试"
+  # 命令存在还不够：容器/受限内核里 nft 可能无法访问 netlink。
+  # 这里只做只读探测（list tables 不改变任何规则）。
+  nft list tables >/dev/null 2>&1 \
+    || die "nft 命令存在但不可用（权限不足或内核不支持 nftables），SBX 无法继续安装"
   ensure_conntrack_acct
   ok "依赖就绪（Go 单二进制后端，无需 Python）"
 }
@@ -532,6 +538,11 @@ ensure_panel_conf() {
       info "请手工修复该文件后重新运行安装；原文件未被改动"
       return 1
     fi
+    # nftables-only 迁移（v3.0.9）：摘掉老版本写入的废弃键 backend / ipt_script。
+    # 只删这两个键（读取-改-原子写回），token/port/db/nodes_file/tz 与任何
+    # 用户自定义键一律原样保留；失败只告警——废弃键存在不影响新版运行。
+    "$CORE_BIN" config-migrate >/dev/null 2>&1 \
+      || warn "清理废弃配置键失败（不影响运行，可稍后手工执行 sbx-core config-migrate）"
     chmod 600 "$PANEL_CONF"
     return 0
   fi
@@ -545,9 +556,7 @@ ensure_panel_conf() {
   "db": "$APP_DIR/traffic.db",
   "nodes_file": "$NODES_JSON",
   "nft_conf": "$APP_DIR/nft.conf",
-  "ipt_script": "$APP_DIR/iptables.sh",
   "web_root": "$WEB_DIR",
-  "backend": "auto",
   "listen": "0.0.0.0",
   "port": $port,
   "token": "$token",
@@ -617,6 +626,53 @@ ensure_certs() {
   ok "证书就绪"
 }
 
+# ---------------------------------------------------------------- 旧版残留清理
+# >>> legacy-cleanup
+# cleanup_legacy_backend 清理 **旧版 SBX（≤ v3.0.8）** 留下的 iptables 残留。
+#
+# 重要：这不是「继续支持 iptables 后端」。v3.0.9 起 SBX 是 nftables-only，
+# 这段代码的唯一目的是把旧版自己创建的东西删干净，避免升级后无人管理的
+# 计数链永久残留在内核里。做完即止，运行期不会再碰 iptables。
+#
+# 安全边界（绝对不可放宽）：
+#   · 只删 SBX 自己创建的自定义链 SBX_IN / SBX_OUT 及其 INPUT/OUTPUT 跳转；
+#   · 绝不 flush INPUT/OUTPUT/filter 表，绝不改默认 policy，
+#     绝不触碰其它程序或用户自己的链与规则；
+#   · iptables/ip6tables 命令不存在时直接跳过（新机器的正常情况）；
+#   · 全程 best-effort：失败只告警，绝不影响 nftables 规则与安装流程。
+cleanup_legacy_backend() {
+  # 1) 旧版生成的 iptables 规则脚本（只删 SBX 自己的路径，不扫描其它目录）
+  if [[ -f "$APP_DIR/iptables.sh" ]]; then
+    rm -f "$APP_DIR/iptables.sh" \
+      && info "已删除旧版残留文件 $APP_DIR/iptables.sh" \
+      || warn "删除 $APP_DIR/iptables.sh 失败（可手工删除）"
+  fi
+
+  # 2) 旧版创建的自定义计数链（v4/v6 各一套）
+  local bin found=0
+  for bin in iptables ip6tables; do
+    command -v "$bin" >/dev/null 2>&1 || continue
+    local chain
+    for chain in SBX_IN SBX_OUT; do
+      # 链不存在 → -S 非 0，直接跳过（不产生任何修改）
+      "$bin" -w -S "$chain" >/dev/null 2>&1 || continue
+      found=1
+      # 先摘 INPUT/OUTPUT 里指向该链的跳转（只删这一条 -j <chain> 规则）
+      case "$chain" in
+        SBX_IN)  "$bin" -w -D INPUT  -j "$chain" >/dev/null 2>&1 || true ;;
+        SBX_OUT) "$bin" -w -D OUTPUT -j "$chain" >/dev/null 2>&1 || true ;;
+      esac
+      # 再清空并删除这条自定义链本身（-F/-X 的作用域仅限该链）
+      "$bin" -w -F "$chain" >/dev/null 2>&1 || true
+      "$bin" -w -X "$chain" >/dev/null 2>&1 \
+        || warn "删除旧版 $bin 链 $chain 失败（可手工执行 $bin -X $chain）"
+    done
+  done
+  [[ "$found" == 1 ]] && info "已清理旧版 iptables 计数链（SBX_IN / SBX_OUT）"
+  return 0
+}
+# <<< legacy-cleanup
+
 # ---------------------------------------------------------------- 流量规则
 fw_apply() {
   # apply 失败必须向上传递：不能 warn（rc=0）把失败伪装成成功
@@ -632,6 +688,9 @@ fw_clear() {
   "$CORE_BIN" clear >/dev/null 2>&1 || true
   # 兜底：直删计数表 + 策略 enforcement 表（sbx_policy），
   # 保证卸载后内核里不残留 quota/IP 限制的 drop 规则（残留到重启会误拦其它服务）。
+  #
+  # 安全边界（不可放宽）：逐表 `nft delete table` 只作用于 SBX 自己创建的两张表。
+  # 绝不 `nft flush ruleset`、绝不动用户已有的其它表/链/默认 policy。
   if command -v nft >/dev/null 2>&1; then
     nft delete table inet sbx_traffic >/dev/null 2>&1 || true
     nft delete table inet sbx_policy  >/dev/null 2>&1 || true
@@ -1051,8 +1110,9 @@ ExecStart=$CORE_BIN serve
 Restart=always
 RestartSec=3
 # v3.0.5 最小权限沙箱（经真机验证）。
-# 面板进程仍需 CAP_NET_ADMIN：sbx-core serve 内嵌 Collector，需执行 nft/iptables 采集；
-# 还需读 /proc（连接数）、读写 /etc/sbx 与 /run/sbx（SQLite/状态文件）、绑定面板端口。
+# 面板进程仍需 CAP_NET_ADMIN：sbx-core serve 内嵌 Collector 与策略层，需执行
+# nft（读计数器 / 应用 sbx_policy）；还需读 /proc（连接数、conntrack）、
+# 读写 /etc/sbx 与 /run/sbx（SQLite/状态文件）、绑定面板端口。
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
@@ -1062,11 +1122,12 @@ ProtectKernelTunables=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
-# v3.0.6：面板需要 CAP_NET_RAW 兼容 iptables-legacy（Ubuntu 20.04 等）；
-# root UID 在 systemd capability 沙箱下不等于完整 root，缺该能力时
-# iptables-legacy 会报 filter table Permission denied。
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+# v3.0.9 nftables-only：去掉 CAP_NET_RAW。它是 v3.0.6 为 iptables-legacy
+# （Ubuntu 20.04 等）加的——legacy 走 AF_INET SOCK_RAW setsockopt 才需要该能力。
+# nft 走 AF_NETLINK/NETLINK_NETFILTER，只需 CAP_NET_ADMIN；连接数与 conntrack
+# 判活读 /proc 不需要任何 capability。少一个能力即少一份攻击面。
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target
@@ -1140,7 +1201,9 @@ show_panel_info() {
   printf '  地址: %s%s%s\n' "$C_CYAN" "$(panel_url)" "$C_RESET"
   printf '  令牌: %s%s%s\n' "$C_CYAN" "$(panel_get token)" "$C_RESET"
   printf '  状态: %s\n' "$(panel_running && echo "${C_GREEN}运行中${C_RESET}" || echo "${C_RED}未运行${C_RESET}")"
-  printf '  后端: %s\n' "$(command -v nft >/dev/null 2>&1 && echo nftables || echo iptables)"
+  # 后端恒为 nftables（nftables-only）；这里只报告它当前是否真的可用。
+  printf '  后端: %s\n' "$(nft list tables >/dev/null 2>&1 \
+    && echo "nftables" || echo "${C_RED}nftables 不可用${C_RESET}")"
   hr
 }
 
@@ -1469,6 +1532,9 @@ uninstall_all() {
   svc_do stop sbx-firewall || true
   sleep 0.5   # 等 oneshot ExecStop 完全落地，避免与清理产生竞态
   fw_clear
+  # 若这台机器曾装过旧版（≤ v3.0.8），把它当年创建的 iptables 链一并清掉，
+  # 否则卸载后 SBX_IN/SBX_OUT 会残留在内核里直到重启。
+  cleanup_legacy_backend
   case "$INIT_SYS" in
     systemd)
       systemctl disable sing-box sbx-panel sbx-firewall >/dev/null 2>&1 || true
@@ -1695,6 +1761,27 @@ apply_update() {
   install_sbx_core                    # 原子替换 + SHA256 校验 + 失败回滚
   "$CORE_BIN" version >/dev/null 2>&1 || die "升级后 sbx-core 不可用，已中止（原二进制保留）"
 
+  # nftables-only 升级路径（v3.0.9）：nftables 从「优先」变成硬依赖。
+  # 老机器可能只有 iptables，因此这里必须确认/安装 nftables，装不上即中止——
+  # 继续升级只会得到一个统计与策略全废的面板。用户数据（nodes.json /
+  # traffic.db / panel.json）此刻未被改动，中止是安全的。
+  if ! command -v nft >/dev/null 2>&1; then
+    info "本机缺少 nftables（新版唯一后端），正在安装..."
+    pkg_install nftables || true
+  fi
+  command -v nft >/dev/null 2>&1 \
+    || die "未找到 nft 命令：v3.0.9 起 SBX 仅支持 nftables，请先安装 nftables 后重新升级（节点与流量数据未被改动）"
+  nft list tables >/dev/null 2>&1 \
+    || die "nft 命令存在但不可用（权限不足或内核不支持），已中止升级（节点与流量数据未被改动）"
+
+  # 摘掉 panel.json 里的废弃键（backend / ipt_script）；只删这两个键，
+  # token / port / nodes_file / db / tz 与用户自定义键原样保留。
+  "$CORE_BIN" config-migrate >/dev/null 2>&1 \
+    || warn "清理废弃配置键失败（不影响运行，可手工执行 sbx-core config-migrate）"
+  # 清理旧版自己创建的 iptables 残留（iptables.sh / SBX_IN / SBX_OUT），
+  # best-effort，不触碰用户其它防火墙规则。
+  cleanup_legacy_backend
+
   install_self                        # 刷新 /usr/local/bin/sbx 封装
   setup_services                      # 服务单元可能有更新
   # 节点 schema 或计数规则若有变化，重建一次（幂等，配置校验失败会保留旧配置）
@@ -1765,6 +1852,9 @@ do_install() {
   detect_platform
   info "系统: $OS_FAMILY / 初始化: $INIT_SYS / 架构: $(sb_arch)"
   install_deps
+  # 覆盖安装到「装过旧版但已不完整」的机器时，先清掉旧版 iptables 残留
+  # （全新机器上是纯 no-op：没有 iptables.sh，也没有 SBX_IN/SBX_OUT 链）。
+  cleanup_legacy_backend
   prepare_dirs
   install_sbx_core
   install_sing_box

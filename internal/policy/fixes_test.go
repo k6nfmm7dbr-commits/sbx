@@ -2,6 +2,7 @@ package policy
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -257,22 +258,21 @@ func TestBrokenNodesFileKeepsEnforcement(t *testing.T) {
 	}
 }
 
-// ---- iptables-only 主机：状态照常发布 ------------------------------------
+// ---- nft 应用失败：状态照常发布 ------------------------------------------
 
-// 旧实现在 nft -f 失败时 return err，states 永远不发布 → 面板全显示「不限」，
-// 且 Run 每秒刷一条 WARN。
-func TestUnsupportedBackendStillPublishesState(t *testing.T) {
+// nftables-only（v3.0.9）：不存在「后端不支持 enforcement」这种稳态，
+// 唯一的 enforcement 故障来源是 nft 应用失败（权限/内核/瞬时错误）。
+// 此时 states 必须照常发布（否则面板全显示「不限」，用户看不到真实用量），
+// 错误经 lastErr → /api/summary 的 policy_error 如实呈现。
+func TestNFTApplyFailureStillPublishesState(t *testing.T) {
 	s := newTestService(t)
 	seedNode(t, s, 1, "vless", 443)
 	ctx := context.Background()
 	s.SetConntrack(func(string) connection.ConntrackResult { return connection.ConntrackResult{Available: false} })
 	s.SetRemoteIPs(procResult(nil, nil, false))
 	s.SetLocalAddrs(func() (map[string]bool, error) { return map[string]bool{}, nil })
-	s.SetEnforceBackend(func() string { return "iptables" })
-	// 后端不支持时绝不应真的去执行 nft
 	s.SetNFTApply(func(ctx context.Context, p string) error {
-		t.Error("后端为 iptables 时不应执行 nft")
-		return nil
+		return fmt.Errorf("nft 策略规则应用失败: Operation not permitted")
 	})
 
 	seedTotals(t, s, "1", 10<<20, 0)
@@ -280,11 +280,8 @@ func TestUnsupportedBackendStillPublishesState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := s.reconcile(ctx)
-	if err != nil {
-		// v3.0.7：ErrEnforceUnsupported 不再上抛（否则 Run 每秒刷 WARN、
-		// 保存策略 API 必 500），只记进 lastErr；状态仍照常发布。
-		t.Fatalf("ErrEnforceUnsupported 不应上抛, got %v", err)
+	if err := s.reconcile(ctx); err == nil {
+		t.Fatal("nft 应用失败必须上抛（调用方需知道本轮阻断未生效）")
 	}
 	states, ready := s.Snapshot()
 	if !ready {
@@ -293,20 +290,23 @@ func TestUnsupportedBackendStillPublishesState(t *testing.T) {
 	if states["1"].QuotaState != "exceeded" {
 		t.Errorf("用量状态应如实呈现, got %q", states["1"].QuotaState)
 	}
-	if !strings.Contains(s.LastError(), "nftables") {
-		t.Errorf("lastErr 应明确提示需要 nftables, got %q", s.LastError())
+	if !strings.Contains(s.LastError(), "nft") {
+		t.Errorf("lastErr 应明确指出 nft 应用失败, got %q", s.LastError())
 	}
 }
 
-// 无需阻断时，后端不支持也不该报错（不打扰未使用策略的用户）。
-func TestUnsupportedBackendSilentWhenNothingToEnforce(t *testing.T) {
+// 无需阻断时不执行 nft、也不报错（不打扰未使用策略的用户）。
+func TestNothingToEnforceSkipsNFT(t *testing.T) {
 	s := newTestService(t)
 	seedNode(t, s, 1, "vless", 443)
 	ctx := context.Background()
 	s.SetConntrack(func(string) connection.ConntrackResult { return connection.ConntrackResult{Available: false} })
 	s.SetRemoteIPs(procResult(nil, nil, false))
 	s.SetLocalAddrs(func() (map[string]bool, error) { return map[string]bool{}, nil })
-	s.SetEnforceBackend(func() string { return "iptables" })
+	s.SetNFTApply(func(ctx context.Context, p string) error {
+		t.Error("无任何达限节点时不应执行 nft")
+		return nil
+	})
 	if err := s.reconcile(ctx); err != nil {
 		t.Fatalf("无策略需要执行时不应报错: %v", err)
 	}

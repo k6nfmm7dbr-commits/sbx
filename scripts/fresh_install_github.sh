@@ -10,7 +10,7 @@ ck "一键安装退出码 0" $?
 grep -q "安装完成" /tmp/gh-install.log; ck "输出含「安装完成」" $?
 grep -q "sbx-core 安装完成" /tmp/gh-install.log && grep -qE "下载 sbx-core|已安装" /tmp/gh-install.log; ck "sbx-core 走 Releases 下载路径" $?
 
-/usr/local/bin/sbx-core version | grep -q "v3.0.8"; ck "core 版本 v3.0.8" $?
+/usr/local/bin/sbx-core version | grep -q "v3.0.9"; ck "core 版本 v3.0.9" $?
 systemctl is-active --quiet sbx-panel; ck "面板服务 active" $?
 systemctl is-active --quiet sing-box; ck "sing-box active" $?
 PORT=$(jq -r '.port' /etc/sbx/panel.json)

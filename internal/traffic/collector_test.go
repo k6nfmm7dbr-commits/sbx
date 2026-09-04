@@ -56,8 +56,8 @@ func newEnv(t *testing.T, interval int) *testEnv {
 	}
 	cfg := &config.Config{
 		DB: dbPath, NodesFile: filepath.Join(dir, "nodes.json"),
-		NftConf: filepath.Join(dir, "nft.conf"), IptScript: filepath.Join(dir, "iptables.sh"),
-		Backend: "nft", Listen: "127.0.0.1", Port: 8080, Token: "",
+		NftConf: filepath.Join(dir, "nft.conf"),
+		Listen:  "127.0.0.1", Port: 8080, Token: "",
 		Interval: interval, TZ: "UTC",
 	}
 	e := &testEnv{t: t, dir: dir, db: db, cfg: cfg}
@@ -506,5 +506,32 @@ func TestLookupErrorTriggersRepairThrottled(t *testing.T) {
 	}
 	if env.backend.repairs < 1 {
 		t.Errorf("应触发过 repair, got %d", env.backend.repairs)
+	}
+}
+
+// ---- nftables-only（v3.0.9）：生产构造器只能实例化 nft 后端 ----------------
+//
+// 旧实现是 firewall.New(cfg.Backend, cfg.NftConf, cfg.IptScript)，会按
+// backend=auto/iptables 动态选择。现在只有一条路径：firewall.NewNft。
+func TestNewCollectorAlwaysUsesNft(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "traffic.db")
+	db, err := database.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := &config.Config{
+		DB: dbPath, NodesFile: filepath.Join(dir, "nodes.json"),
+		NftConf: filepath.Join(dir, "nft.conf"),
+		Listen:  "127.0.0.1", Port: 8080, Interval: 2, TZ: "UTC",
+	}
+	c := NewCollector(cfg, db)
+	if _, ok := c.backend.(*firewall.Nft); !ok {
+		t.Fatalf("生产采集器后端必须是 *firewall.Nft, got %T", c.backend)
+	}
+	if got := c.BackendName(); got != "nft" || firewall.BackendName != "nft" {
+		t.Errorf("BackendName 必须恒为 nft（API schema 兼容）, got %q / 常量 %q",
+			got, firewall.BackendName)
 	}
 }

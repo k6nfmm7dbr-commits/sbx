@@ -108,8 +108,8 @@ type Summary struct {
 	ConnsTotal    int64         `json:"conns_total"`
 	ConnsUDPTotal int64         `json:"conns_udp_total"`
 	// PolicyError 是策略层最近一次 enforcement 错误（由 API 层填充）：
-	// 典型场景是生效后端为 iptables 时配额/IP 限制「状态照算但不执行」——
-	// 必须让用户在面板看到，而不是误以为已被阻断。
+	// nft 规则应用失败等瞬态故障会在此呈现，便于用户在面板直接看到
+	// 「阻断未生效」而不是误以为已被限制。
 	PolicyError string `json:"policy_error,omitempty"`
 }
 
@@ -153,7 +153,7 @@ func BuildSummary(cfg *config.Config, db *sql.DB, src LiveSource) (*Summary, err
 		Healthy:    hasCollector && st.Error == "",
 		Error:      st.Error,
 		LastSample: st.LastOK,
-		Backend:    backendName(src, cfg),
+		Backend:    backendName(src),
 	}
 
 	for _, n := range list {
@@ -281,9 +281,11 @@ func displayTZ(cfg *config.Config) string {
 	return LocalZoneName()
 }
 
-func backendName(src LiveSource, cfg *config.Config) string {
+// backendName 返回上报给面板的后端名。nftables-only 架构下恒为 "nft"；
+// 保留该字段是为了 /api/summary 的 schema 兼容（前端/外部脚本可能读它）。
+func backendName(src LiveSource) string {
 	if src != nil {
 		return src.BackendName()
 	}
-	return firewall.DetectBackend(cfg.Backend)
+	return firewall.BackendName
 }

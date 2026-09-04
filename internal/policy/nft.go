@@ -148,12 +148,12 @@ func writeIPSet(b *strings.Builder, name, typ string, elements []string) {
 
 // applyEnforcement 生成策略 nft 脚本并应用。无任何达限节点时清空策略表。
 //
-// 返回错误不再阻断 reconcile 的状态发布（见 reconcile 注释）：调用方把它
-// 记进 lastErr 并继续发布状态，这样 iptables-only 主机上面板仍显示真实用量。
+// 返回错误不阻断 reconcile 的状态发布（见 reconcile 注释）：调用方把它记进
+// lastErr 并继续发布状态，这样 nft 应用暂时失败时面板仍显示真实用量，
+// 且用户能从 policy_error 看到「阻断未生效」。
 //
-// 后端限制：策略 enforcement 只实现了 nft（allow set + ct state 规则在
-// iptables 上没有等价的低成本实现）。非 nft 后端时直接返回
-// ErrEnforceUnsupported，不去执行必然失败的 nft -f，避免每秒刷一条 WARN。
+// 后端：nftables-only。策略 enforcement 用 allow set + ct state 规则实现，
+// 与流量统计共用同一套 nftables 基础设施（表分离：sbx_policy / sbx_traffic）。
 //
 // 应用节流（v3.0.7）：
 //   - 立即应用：quota 达限集合变化 / IP 受限节点集合变化 / 节点端口形态变化
@@ -167,11 +167,7 @@ func writeIPSet(b *strings.Builder, name, typ string, elements []string) {
 func (s *Service) applyEnforcement(ctx context.Context, quotaBlocked map[string]bool,
 	ipBlocked map[string]map[string]bool, list []nodes.Node) error {
 
-	// 无需阻断任何东西时，即使后端不支持也不算错误（不打扰用户）。
 	needEnforce := len(quotaBlocked) > 0 || len(ipBlocked) > 0
-	if s.enforceBackend != nil && s.enforceBackend() != "nft" && needEnforce {
-		return ErrEnforceUnsupported
-	}
 
 	quotaPorts := map[int64]bool{}
 	for id := range quotaBlocked {

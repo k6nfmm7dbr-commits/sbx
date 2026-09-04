@@ -2,10 +2,14 @@
 
 sing-box 节点一键搭建 + 精确流量统计面板。后端为 Go 单二进制 `sbx-core`，前端经 `go:embed` 内嵌，无 Python 依赖。
 
+netfilter 后端是 **nftables-only**：流量统计、流量配额、在线 IP 上限全部由 nftables
+实现（表 `sbx_traffic` / `sbx_policy`），不支持 iptables，也不存在后端自动选择或回退。
+nftables 不可用时 SBX 明确失败，绝不静默降级。
+
 ## 特性
 
 - **5 种协议**：VLESS Reality、Shadowsocks 2022、Trojan、AnyTLS、Snell v5/v6，菜单化创建与分享链接
-- **内核级流量统计**：nftables named counter（回退 iptables 自定义链），非估算、不丢计不重复
+- **内核级流量统计**：nftables named counter，非估算、不丢计不重复
 - **节点策略**：独立流量配额（Quota）与同时在线公网 IP 上限（IP Limit），达限由内核执行
 - **实时面板**：三页签 Web UI（首页 / 每日 / 节点），令牌登录，SSE 实时推送在线 IP
 - **在线升级**：保留节点与流量历史，二进制原子替换，失败自动回滚
@@ -18,14 +22,14 @@ bash <(curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/
 
 安装完成后运行 `sbx` 进入管理菜单。
 
-安装器自动完成：系统与 init 检测（Debian/Ubuntu、RHEL 系、Alpine；systemd/OpenRC）→ 按架构下载 `sbx-core` 并以 `SHA256SUMS` 校验（不符即中止，不影响已有安装）→ 安装 sing-box → 注册并启动 `sbx-firewall`、`sing-box`、`sbx-panel` 三个服务。
+安装器自动完成：系统与 init 检测（Debian/Ubuntu、RHEL 系、Alpine；systemd/OpenRC）→ 确认/安装 **nftables**（缺失或不可用即中止安装）→ 按架构下载 `sbx-core` 并以 `SHA256SUMS` 校验（不符即中止，不影响已有安装）→ 安装 sing-box → 生成 `nft.conf` 并应用 `sbx_traffic` → 注册并启动 `sbx-firewall`、`sing-box`、`sbx-panel` 三个服务。
 
 > 任意登录用户（`root` / `ubuntu` 等）均可安装：脚本要求 root 权限，普通用户用 `sudo` 执行即可，服务由 systemd 以 root 运行，与登录用户名无关。
 
 ## 当前版本
 
 ```text
-v3.0.8
+v3.0.9
 ```
 
 源码在 `main` 分支，二进制从 `dist` 分支分发（rolling latest），不使用 Tag。
@@ -41,7 +45,7 @@ v3.0.8
 
 ## 流量统计
 
-数据源为内核 netfilter 计数器（nftables named counter，回退 iptables 自定义链），非估算。
+数据源为内核 netfilter 计数器（nftables named counter，表 `sbx_traffic`），非估算。
 
 - **rx** = 服务器接收（用户上传），**tx** = 服务器发送（用户下载），含包头，比客户端显示高约 2%–5%
 - 单调差分累加：首次采集只入累计；计数器归零补记当前值，不产生假峰值
@@ -87,8 +91,10 @@ v3.0.8
 
 ### 前提与边界
 
-- 策略 enforcement（配额阻断 / IP allow set）依赖 **nftables**。生效后端为
-  iptables 时，用量与在线 IP 照常统计展示，但阻断不会执行，面板会提示需要 nftables。
+- SBX 统一依赖 **nftables**（唯一后端，无 iptables 降级模式）：流量统计、
+  Quota、IP Limit 都由它实现。nftables 不可用时安装/升级会明确报错并中止，
+  运行期规则应用失败会如实返回失败并在面板呈现（`policy_error`），
+  绝不「警告一下然后假装成功」。
 - 策略规则写入 `/etc/sbx/policy.nft`（独立表 `sbx_policy`），与计数规则
   `/etc/sbx/nft.conf`（表 `sbx_traffic`）完全分离，互不覆盖。
 - 「在线 IP」判活以 conntrack 为主数据源。因为内核只在存在引用 `ct` 的规则时才建
@@ -117,6 +123,13 @@ sbx --update --force    # 强制重装当前/最新版本
 
 保留节点配置、面板端口与流量历史；二进制原子替换，失败回滚；升级后自动重建计数规则。
 
+从 v3.0.8 及更早版本升级到 nftables-only 时，升级流程额外做三件事（都只碰 SBX 自己的东西）：
+
+- 确认/安装 nftables，不可用则中止升级（此时节点、`traffic.db`、`panel.json` 均未被改动）
+- 摘掉 `panel.json` 里已废弃的 `backend` / `ipt_script` 两个键（其余配置与自定义键原样保留，原子写回）
+- 清理旧版自己创建的残留：删除 `/etc/sbx/iptables.sh`，best-effort 删除 `SBX_IN` / `SBX_OUT`
+  自定义链及其 INPUT/OUTPUT 跳转。不 flush 任何系统链、不改默认 policy、不触碰你自己的防火墙规则
+
 ## 命令
 
 ```bash
@@ -138,9 +151,12 @@ sbx-core node list | links | add | edit | remove | sync
 
 - 系统：Debian/Ubuntu、RHEL 系、Alpine；init：systemd / OpenRC
 - 架构：amd64、arm64、armv7、armv6、386、s390x、riscv64（`CGO_ENABLED=0`）
-- 依赖：curl、openssl、tar、jq、nftables 或 iptables（计数后端）、iproute2 `ss`（连接数回退，随系统自带）
-- 注意：Ubuntu 20.04 等使用 iptables-legacy 的系统，面板服务已带 `CAP_NET_RAW` 适配，避免「计数器不存在 / filter table Permission denied」
-- 节点策略（配额阻断 / IP 上限）需要 nftables；安装器会尝试开启
+- 依赖：**nftables（硬依赖）**、curl、openssl、tar、jq、iproute2 `ss`（连接数回退，随系统自带）
+- nftables 是唯一后端：安装/升级时若缺失会自动安装，装不上或 `nft` 不可用
+  （权限不足 / 内核不支持）即明确报错并中止，不存在 iptables 降级路径
+- 面板服务的 capability 收敛为 `CAP_NET_ADMIN`（nft 走 netlink）+
+  `CAP_NET_BIND_SERVICE`（绑定面板端口）
+- 节点策略（配额阻断 / IP 上限）同样由 nftables 执行；安装器会尝试开启
   `net.netfilter.nf_conntrack_acct=1` 并写入 `/etc/sysctl.d/99-sbx-conntrack.conf`
   以获得精确的在线判活（失败不阻断安装，后端自动降级）
 
@@ -149,13 +165,12 @@ sbx-core node list | links | add | edit | remove | sync
 ```text
 /usr/local/bin/sbx-core        Go 后端（含内嵌前端）
 /usr/local/bin/sbx             菜单入口
-/etc/sbx/panel.json            面板配置（端口 / token / 时区 / 后端）
+/etc/sbx/panel.json            面板配置（端口 / token / 时区 等）
 /etc/sbx/nodes.json            节点数据（含凭据，0600）
 /etc/sbx/state.json            ID 游标 / 分享地址
 /etc/sbx/policy.nft            策略规则（配额阻断 / IP allow set，表 sbx_policy）
 /etc/sbx/traffic.db            SQLite 流量库（WAL）
-/etc/sbx/nft.conf              计数规则（nftables）
-/etc/sbx/iptables.sh           计数规则（iptables 回退）
+/etc/sbx/nft.conf              计数规则（nftables，表 sbx_traffic）
 /etc/sing-box/config.json      sing-box 配置
 /etc/systemd/system/sbx-{panel,firewall}.service
 ```

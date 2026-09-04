@@ -29,8 +29,7 @@ func newPolicyTestServer(t *testing.T, token, nodesFile string) (*httptest.Serve
 		DB:        filepath.Join(dir, "traffic.db"),
 		NodesFile: nodesFile,
 		NftConf:   filepath.Join(dir, "nft.conf"),
-		IptScript: filepath.Join(dir, "iptables.sh"),
-		Backend:   "nft", Listen: "127.0.0.1", Port: 8080,
+		Listen:    "127.0.0.1", Port: 8080,
 		Token: token, Interval: 2, TZ: "UTC",
 	}
 	pol := policy.New(db.DB, dir, filepath.Join(dir, "policy.nft"))
