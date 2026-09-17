@@ -89,6 +89,11 @@ func Open(path string) (*DB, error) {
 	if _, err := d.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		slog.Debug("WAL 不可用, 使用默认日志模式", "err", err)
 	}
+	// 限制 -wal 文件上限：checkpoint 后把超出 limit 的 wal 截断回收，
+	// 避免 IO 尖峰后 wal 长期占住高水位（真机观察到 wal≈4MB 而主库仅 57KB）。
+	if _, err := d.Exec("PRAGMA journal_size_limit=8388608"); err != nil {
+		slog.Debug("journal_size_limit 设置失败", "err", err)
+	}
 	if err := d.migrate(); err != nil {
 		db.Close()
 		return nil, err

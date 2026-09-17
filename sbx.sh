@@ -369,7 +369,12 @@ install_sing_box() {
     cp -f "$SB_BIN" "$SB_BIN.bak" || { rm -rf "$tmp"; die "旧 sing-box 备份失败，已中止升级"; }
   fi
   install -d -m 0755 "$BIN_DIR"
-  install -m 0755 "$found" "$SB_BIN"
+  # 原子替换（与 install_sbx_core 的 tmp+mv 同一口径）：install 原地截断写入，
+  # 中断/掉电会留下损坏的 sing-box 且 .bak 无人恢复；同目录临时文件 + rename
+  # 保证任意时刻 $SB_BIN 都是完整可执行体。失败时旧文件分毫未动。
+  local sb_tmp="$BIN_DIR/.sing-box.tmp.$$"
+  cp -f "$found" "$sb_tmp" && chmod 0755 "$sb_tmp" && mv -f "$sb_tmp" "$SB_BIN" \
+    || { rm -f "$sb_tmp"; rm -rf "$tmp"; die "sing-box 安装失败；现有安装未被改动"; }
   # 部分构建附带 libcronet.so（NaiveProxy 用），一并放到同目录
   local lib
   lib=$(find "$tmp" -type f -name 'libcronet.so' | head -1)

@@ -14,6 +14,13 @@ import (
 // selfIPsTTL 是本机地址集合的缓存时长（网卡增删/DHCP 换址后自动跟上）。
 const selfIPsTTL = 30 * time.Second
 
+// procSource 是 conntrack 不可用时的 /proc 回退数据源。
+//
+// 抽成包级变量有两个用途：测试可注入（与 s.remoteIPs 并行），以及让测试能
+// 断言「conntrack 可用时根本不读 /proc」——这正是 v3.0.10 修掉的 CPU 浪费点
+// （每秒对整张 /proc 连接表做 O(总连接数) 的无谓解析与分配）。
+var procSource = connection.NodeRemoteIPsSplit
+
 // reconcile 执行一轮策略同步：
 //  1. 读节点列表（严格）与策略配置；
 //  2. 算每个节点的 quota used（单条 totals 查询）；
@@ -77,13 +84,20 @@ func (s *Service) reconcile(ctx context.Context) error {
 
 	var procSplit map[string]connection.RemoteIPSet
 	procPartial := false
-	if s.remoteIPs != nil {
-		procSplit, procPartial, err = s.remoteIPs(nodeList)
-	} else {
-		procSplit, procPartial, err = connection.NodeRemoteIPsSplit(nodeList, nil)
-	}
-	if err != nil {
-		return err
+	// conntrack 可用时 /proc 回退数据源完全不会被消费（buildActivity 仅在
+	// !cr.Available 分支使用 procSplit），早期实现却无条件读 4 个 /proc 文件
+	// 并全量解析——繁忙服务器上每秒白付 O(总连接数) 的 CPU 与 GC 成本
+	// （真机实测 4.1ms + 1.16MB 分配/秒，纯浪费）。这里仅在确需回退时读取。
+	// partial 口径不变：cr.Available 时 cr.Partial/cr.Err 恒为 false。
+	if !cr.Available || s.remoteIPs != nil {
+		if s.remoteIPs != nil {
+			procSplit, procPartial, err = s.remoteIPs(nodeList)
+		} else {
+			procSplit, procPartial, err = procSource(nodeList, nil)
+		}
+		if err != nil {
+			return err
+		}
 	}
 
 	// 采集结果「不完整」（conntrack 读失败 / Err 或 /proc partial）→ fail-safe：

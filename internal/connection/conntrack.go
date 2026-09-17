@@ -84,14 +84,35 @@ func ReadConntrack(path string) ConntrackResult {
 }
 
 // countEntries 统计 conntrack 文件的非空行数（= 内核当前跟踪的条目总数）。
+//
+// 稳定性注记（v3.0.10）：本函数每秒被 policy reconcile 调用一次，早期实现用
+// strings.Split 把整个文件切成 []string——对几十万字节、上千行的 conntrack 表，
+// 这会每次调用多分配一个行切片数组并显著增加 GC 压力（真机 A/B 实测：sbx-core
+// 空载即烧 ~5% 单核，8 个 GC worker 线程各累计 2 小时+）。这里改为索引扫描，
+// 零额外分配，行为不变。
 func countEntries(text string) int {
 	n := 0
-	for _, line := range strings.Split(text, "\n") {
-		if strings.TrimSpace(line) != "" {
+	start := 0
+	for i := 0; i <= len(text); i++ {
+		if i != len(text) && text[i] != '\n' {
+			continue
+		}
+		if lineHasNonSpace(text[start:i]) {
 			n++
 		}
+		start = i + 1
 	}
 	return n
+}
+
+// lineHasNonSpace 判断行内是否存在非空白字符（空格/制表/回车之外）。
+func lineHasNonSpace(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] != ' ' && s[i] != '\t' && s[i] != '\r' {
+			return true
+		}
+	}
+	return false
 }
 
 // ParseConntrack 解析 conntrack 文本，保留 tcp ESTABLISHED 与 udp 已建立流。
@@ -100,14 +121,25 @@ func countEntries(text string) int {
 //	ipv4  2 tcp  6 7199 ESTABLISHED src=1.2.3.4 dst=5.6.7.8 sport=35740
 //	    dport=8844 packets=1671 bytes=1906488 src=5.6.7.8 dst=1.2.3.4 sport=8844
 //	    dport=35740 packets=1696 bytes=141552 [ASSURED] mark=0 zone=0 use=2
+//
+// 稳定性注记（v3.0.10）：本函数每秒解析整张 conntrack 表（繁忙服务器上可达
+// 数万行）。原实现 strings.Split 全文 + 每行 strings.Fields——两者都按行/按字段
+// 分配切片，是 2.38MB/op 分配放大（≈文件体积 9 倍）的主要来源。这里改为
+// 索引扫描 + 复用字段缓冲，字段语义与顺序完全不变（含 fields[2]/fields[5] 的
+// 位置约定与「首见 src/sport/dport、累加全部 bytes=」规则）。
 func ParseConntrack(text string) []ConntrackFlow {
-	var out []ConntrackFlow
-	for _, line := range strings.Split(text, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	out := make([]ConntrackFlow, 0, 64)
+	fields := make([]string, 0, 24) // 跨行复用：字段是原串子串，共享底层不拷贝
+
+	start := 0
+	for i := 0; i <= len(text); i++ {
+		if i != len(text) && text[i] != '\n' {
 			continue
 		}
-		fields := strings.Fields(line)
+		line := text[start:i]
+		start = i + 1
+
+		fields = splitFields(line, fields[:0])
 		// 固定头部：l3 l4 proto num [timeout] [state] src=...
 		// TCP 有 state 字段（ESTABLISHED/SYN_SENT/...），UDP 没有。
 		if len(fields) < 6 {
@@ -154,4 +186,26 @@ func ParseConntrack(text string) []ConntrackFlow {
 		out = append(out, f)
 	}
 	return out
+}
+
+// splitFields 按空白切分（等价 strings.Fields 的字段序列），但把结果追加进
+// 调用方提供的缓冲，避免每行分配一个新切片。返回的子串共享 line 底层数组。
+func splitFields(line string, buf []string) []string {
+	i := 0
+	for i < len(line) {
+		// 跳过空白
+		for i < len(line) && (line[i] == ' ' || line[i] == '\t' || line[i] == '\r') {
+			i++
+		}
+		if i >= len(line) {
+			break
+		}
+		j := i
+		for j < len(line) && line[j] != ' ' && line[j] != '\t' && line[j] != '\r' {
+			j++
+		}
+		buf = append(buf, line[i:j])
+		i = j
+	}
+	return buf
 }
