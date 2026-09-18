@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/k6nfmm7dbr-commits/sbx/internal/config"
@@ -42,6 +43,21 @@ type Server struct {
 	db     *database.DB
 	src    traffic.LiveSource
 	policy *policy.Service
+
+	// cache 缓存 /api/summary、/api/live、/api/daily 的构建+序列化结果。
+	// 懒初始化：零值 Server（单测直接构造）也能安全使用，见 cacheFor。
+	cacheOnce sync.Once
+	cacheInst *ttlCache
+}
+
+// cacheFor 返回缓存实例（懒初始化，保证零值 Server 可用）。
+func (s *Server) cacheFor() *ttlCache {
+	s.cacheOnce.Do(func() {
+		if s.cacheInst == nil {
+			s.cacheInst = newTTLCache(cacheTTL)
+		}
+	})
+	return s.cacheInst
 }
 
 func (s *Server) recoverMiddleware(next http.Handler) http.Handler {

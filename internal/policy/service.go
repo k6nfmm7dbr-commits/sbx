@@ -79,6 +79,11 @@ type Service struct {
 	ready   bool
 	lastErr string
 
+	// version 是每次发布新快照就自增的单调版本号（mu 保护）。
+	// 用途：让 API 层的缓存能**精确**判断"策略数据是否变过"——key 里带上它，
+	// 策略一变 key 就变，无需依赖 TTL 猜什么时候该失效。
+	version uint64
+
 	// ipSnaps / activeIPs 是 reconcile 末尾发布的不可变快照（每轮整体替换，
 	// 发布后绝不原地修改），读侧可安全并发读取。
 	ipSnaps   map[string]NodeIPSnapshot
@@ -282,6 +287,14 @@ func (s *Service) Snapshot() (map[string]State, bool) {
 		out[k] = v
 	}
 	return out, s.ready
+}
+
+// Version 返回策略快照版本号：每次 reconcile 发布新快照时自增。
+// 调用方可用它做缓存失效判据（版本未变即可安全复用上一次结果）。
+func (s *Service) Version() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.version
 }
 
 // LastError 返回最近一次 reconcile 错误。

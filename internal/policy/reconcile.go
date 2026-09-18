@@ -230,6 +230,7 @@ func (s *Service) reconcile(ctx context.Context) error {
 	s.activeIPs = newActiveIPs
 	s.activeTCP = newActiveTCP
 	s.ready = true
+	s.version++ // 快照已更新：通知缓存层"策略数据变了"
 	if enforceErr != nil {
 		s.lastErr = enforceErr.Error()
 	} else {

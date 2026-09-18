@@ -31,22 +31,24 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request, route string)
 
 	switch route {
 	case "/api/summary":
-		sum, err := traffic.BuildSummary(s.cfg, s.db.DB, s.src)
-		if err != nil {
-			s.failInternal(w, r, codeSummaryFailed, err)
-			return
-		}
-		s.attachPolicyToSummary(sum)
-		s.sendJSON(w, r, http.StatusOK, sum)
+		s.serveCachedJSON(w, r, codeSummaryFailed, s.cacheKey("summary"), func() (any, error) {
+			sum, err := traffic.BuildSummary(s.cfg, s.db.DB, s.src)
+			if err != nil {
+				return nil, err
+			}
+			s.attachPolicyToSummary(sum)
+			return sum, nil
+		})
 
 	case "/api/live":
-		live, err := traffic.BuildLive(s.cfg, s.db.DB, s.src)
-		if err != nil {
-			s.failInternal(w, r, codeLiveFailed, err)
-			return
-		}
-		s.attachPolicyToLive(live)
-		s.sendJSON(w, r, http.StatusOK, live)
+		s.serveCachedJSON(w, r, codeLiveFailed, s.cacheKey("live"), func() (any, error) {
+			live, err := traffic.BuildLive(s.cfg, s.db.DB, s.src)
+			if err != nil {
+				return nil, err
+			}
+			s.attachPolicyToLive(live)
+			return live, nil
+		})
 
 	case "/api/events":
 		s.handleEvents(w, r)
@@ -71,15 +73,17 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request, route string)
 			days = 365
 		}
 		scope := qsGet(r, "scope")
-		rows, err := traffic.QDaily(s.db.DB, days, scope)
-		if err != nil {
-			s.failInternal(w, r, codeDailyFailed, err)
-			return
-		}
-		if rows == nil {
-			rows = []traffic.DailyRow{}
-		}
-		s.sendJSON(w, r, http.StatusOK, map[string]any{"days": rows})
+		s.serveCachedJSON(w, r, codeDailyFailed,
+			s.cacheKey("daily", strconv.Itoa(days), scope), func() (any, error) {
+				rows, err := traffic.QDaily(s.db.DB, days, scope)
+				if err != nil {
+					return nil, err
+				}
+				if rows == nil {
+					rows = []traffic.DailyRow{}
+				}
+				return map[string]any{"days": rows}, nil
+			})
 
 	case "/api/nodes":
 		// 只返回脱敏后的 PublicNodeDTO，绝不下发 password/uuid/private_key 等。

@@ -140,6 +140,7 @@ func (s *Server) putPolicy(w http.ResponseWriter, r *http.Request, nodeID string
 			"策略已保存但应用失败", err)
 		return
 	}
+	s.invalidateCache()
 	states, _ := s.policy.Snapshot()
 	s.sendJSON(w, r, http.StatusOK, states[nodeID])
 }
@@ -152,6 +153,7 @@ func (s *Server) resetQuota(w http.ResponseWriter, r *http.Request, nodeID strin
 		s.failInternalNode(w, r, codeQuotaReset, nodeID, err)
 		return
 	}
+	s.invalidateCache()
 	states, _ := s.policy.Snapshot()
 	s.sendJSON(w, r, http.StatusOK, states[nodeID])
 }
