@@ -281,3 +281,77 @@ iptables-legacy（AF_INET SOCK_RAW）加的；nft 走 AF_NETLINK/NETLINK_NETFILT
 回归测试锁定：`GenNFT` 输出不含 `flush ruleset` 且 `delete` 只针对 SBX 自己的表
 （`internal/firewall`），`Clear` 只发出 `nft delete table inet sbx_{traffic,policy}`
 且不出现 flush/INPUT/OUTPUT/-F/-X 与任何 iptables 调用（`internal/service`）。
+
+## 15. 性能类审计项的评估结论与待办（v3.0.10）
+
+本节记录 v3.0.10 稳定性审计中**实测后决定采纳 / 暂不采纳**的性能项，附真机
+数据与理由，避免将来重复评估。
+
+### 15.1 nft 计数器的 netlink 直读（审计项「fork/exec 开销」）——暂不采纳
+
+**实测**（Debian 12 / 8 核，`table inet sbx_traffic`，约 900 字节输出）：
+
+```
+nft -j list counters table inet sbx_traffic    平均 4.6 ms/次
+按默认 2 秒采样                                 ≈ 0.23% 单核
+```
+
+结论：**不是当前的主要开销**。同轮审计中真正的大头是每秒一次的策略 reconcile
+（conntrack 解析 16.3ms + `/proc` 解析 4.1ms），已通过「conntrack 可用时不再读
+`/proc`」与「解析去分配」修复——真机 A/B 实测：空载 3.78% → 3.33% 单核，
+约 2400 连接下 7.27% → 5.27%。netlink 直读只能省掉那 0.23%，却需要引入 netlink
+依赖（`github.com/google/nftables` 或手写 NETLINK_NETFILTER 编解码）、处理内核
+版本差异与部分 dump 的续包逻辑（`NLM_F_DUMP` + `NLM_F_DUMP_INTR` 重试），
+收益与复杂度不成正比。
+
+**本轮已做的零风险改进**：`Nft.Read` 增加**合并读取（single-flight）**——
+同一时刻的并发 Read 共享一次 exec，但**不缓存上一次结果**，因此不存在
+「读到旧计数」的可能（`TestNftReadNoStaleCache` 锁定该性质）。
+生产路径上目前只有采集线程读计数器，因此这属于防御性改动。
+
+**若将来需要采纳**（例如采样间隔缩到 1 秒以下，或计数器数量增长到数百）：
+1. 在 `firewall.Backend` 接口后新增 `netlinkBackend`，`NewNft` 按能力探测选择
+   （探测失败仍回退 exec 实现，语义与今日一致）；
+2. 用 `NLM_F_DUMP` 一次性取回 `sbx_traffic` 表内所有计数器对象，按 name 建 map；
+   注意 `NLM_F_DUMP_INTR`（dump 期间表被修改）需重试；
+3. 保留 `runCmdFn` 注入点，让现有测试与故障注入继续可用；
+4. 验收标准：`Read` 的 p99 从 4.6ms 降到 <0.5ms，且与 exec 实现产出**完全一致**
+   的快照（用同一内核状态对比两种实现）。
+
+### 15.2 连接数改 conntrack / eBPF（审计项「连接数读取 /proc」）——暂不采纳
+
+**现状**：`/proc/net/{tcp,udp}[6]` 由采集线程每 2 秒读一次并缓存，HTTP 请求
+不再逐次读（`Collector.lastConns`）。
+
+**本轮已采纳的改进**（见 `internal/connection`）：
+- 行/字段解析改索引扫描 + 复用缓冲：`ParseLocalPorts` 在 1 万行输入下
+  3.73ms / 358KB / **25 allocs**（原为每行一次切片分配）；
+- 新增端口过滤：`/proc/net/tcp` 里**每个已建立连接都占一个不同的本地端口**，
+  旧实现为每个端口建一个 map 条目，1 万连接即每次分配 1 万个 map。过滤后
+  `RemoteIPsByPort` 从 14.36ms / **3.08MB / 40228 allocs** 降到
+  6.31ms / **2.4KB / 18 allocs**（分配降低约 1280 倍）。
+
+**为何不引入 conntrack/eBPF 做连接数**：
+- conntrack 已作为「在线 IP 判活」的主数据源（见 §13），但**连接数口径不同**：
+  `/proc/net/tcp` 是 socket 视角（含本机进程持有的 socket），conntrack 是流视角，
+  两者对 UDP 通配入站、TIME_WAIT、NAT 的处理不一致。换口径会让面板数字变化，
+  属于产品行为变更，需要单独评审；
+- eBPF 需要 `CAP_BPF`/`CAP_SYS_ADMIN`、内核 4.18+ 且 BTF 可用，并引入
+  cilium/ebpf 依赖与 CO-RE 构建链，对 Alpine/musl 与老内核的兼容成本高。
+  本项目刻意保持「单二进制 + 仅 CAP_NET_ADMIN」的部署模型。
+
+**触发重新评估的条件**：单机连接数常态 > 5 万，且 `CountForNodes` 耗时占采集
+周期 20% 以上（届时先用基准定位，再决定是优化解析还是换数据源）。
+
+### 15.3 modernc.org/sqlite 升级——待评估
+
+v3.0.10 只把 `golang.org/x/sys` 升到 v0.48.0（消除 GO-2026-5024），
+`modernc.org/sqlite` 仍为 v1.34.5：`govulncheck` 在 Go 1.27.1 下对全仓库
+（含模块级）报告 **0 个漏洞**，因此不构成已知风险。
+
+但 v1.34.5 内嵌的 SQLite 版本已较旧，而 SQLite 本身的 CVE 不一定进入 Go
+漏洞库。升级到 v1.59.0 需跨 25 个小版本，涉及 `modernc.org/libc` 等传递依赖
+整体跃迁，属独立评估项。**建议动作**：单独开一次升级 PR，跑完整的
+`go test -race ./...` 与真机 `traffic`/`policy`/`database` 包测试（这三个包
+重度依赖 SQLite 行为），确认 WAL、`ON CONFLICT` upsert、`busy_timeout`
+与并发写行为无回归后再合并。
