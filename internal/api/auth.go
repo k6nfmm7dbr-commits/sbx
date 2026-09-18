@@ -107,7 +107,15 @@ func cookieToken(r *http.Request) string {
 // tokenEqual 等长度 secret 内容比较（常量时间）。
 // 长度本身不是保密信息，长度不等时直接返回 false；等长度内容用
 // crypto/subtle.ConstantTimeCompare 避免因首个不同字符的位置产生 timing 差异。
+//
+// 空值防御：任一侧为空一律 false。两个空串长度相等（0==0）且
+// ConstantTimeCompare 对空切片返回 1，若不显式拦截，"空口令"就会变成万能口令
+// ——当前 authorized 在 token=="" 时已短路，故不可利用；这层是防止将来
+// 调用顺序变化（或新增调用方）时把该短路改掉。
 func tokenEqual(given, token string) bool {
+	if given == "" || token == "" {
+		return false
+	}
 	if len(given) != len(token) {
 		return false
 	}
