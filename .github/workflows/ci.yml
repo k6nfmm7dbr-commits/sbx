@@ -202,7 +202,10 @@ jobs:
           # 先下载 sbx.sh.sha256 校验再执行；也支持
           # `SBX_SCRIPT_SHA256=<值> bash <(curl ...)` 由脚本自校验。
           # 与二进制放在同一分支同一提交，保证"脚本 ↔ 二进制"版本严格对应。
-          cp sbx.sh .
+          # 注意：sbx.sh 就在仓库根（本步骤的工作目录），**不要**再 cp 一份
+          # ——GNU cp 对"源与目标同一文件"会报错并返回非 0，在 bash -e 下
+          # 直接让整个发布步骤失败（曾因此把 publish-dist 打挂一次）。
+          # 只需把它加入 orphan 分支的索引即可。
           sha256_of() { sha256sum "$1" | awk '{print $1}'; }
           printf '%s  sbx.sh\n' "$(sha256_of sbx.sh)" > sbx.sh.sha256
           git add -f sbx-core-linux-* SHA256SUMS sbx.sh sbx.sh.sha256
