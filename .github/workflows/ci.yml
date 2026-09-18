@@ -18,7 +18,7 @@ jobs:
       # actions/setup-go@v5
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
-          go-version: "1.23"
+          go-version: "1.27.1"
 
       - name: gofmt check
         run: |
@@ -81,6 +81,27 @@ jobs:
       - name: 安装器加固测试（环境变量白名单 / 脚本完整性自校验）
         run: bash tests/hardening_flow_test.sh
 
+  # 供应链漏洞扫描（审计项「依赖供应链」）。
+  #
+  # 刻意做成**独立 job 且不被 publish-dist 依赖**：govulncheck 的漏洞库在线更新，
+  # 一旦 Go 标准库出现新 CVE 这里会变红——但那时正确的动作是尽快升级并发布修复，
+  # 而不是把发布链本身卡住（锁死 dist 只会让用户停留在有漏洞的旧二进制上）。
+  # 因此它只提供可见信号，不阻断产物发布。
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: "1.27.1"
+
+      - name: govulncheck
+        run: |
+          # 固定版本，避免 @latest 引入未经评审的工具链变更
+          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
   # 二进制分发：main 全部测试通过后，把全架构产物发布到 dist 分支（rolling latest）。
   # dist 是普通分支，不是 Tag——安装器固定从 raw .../dist/<artifact> 下载。
   # 仅当本次提交实际影响产物/安装器时才重建发布（纯 README/docs 跳过）。
@@ -97,7 +118,7 @@ jobs:
       # actions/setup-go@v5
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
-          go-version: "1.23"
+          go-version: "1.27.1"
 
       - name: 判断是否影响产物/安装器（纯 docs 跳过）
         id: changed

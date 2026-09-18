@@ -1,0 +1,38 @@
+# Dependabot 配置（审计项「依赖供应链」）。
+#
+# 覆盖两个生态：
+#   - gomod：Go 模块依赖（本项目的第三方依赖集中在 modernc.org/sqlite 及其
+#     传递依赖、golang.org/x/sys 等）；
+#   - github-actions：工作流里引用的 Action。
+#
+# 注意：本项目 CI 里的 Action 均以**完整 commit SHA** 固定（防供应链替换），
+# Dependabot 会把它们升级成新的 SHA 并提交 PR，这是预期行为——合并前请确认
+# 新 SHA 确实来自对应 Action 的官方仓库。
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    labels:
+      - dependencies
+    groups:
+      # 把传递依赖合并成一个 PR，避免 modernc.org/* 一次开出十几个 PR
+      go-transitive:
+        patterns:
+          - "*"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(ci)"
+    labels:
+      - dependencies
