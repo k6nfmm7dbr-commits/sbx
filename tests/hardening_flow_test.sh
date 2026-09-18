@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# hardening_flow_test.sh — 安装器加固测试（审计项「Shell 注入」）：
-# 提取真实的 env-validation 区块，验证 SBX_GH_PROXY / SBX_ROOT /
-# SBX_SCRIPT_SHA256 / SBX_SB_VERSION 的格式白名单。
-# 测试的逻辑与发布安装器里的逻辑同源（区块提取）。
+# hardening_flow_test.sh — 安装器加固测试（审计项「Shell 注入」+「sbx.sh 远程脚本
+# 执行风险」）：
+#   1) 提取真实的 env-validation 区块，验证 SBX_GH_PROXY / SBX_ROOT /
+#      SBX_SCRIPT_SHA256 / SBX_SB_VERSION 的格式白名单
+#   2) 端到端跑真实安装器（--version，无副作用），验证 SBX_SCRIPT_SHA256 自校验的
+#      通过 / 不匹配 / 被篡改 三条路径确实会拦截
+# 测试的逻辑与发布安装器里的逻辑同源（区块提取 + 真实入口）。
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TPL="$ROOT/installer-template.sh"
@@ -17,13 +20,20 @@ TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
 
 sed -n '/^# >>> env-validation/,/^# <<< env-validation/p' "$TPL" > "$TMPD/env.sh"
+sed -n '/^# >>> checksum-helpers/,/^# <<< checksum-helpers/p' "$TPL" > "$TMPD/sum.sh"
 grep -q 'validate_env()' "$TMPD/env.sh" || { echo "未找到 validate_env（模板标记被破坏？）"; exit 1; }
+grep -q 'sha256_of()' "$TMPD/sum.sh"    || { echo "未找到 sha256_of（模板标记被破坏？）"; exit 1; }
 
 cat > "$TMPD/prelude.sh" <<'PRE'
 err() { echo "[err] $*" >&2; }
 ok()  { echo "[ok] $*" >&2; }
 PRE
-cat "$TMPD/prelude.sh" "$TMPD/env.sh" > "$TMPD/lib.sh"
+cat "$TMPD/prelude.sh" "$TMPD/sum.sh" "$TMPD/env.sh" > "$TMPD/lib.sh"
+# 主 shell 也 source 一份：下面的端到端用例需要 sha256_of 计算夹具哈希
+# （此前只在 chk_env 的子 shell 里 source，导致 GOOD 为空、"哈希匹配"用例
+#  退化成"未提供哈希"而假通过）。
+# shellcheck disable=SC1090
+source "$TMPD/lib.sh"
 
 echo "== hardening_flow_test =="
 
@@ -57,6 +67,34 @@ chk_env "合法版本号 → 通过"                 0 SBX_SB_VERSION "1.14.0"
 chk_env "合法预发布版本 → 通过"             0 SBX_SB_VERSION "1.14.0-rc.1"
 chk_env "非法版本号 → 拒绝"                 1 SBX_SB_VERSION "v1.14.0;rm -rf /"
 
+# ---------------- 2. 脚本自校验（端到端，走真实入口） ----------------
+SELF="$TMPD/sbx.sh"
+cp "$TPL" "$SELF"
+GOOD=$(sha256_of "$SELF")
+
+run_self() { # run_self <期望rc> <名称> [哈希]
+  local rc=0
+  if [[ -n "${3:-}" ]]; then
+    SBX_SCRIPT_SHA256="$3" bash "$SELF" --version >/dev/null 2>&1 || rc=$?
+  else
+    bash "$SELF" --version >/dev/null 2>&1 || rc=$?
+  fi
+  ck "$2" "$1" "$rc"
+}
+
+run_self 0 "未提供哈希 → 跳过校验，正常执行" 
+run_self 0 "哈希匹配 → 通过并执行" "$GOOD"
+run_self 1 "哈希不匹配 → 中止" "$(printf 'b%.0s' {1..64})"
+
+printf '# tampered\n' >> "$SELF"
+run_self 1 "脚本被篡改（哈希已变）→ 检出并中止" "$GOOD"
+
+# 被拦截时不得输出成功话术
+OUT=$(SBX_SCRIPT_SHA256="$(printf 'b%.0s' {1..64})" bash "$SELF" --version 2>&1 || true)
+if [[ "$OUT" == *"完整性校验失败"* ]]; then PASS=$((PASS+1)); echo "  [PASS] 拦截时给出明确原因";
+else FAIL=$((FAIL+1)); echo "  [FAIL] 拦截时未给出明确原因: $OUT"; fi
+if [[ "$OUT" != *"SBX v"* ]]; then PASS=$((PASS+1)); echo "  [PASS] 拦截时不输出成功话术";
+else FAIL=$((FAIL+1)); echo "  [FAIL] 拦截时仍输出了成功话术"; fi
 
 echo "== 结果: PASS=$PASS FAIL=$FAIL =="
 [[ "$FAIL" -eq 0 ]] || exit 1

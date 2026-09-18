@@ -46,7 +46,12 @@ jobs:
           # 测试/真机验收脚本：仅豁免 SC2034——这些脚本大量使用
           # `read RX TX <<< ...`（RX 仅作配对字段）与 source 跨文件追踪，
           # 属 shellcheck 已知局限；其余 error+warning 仍全部检查。
-          shellcheck -S warning -e SC2034 scripts/*.sh tests/*.sh
+          # SC2319（`[[ ... ]]; ck "msg" $?`：$? 指向前一个条件）在本仓库
+          # 是刻意的惯用法，属 shellcheck 误报；且它在 shellcheck 0.10+ 才按
+          # warning 级报出——不豁免的话，runner 一旦升级到 0.10+，test job 立刻
+          # 变红，而 publish-dist 依赖 test → 会连带阻断全部架构的产物发布，
+          # 安装器随即因"candidate 版本必须与 APP_VERSION 严格一致"而拒绝安装。
+          shellcheck -S warning -e SC2034 -e SC2319 scripts/*.sh tests/*.sh
 
       - name: sbx.sh 与模板同步检查（防 drift）
         run: |
@@ -72,6 +77,9 @@ jobs:
 
       - name: v3.0.5 基线收口测试（版本一致性 / 无 Tag / checksum fail-closed / 权限）
         run: bash tests/baseline_test.sh
+
+      - name: 安装器加固测试（环境变量白名单 / 脚本完整性自校验）
+        run: bash tests/hardening_flow_test.sh
 
   # 二进制分发：main 全部测试通过后，把全架构产物发布到 dist 分支（rolling latest）。
   # dist 是普通分支，不是 Tag——安装器固定从 raw .../dist/<artifact> 下载。
@@ -141,12 +149,19 @@ jobs:
           # 产物必须位于分支根（安装器请求 raw .../dist/<file>，不带子目录）
           VER="$(grep -m1 '^const Version' internal/version/version.go | sed 's/.*"\(.*\)".*/\1/')"
           cp dist/sbx-core-linux-* dist/SHA256SUMS .
-          git add -f sbx-core-linux-* SHA256SUMS
+          # 安装器本体与它的 sha256 一并发布：README 的"安全安装方式"让用户
+          # 先下载 sbx.sh.sha256 校验再执行；也支持
+          # `SBX_SCRIPT_SHA256=<值> bash <(curl ...)` 由脚本自校验。
+          # 与二进制放在同一分支同一提交，保证"脚本 ↔ 二进制"版本严格对应。
+          cp sbx.sh .
+          sha256_of() { sha256sum "$1" | awk '{print $1}'; }
+          printf '%s  sbx.sh\n' "$(sha256_of sbx.sh)" > sbx.sh.sha256
+          git add -f sbx-core-linux-* SHA256SUMS sbx.sh sbx.sh.sha256
           git add scripts/dist-manifest.txt
           # 发布前断言：dist 分支只能含产物 + 清单，不得夹带源码或子目录副本
           tracked="$(git ls-files | sort)"
-          expected="$(printf '%s\n' SHA256SUMS scripts/dist-manifest.txt \
-            $(cd dist && ls sbx-core-linux-*) | sort)"
+          expected="$(printf '%s\n' SHA256SUMS sbx.sh sbx.sh.sha256 \
+            scripts/dist-manifest.txt $(cd dist && ls sbx-core-linux-*) | sort)"
           if [[ "$tracked" != "$expected" ]]; then
             echo "::error::dist 分支内容不符合预期"
             diff <(echo "$expected") <(echo "$tracked") || true
@@ -159,7 +174,7 @@ jobs:
         if: steps.changed.outputs.skip != 'true'
         run: |
           sleep 10
-          for f in sbx-core-linux-amd64 sbx-core-linux-arm64 SHA256SUMS; do
+          for f in sbx-core-linux-amd64 sbx-core-linux-arm64 SHA256SUMS sbx.sh sbx.sh.sha256; do
             code=$(curl -sIL -o /dev/null -w '%{http_code}' \
               "https://raw.githubusercontent.com/${{ github.repository }}/dist/$f")
             [[ "$code" == "200" ]] || { echo "::error::分发地址不可用: $f -> HTTP $code"; exit 1; }

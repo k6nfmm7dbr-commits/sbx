@@ -100,6 +100,47 @@ validate_env() {
 }
 # <<< env-validation
 
+# >>> script-integrity（CI/tests/script_integrity_test.sh 提取本区块做一致性测试）
+# 脚本自校验（审计项「sbx.sh 远程脚本执行风险」）。
+#
+# 用法（README「安全安装方式」）：
+#   1) 下载脚本与官方哈希：
+#        curl -fsSLO <RAW_BASE>/sbx.sh
+#        curl -fsSLO <RAW_BASE>/sbx.sh.sha256
+#   2) 本地校验并执行：
+#        sha256sum -c sbx.sh.sha256 && bash sbx.sh
+#   3) 或者直接让脚本自校验（也适用于一键安装）：
+#        SBX_SCRIPT_SHA256=<官方公布值> bash <(curl -fsSL <RAW_URL>)
+#
+# 未提供 SBX_SCRIPT_SHA256 时保持原有的一键安装便捷性（不校验），
+# 但 README 明确标注该方式的风险，不再作为唯一推荐。
+verify_script_integrity() {
+  [[ -n "${SBX_SCRIPT_SHA256:-}" ]] || return 0
+  local want self actual
+  want="$(printf '%s' "$SBX_SCRIPT_SHA256" | tr 'A-F' 'a-f')"
+
+  # 进程替换（bash <(curl ...)）下 BASH_SOURCE[0] 是 /dev/fd/NN，仍可读；
+  # 管道（curl | bash）下 stdin 已被占用，无法回读自身——这时明确报错而不是
+  # 静默跳过校验，避免用户以为"校验过了"。
+  self="${BASH_SOURCE[0]:-$0}"
+  if [[ ! -r "$self" ]]; then
+    err "无法读取自身脚本（$self）用于完整性校验"
+    err "请改用：curl -fsSLO <URL> && SBX_SCRIPT_SHA256=<哈希> bash sbx.sh"
+    return 1
+  fi
+  actual="$(sha256_of "$self")" || { err "计算脚本 sha256 失败"; return 1; }
+  if [[ "$actual" != "$want" ]]; then
+    err "脚本完整性校验失败，已中止（未做任何改动）"
+    err "  期望: $want"
+    err "  实得: $actual"
+    err "脚本可能被篡改、镜像投毒或下载不完整。请从官方地址重新下载并核对哈希。"
+    return 1
+  fi
+  ok "脚本完整性校验通过"
+  return 0
+}
+# <<< script-integrity
+
 # ---------------------------------------------------------------- 输出样式
 init_colors() {
   if [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-dumb}" != "dumb" ]]; then
@@ -1977,8 +2018,9 @@ do_install() {
 # ---------------------------------------------------------------- 入口
 main() {
   init_colors
-  # 任何状态改动之前：环境变量格式校验（非法取值立即失败并说明原因）。
+  # 任何状态改动之前：环境变量格式校验 + 脚本完整性自校验（若提供了哈希）。
   validate_env || exit 1
+  verify_script_integrity || exit 1
   case "${1:-}" in
     --apply-firewall) require_root; "$CORE_BIN" apply; exit $? ;;
     --clear-firewall) require_root; "$CORE_BIN" clear; exit $? ;;

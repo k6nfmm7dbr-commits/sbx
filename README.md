@@ -16,9 +16,43 @@ nftables 不可用时 SBX 明确失败，绝不静默降级。
 
 ## 安装
 
+### 推荐：先校验再执行
+
+```bash
+# 1) 下载安装器与官方哈希
+curl -fsSLO https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/dist/sbx.sh
+curl -fsSLO https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/dist/sbx.sh.sha256
+
+# 2) 校验通过后再执行（校验失败即中止，不要继续）
+sha256sum -c sbx.sh.sha256 && sudo bash sbx.sh
+```
+
+安装器本体与 `sbx-core` 二进制发布在**同一个 dist 提交**上，`sbx.sh.sha256`
+由 CI 在发布时生成，因此「脚本 ↔ 二进制」版本严格对应。
+
+### 一键安装（便捷，但有风险）
+
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh)
 ```
+
+> ⚠️ `curl | bash` 这类方式**无法在下载环节校验脚本完整性**：一旦 DNS/TLS
+> 被劫持或镜像被投毒，执行的就是被篡改的脚本。请仅在你信任当前网络环境时使用，
+> 或改用上面的「先校验再执行」。
+
+### 让脚本自校验（也可用于一键安装）
+
+```bash
+# 把官方公布的哈希传进来，脚本会先校验自身再执行；不匹配立即中止
+SBX_SCRIPT_SHA256=<官方公布的 sha256> bash <(curl -fsSL <RAW_URL>)
+```
+
+未提供 `SBX_SCRIPT_SHA256` 时保持原有便捷行为（不校验）；一旦提供，
+校验失败会**在任何状态改动之前**中止，并明确报出期望值与实得值。
+注意：`curl | bash`（管道）方式下脚本无法回读自身，此时会明确报错而不是
+静默跳过校验。
+
+### 安装器会做什么
 
 安装完成后运行 `sbx` 进入管理菜单。
 
