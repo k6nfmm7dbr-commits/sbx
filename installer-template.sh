@@ -41,6 +41,65 @@ OS_FAMILY="unknown"
 INIT_SYS="unknown"
 PKG=""
 
+# >>> env-validation（CI/tests/env_validation_test.sh 提取本区块做一致性测试）
+# 环境变量格式校验（审计项「Shell 注入」）。
+#
+# 背景：安装器**全文件无 eval**，所有变量展开都带引号，用户数据不进 shell 解析
+# （外部命令一律以参数列表传入）。但 SBX_* 环境变量仍会影响行为，因此做格式
+# 白名单校验——目的不是"防 shell 注入"（没有那个入口），而是：
+#   - 让配置错误立刻失败并说清原因，而不是中途以奇怪方式出错；
+#   - 阻止控制字符/引号/反引号/换行这类会让日志与下游命令困惑的取值；
+#   - SBX_GH_PROXY 指向的镜像即使被投毒，也因 SHA256 校验 fail-closed 而无法
+#     装入错误二进制（见 verify_core_checksum / sb_expected_sha）。
+validate_env() {
+  local bad=0
+
+  # SBX_GH_PROXY：必须是 http(s):// 前缀的 URL，且不含空白/控制字符/引号类字符。
+  if [[ -n "${SBX_GH_PROXY:-}" ]]; then
+    case "$SBX_GH_PROXY" in
+      *[[:space:]]*|*[\`\$\"\'\\]*|*\;*|*\|*|*\<*\>*)
+        err "SBX_GH_PROXY 含非法字符（空白/引号/反引号/美元符/分号/竖线/尖括号）"
+        bad=1 ;;
+    esac
+    if [[ "$bad" == 0 && ! "${SBX_GH_PROXY}" =~ ^https?://[^[:space:]]+$ ]]; then
+      err "SBX_GH_PROXY 必须以 http:// 或 https:// 开头，例如 https://ghfast.top/"
+      bad=1
+    fi
+  fi
+
+  # SBX_ROOT：仅用于测试/沙箱安装的目录前缀，必须是干净的绝对路径。
+  if [[ -n "${SBX_ROOT:-}" ]]; then
+    case "$SBX_ROOT" in
+      /*) ;;
+      *) err "SBX_ROOT 必须是绝对路径（以 / 开头）: $SBX_ROOT"; bad=1 ;;
+    esac
+    if [[ "$bad" == 0 && "$SBX_ROOT" == *".."* ]]; then
+      err "SBX_ROOT 不得包含 .. : $SBX_ROOT"
+      bad=1
+    fi
+    if [[ "$bad" == 0 && ! "${SBX_ROOT}" =~ ^/[A-Za-z0-9._/-]*$ ]]; then
+      err "SBX_ROOT 含非法字符: $SBX_ROOT"
+      bad=1
+    fi
+  fi
+
+  # SBX_SCRIPT_SHA256：设置时必须是 64 位十六进制。
+  if [[ -n "${SBX_SCRIPT_SHA256:-}" && ! "${SBX_SCRIPT_SHA256}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    err "SBX_SCRIPT_SHA256 必须是 64 位十六进制 sha256"
+    bad=1
+  fi
+
+  # SBX_SB_VERSION：设置时必须是纯版本号（会拼进下载 URL）。
+  if [[ -n "${SBX_SB_VERSION:-}" && ! "${SBX_SB_VERSION}" =~ ^[0-9]+(\.[0-9]+)*(-[A-Za-z0-9.]+)?$ ]]; then
+    err "SBX_SB_VERSION 格式非法（应形如 1.14.0 或 1.14.0-rc.1）: $SBX_SB_VERSION"
+    bad=1
+  fi
+
+  [[ "$bad" == 0 ]] || return 1
+  return 0
+}
+# <<< env-validation
+
 # ---------------------------------------------------------------- 输出样式
 init_colors() {
   if [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-dumb}" != "dumb" ]]; then
@@ -1918,6 +1977,8 @@ do_install() {
 # ---------------------------------------------------------------- 入口
 main() {
   init_colors
+  # 任何状态改动之前：环境变量格式校验（非法取值立即失败并说明原因）。
+  validate_env || exit 1
   case "${1:-}" in
     --apply-firewall) require_root; "$CORE_BIN" apply; exit $? ;;
     --clear-firewall) require_root; "$CORE_BIN" clear; exit $? ;;
