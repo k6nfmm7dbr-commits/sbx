@@ -355,3 +355,80 @@ v3.0.10 只把 `golang.org/x/sys` 升到 v0.48.0（消除 GO-2026-5024），
 `go test -race ./...` 与真机 `traffic`/`policy`/`database` 包测试（这三个包
 重度依赖 SQLite 行为），确认 WAL、`ON CONFLICT` upsert、`busy_timeout`
 与并发写行为无回归后再合并。
+
+## 16. 架构类审计项的评估结论（v3.0.10）
+
+本节记录审计中「重构类」提议的评估结论。三项均**评估后不采纳**，理由如下
+（不是"没时间做"，是做了会与本项目已确立的约束冲突）。
+
+### 16.1 拆分 sbx.sh 为 lib/*.sh —— 不采纳
+
+提议：把 1958 行的安装器拆成 `lib/detect.sh` / `lib/download.sh` /
+`lib/install.sh` / `lib/service.sh`，主脚本 source 这些库。
+
+**不采纳的理由（硬约束冲突）**：
+
+1. **分发模型要求单文件**。README 与安装命令的核心是
+   `bash <(curl -fsSL .../sbx.sh)` —— 用户拿到**一个**文件即可执行。
+   拆成多文件后，进程替换方式（`/dev/fd/NN`）无法解析相对 `source lib/xxx.sh`，
+   一键安装会直接失效；改为先下载整个目录又会让"先校验再执行"的流程复杂化。
+2. **测试与 CI 依赖单文件的结构标记**。`tests/*_flow_test.sh` 用
+   `sed -n '/^# >>> <name>/,/^# <<< <name>/p' installer-template.sh` 提取**真实
+   代码块**做隔离测试（这是"测试与发布物同源"的保证），CI 另有
+   `installer-template.sh` 与 `sbx.sh` 必须字节一致的 drift 检查。
+   拆分后这两套机制都要重写，收益（可读性）与回归风险不成正比。
+3. **单文件内部已经有明确分区**：区块用 `# >>> name` / `# <<< name` 标记，
+   并配了「分区」注释标题。可维护性问题已通过该约定解决。
+
+**已采纳的替代改进**：把跨发行版分支集中到 `detect_platform` / `pkg_install` /
+`svc_do` 三个函数（原本已如此），并在本轮把所有 `die` 提示补成"可照抄的下一步"
+（见 README 支持矩阵与 §15 之外的安装器提示强化）。
+
+### 16.2 CLI 改用 cobra / urfave-cli —— 不采纳
+
+提议：`cmd/sbx-core/main.go` 的手写 switch 改为 cobra 或 urfave/cli，
+自动生成 help 与补全。
+
+**不采纳的理由**：
+
+1. **与"CLI 兼容"直接冲突**。`sbx.sh` 大量依赖 `sbx-core` 的既有输出格式
+   （例如 `config-get` 对缺失键必须打印**空行**而不是 `<nil>`，
+   `node port-used` 用退出码表达"端口被占用"，`node commit` 打印 `ok`）。
+   cobra 会接管 `--help` 文本、未知参数的处理方式与错误输出格式，
+   这些都是 shell 侧正在解析的接口。改框架等于同时改一批隐式契约。
+2. **依赖面**。本项目第三方依赖只有 `modernc.org/sqlite`（纯 Go，为了无 cgo 的
+   静态单二进制）。为 15 个子命令引入一个 CLI 框架，与这一取向相悖。
+3. **现有实现已覆盖需求**：`printUsage()` 提供完整用法文本；
+   子命令分发是扁平 switch（无嵌套子命令、无 flag 组合解析需求）；
+   补全功能对"SSH 上去跑 `sbx` 进菜单"的使用方式价值很低。
+
+**已采纳的替代改进**：本轮补了 `cmd/sbx-core` 的 CLI 集成测试
+（见 `internal/service` 与 `cmd` 下的测试），把"输出格式与退出码"变成
+可回归的断言——这才是防 CLI 兼容性回归的真正手段。
+
+### 16.3 go:embed 前端资源拆分 —— 不采纳（实测无收益）
+
+提议：评估二进制体积，若过大则把前端资源拆为独立 embed.FS 或按需加载。
+
+**实测数据**（Go 1.27.1 / linux-amd64）：
+
+| 构建 | 体积 |
+|---|---|
+| 纯 `hello world`（`-s -w`） | 1.22 MB |
+| `hello world` + `modernc.org/sqlite`（`-s -w`） | 6.05 MB |
+| `sbx-core` 完整（`-s -w`） | **11.67 MB** |
+| `sbx-core` 完整（默认，含符号表） | 17.21 MB |
+| 内嵌前端静态资源（`internal/webui/static`） | **51 KB** |
+
+结论：**前端资源只占 `-s -w` 产物的 0.44%**，拆分 embed 最多省 51KB，
+却要让资源脱离二进制（重新引入"文件丢失/版本错配"这类部署故障）。
+真正的体积大头是：Go 运行时（1.2MB）+ 纯 Go SQLite（约 4.8MB）+
+net/http 与 crypto/tls（面板与 HTTPS 需要）——这些都是刻意的取舍：
+**单二进制、无 cgo、无运行时依赖**换来的体积，正是本项目"服务器不再需要
+Python/运行时依赖"这一核心卖点。
+
+若将来确实要压体积，正确的方向是（按性价比排序）：
+1. 发布产物继续用 `-s -w`（当前 `scripts/build-release.sh` 已如此）；
+2. 评估 `-trimpath`（已用于构建）与 `GOAMD64=v3` 等目标平台优化；
+3. 只有在内嵌资源增长到 MB 级时才考虑拆分——届时优先做**资源压缩**
+   （gzip 后 embed + 运行时解压），而不是拆成外部文件。
