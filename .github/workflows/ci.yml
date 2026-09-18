@@ -81,6 +81,34 @@ jobs:
       - name: 安装器加固测试（环境变量白名单 / 脚本完整性自校验）
         run: bash tests/hardening_flow_test.sh
 
+  # Alpine / musl 兼容性矩阵（审计项「测试覆盖」要求 CI 矩阵）。
+  #
+  # README 明确宣称支持 Alpine 3.18+ 且二进制用 musl 构建，但既有 CI 只在
+  # ubuntu（glibc）上跑——"宣称支持 musl" 与 "在 musl 上验证过" 是两件事。
+  # 这个 job 在 Alpine 容器里跑完整单元测试，覆盖：
+  #   · 纯 Go 依赖在 musl 下可构建（modernc.org/sqlite 是纯 Go，不需要 cgo）
+  #   · /proc 解析、fsx 的目录 fsync、时间/时区等与 libc 相关的路径
+  # 不跑 -race：race 检测器需要 cgo + gcc，与"无 cgo 静态二进制"的分发形态
+  # 不同；race 覆盖由 ubuntu 上的 test job 负责。
+  test-alpine:
+    runs-on: ubuntu-latest
+    container: golang:1.27-alpine
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: gofmt / vet / test（musl）
+        run: |
+          gofmt -l .
+          go vet ./...
+          go test -count=1 ./...
+
+      - name: 静态构建冒烟（CGO_ENABLED=0，与分发产物形态一致）
+        run: |
+          CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /tmp/sbx-core ./cmd/sbx-core
+          /tmp/sbx-core version
+          file /tmp/sbx-core | grep -q 'statically linked' \
+            || echo "::warning::产物未标记为静态链接（musl 下通常静态，此处仅提示）"
+
   # 供应链漏洞扫描（审计项「依赖供应链」）。
   #
   # 刻意做成**独立 job 且不被 publish-dist 依赖**：govulncheck 的漏洞库在线更新，
