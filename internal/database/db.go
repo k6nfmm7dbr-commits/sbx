@@ -94,6 +94,23 @@ func Open(path string) (*DB, error) {
 	if _, err := d.Exec("PRAGMA journal_size_limit=8388608"); err != nil {
 		slog.Debug("journal_size_limit 设置失败", "err", err)
 	}
+	// WAL 下 synchronous=NORMAL 是官方推荐档位：事务提交不做 fsync，只在
+	// checkpoint 时 fsync。权衡（据实说明，不掩盖）：
+	//   - 收益：每次采集提交（默认 2s 一次）不再强制落盘，显著降低写延迟与
+	//     IOPS，对 SD 卡/低端 VPS 尤其明显；
+	//   - 代价：**掉电/内核崩溃**可能丢失最近若干个已提交事务，但数据库不会
+	//     损坏（这是 NORMAL 与 OFF 的本质区别，OFF 才可能损坏）。
+	//   - 为什么可接受：这是流量统计库，丢最后几秒计数属于可容忍降级；且
+	//     计数器本身在内核里单调递增，下一轮差分会把缺口补进累计（不会少计，
+	//     只是把这段时间记到下一轮），daily/totals 仍保持单调正确。
+	//   - 若用户要求"零丢失"，可用 SBX_SQLITE_SYNCHRONOUS=FULL 覆盖回 FULL。
+	if v := os.Getenv("SBX_SQLITE_SYNCHRONOUS"); v != "" {
+		if err := d.applySynchronous(v); err != nil {
+			slog.Warn("synchronous 覆盖值无效, 保持 NORMAL", "value", v, "err", err)
+		}
+	} else if _, err := d.Exec("PRAGMA synchronous=NORMAL"); err != nil {
+		slog.Debug("synchronous=NORMAL 设置失败", "err", err)
+	}
 	if err := d.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -103,6 +120,18 @@ func Open(path string) (*DB, error) {
 
 // Path 返回数据库文件路径。
 func (d *DB) Path() string { return d.path }
+
+// applySynchronous 应用 SBX_SQLITE_SYNCHRONOUS 覆盖值。
+// 用白名单限定取值，绝不把环境变量直接拼进 PRAGMA 语句。
+func (d *DB) applySynchronous(v string) error {
+	norm := strings.ToUpper(strings.TrimSpace(v))
+	switch norm {
+	case "FULL", "NORMAL", "OFF", "EXTRA":
+		_, err := d.Exec("PRAGMA synchronous=" + norm)
+		return err
+	}
+	return fmt.Errorf("不支持的值: %q（可选 FULL/NORMAL/OFF/EXTRA）", v)
+}
 
 func (d *DB) migrate() error {
 	// 迁移全部放入单个事务：CREATE / ALTER / UPDATE 任一失败即整体回滚，
