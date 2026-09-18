@@ -187,6 +187,45 @@ func (c *Config) Validate() error {
 	if c.NftConf == "" {
 		return fmt.Errorf("nft 规则文件路径不能为空")
 	}
+	// 路径校验（审计项「路径遍历」）。
+	//
+	// 威胁模型（据实说明）：这三个路径**没有任何 HTTP 入口**——/api 全部路由都不
+	// 接收文件路径，节点 id 一律 ParseInt、scope 一律 SQL 绑定参数。可控入口只有
+	// 本机 root 执行的 `sbx-core config-set <key> <path>` 与 panel.json（0600）。
+	// 因此这不是"远程可利用的遍历漏洞"，但仍是应当收敛的攻击面：
+	//   - 配置被误填/被半可信的自动化脚本写入时，避免 SBX 去读写 /proc、/sys
+	//     这类伪文件，或把数据库落到相对路径（相对路径随 cwd 漂移，会导致
+	//     "统计突然归零"这类难排查故障）；
+	//   - ".." 穿越会让"路径在 /etc/sbx 内"的直觉失效。
+	// 全部结构性拒绝，不做"必须在某个目录下"的白名单——自定义部署路径是文档
+	// 明确支持的用法，不能破坏。
+	for _, p := range []struct{ key, val string }{
+		{"db", c.DB}, {"nodes_file", c.NodesFile}, {"nft_conf", c.NftConf},
+	} {
+		if err := validateConfigPath(p.key, p.val); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateConfigPath 校验单个配置路径。
+func validateConfigPath(key, p string) error {
+	if !filepath.IsAbs(p) {
+		return fmt.Errorf("%s 必须是绝对路径（相对路径会随工作目录漂移）: %q", key, p)
+	}
+	// Clean 会折叠 ".." 与重复斜杠：不一致即说明含穿越或冗余元素。
+	// 例：/etc/sbx/../shadow → /etc/shadow ≠ 原值 → 拒绝。
+	if cleaned := filepath.Clean(p); cleaned != p {
+		return fmt.Errorf("%s 含 .. 穿越或冗余路径元素: %q", key, p)
+	}
+	// 伪文件系统：数据库/节点文件/规则文件都不该落在这里。
+	// 用 "前缀+分隔符" 匹配，避免误伤 /devices、/sysroot 这类合法前缀。
+	for _, pseudo := range []string{"/proc", "/sys", "/dev"} {
+		if strings.HasPrefix(p, pseudo+"/") {
+			return fmt.Errorf("%s 不能位于伪文件系统 %s 下: %q", key, pseudo, p)
+		}
+	}
 	return nil
 }
 
