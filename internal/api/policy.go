@@ -54,9 +54,8 @@ func (s *Server) handlePolicyAPI(w http.ResponseWriter, r *http.Request, idStr s
 func (s *Server) requireNode(w http.ResponseWriter, r *http.Request, nodeID string) bool {
 	list, err := nodes.LoadPanelNodesStrict(s.cfg.NodesFile)
 	if err != nil {
-		s.sendJSON(w, r, http.StatusServiceUnavailable, map[string]string{
-			"error": "节点配置文件不可用，策略维持上一轮状态: " + err.Error(),
-		})
+		s.failUnavailable(w, r, codeNodesFileUnavailable, "",
+			"节点配置文件不可用，策略维持上一轮状态", err)
 		return false
 	}
 	for _, n := range list {
@@ -122,7 +121,7 @@ func (s *Server) putPolicy(w http.ResponseWriter, r *http.Request, nodeID string
 
 	cur, err := s.policy.GetConfig(r.Context(), nodeID)
 	if err != nil {
-		s.sendJSON(w, r, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		s.failInternalNode(w, r, codePolicyLoad, nodeID, err)
 		return
 	}
 	// 保留 reset 基线：Quota 的「已用」语义依赖它，PUT 不能顺带重置。
@@ -132,13 +131,13 @@ func (s *Server) putPolicy(w http.ResponseWriter, r *http.Request, nodeID string
 	cur.IPLimitMax = req.IPLimitMax
 
 	if err := s.policy.UpsertConfig(r.Context(), cur); err != nil {
-		s.sendJSON(w, r, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		s.failInternalNode(w, r, codePolicySave, nodeID, err)
 		return
 	}
 	// 立即 reconcile：让 nft enforcement 生效并刷新缓存。
 	if err := s.policy.Reconcile(r.Context()); err != nil {
-		s.sendJSON(w, r, http.StatusInternalServerError,
-			map[string]string{"error": "策略已保存但应用失败: " + err.Error()})
+		s.failInternalMsg(w, r, codePolicyApply, nodeID,
+			"策略已保存但应用失败", err)
 		return
 	}
 	states, _ := s.policy.Snapshot()
@@ -150,7 +149,7 @@ func (s *Server) resetQuota(w http.ResponseWriter, r *http.Request, nodeID strin
 		return
 	}
 	if _, err := s.policy.ResetQuota(r.Context(), nodeID); err != nil {
-		s.sendJSON(w, r, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		s.failInternalNode(w, r, codeQuotaReset, nodeID, err)
 		return
 	}
 	states, _ := s.policy.Snapshot()

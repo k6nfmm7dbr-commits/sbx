@@ -33,7 +33,7 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request, route string)
 	case "/api/summary":
 		sum, err := traffic.BuildSummary(s.cfg, s.db.DB, s.src)
 		if err != nil {
-			s.sendJSON(w, r, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			s.failInternal(w, r, codeSummaryFailed, err)
 			return
 		}
 		s.attachPolicyToSummary(sum)
@@ -42,7 +42,7 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request, route string)
 	case "/api/live":
 		live, err := traffic.BuildLive(s.cfg, s.db.DB, s.src)
 		if err != nil {
-			s.sendJSON(w, r, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			s.failInternal(w, r, codeLiveFailed, err)
 			return
 		}
 		s.attachPolicyToLive(live)
@@ -73,7 +73,7 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request, route string)
 		scope := qsGet(r, "scope")
 		rows, err := traffic.QDaily(s.db.DB, days, scope)
 		if err != nil {
-			s.sendJSON(w, r, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			s.failInternal(w, r, codeDailyFailed, err)
 			return
 		}
 		if rows == nil {
@@ -192,7 +192,7 @@ func (s *Server) tryPolicyRoute(w http.ResponseWriter, r *http.Request, route st
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	rows, err := queryExportRows(s.db.DB)
 	if err != nil {
-		s.sendJSON(w, r, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		s.failInternal(w, r, codeExportFailed, err)
 		return
 	}
 	var b strings.Builder
