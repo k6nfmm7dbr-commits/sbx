@@ -138,6 +138,9 @@ run_deps() { # $1 = 是否有 nft (yes/no)，$2 = nft list tables 是否成功 (
   pkg_install() { return 1; }          # 装不上（模拟无源/无网）
   ensure_conntrack_acct() { return 0; }
   info() { :; }; ok() { :; }; warn() { echo "[warn] $*" >&2; }
+  # err 在真实安装器里存在（输出样式段），桩此前遗漏——补上以保证被测代码
+  # 走的是与线上一致的输出路径
+  err() { echo "[err] $*" >&2; }
   die() { echo "[die] $*" >&2; exit 1; }
   source "$TMPD/deps.sh"
   install_deps

@@ -226,12 +226,35 @@ install_deps() {
     info "安装 nftables（SBX 的唯一防火墙后端）"
     pkg_install nftables || true
   fi
-  command -v nft >/dev/null 2>&1 \
-    || die "未找到 nft 命令：SBX 依赖 nftables（流量统计 / 配额 / IP 限制均由其实现），请先安装 nftables 后重试"
+  if ! command -v nft >/dev/null 2>&1; then
+    # 安装命令按发行版给出，让用户能直接照抄（而不是只说"没找到 nft"）。
+    # 刻意内联在 install_deps 内：本函数会被 tests/installer_flow_test.sh
+    # 整体提取做隔离测试，依赖外部 helper 会导致提取后的代码不可运行。
+    local nft_hint
+    case "$PKG" in
+      apt) nft_hint="apt-get install -y nftables" ;;
+      dnf) nft_hint="dnf install -y nftables" ;;
+      yum) nft_hint="yum install -y nftables" ;;
+      apk) nft_hint="apk add nftables" ;;
+      *)   nft_hint="请用本发行版的包管理器安装 nftables" ;;
+    esac
+    err "未找到 nft 命令：SBX 依赖 nftables（流量统计 / 配额 / IP 限制均由其实现）"
+    err "SBX 只支持 nftables 这一种防火墙后端，不存在其它后端降级。请先安装后重试："
+    err "  $nft_hint"
+    err "  安装后确认可用：nft list tables"
+    die "依赖缺失，已中止安装（未做任何改动）"
+  fi
   # 命令存在还不够：容器/受限内核里 nft 可能无法访问 netlink。
   # 这里只做只读探测（list tables 不改变任何规则）。
-  nft list tables >/dev/null 2>&1 \
-    || die "nft 命令存在但不可用（权限不足或内核不支持 nftables），SBX 无法继续安装"
+  if ! nft list tables >/dev/null 2>&1; then
+    err "nft 命令存在但不可用（无法列出规则表），SBX 无法继续安装"
+    err "常见原因与排查："
+    err "  · 未以 root 运行 / 缺少 CAP_NET_ADMIN（容器需 --privileged 或 --cap-add=NET_ADMIN）"
+    err "  · 内核未启用 nftables（nf_tables 模块未加载）：lsmod | grep nf_tables"
+    err "  · 与其它防火墙工具冲突，或内核过旧（建议 5.4+）"
+    err "  自检命令：nft list tables"
+    die "nftables 不可用，已中止安装（未做任何改动）"
+  fi
   ensure_conntrack_acct
   ok "依赖就绪（Go 单二进制后端，无需 Python）"
 }

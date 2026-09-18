@@ -60,6 +60,35 @@ SBX_SCRIPT_SHA256=<官方公布的 sha256> bash <(curl -fsSL <RAW_URL>)
 
 > 任意登录用户（`root` / `ubuntu` 等）均可安装：脚本要求 root 权限，普通用户用 `sudo` 执行即可，服务由 systemd 以 root 运行，与登录用户名无关。
 
+### 支持矩阵
+
+SBX 唯一的 netfilter 后端是 **nftables**，不存在后端自动选择或降级路径。
+下表的「支持」指安装器已实现并按此逻辑分支；`nftables` 一列是**硬性前置条件**。
+
+| 发行版 | 版本 | init | 包管理器 | 状态 |
+|---|---|---|---|---|
+| Debian | 11 / 12 | systemd | apt | 支持（12 为真机验收环境） |
+| Ubuntu | 20.04 / 22.04 / 24.04 | systemd | apt | 支持 |
+| RHEL / Rocky / Alma | 8 / 9 | systemd | dnf / yum | 支持 |
+| Fedora | 38+ | systemd | dnf | 支持 |
+| Alpine | 3.18+ | OpenRC | apk | 支持（二进制用 musl 构建） |
+
+| 架构 | 二进制 | 备注 |
+|---|---|---|
+| x86_64 (amd64) | ✅ | |
+| aarch64 (arm64) | ✅ | |
+| armv7 | ✅ | |
+| armv6 | ⚠️ | 纯 Go SQLite 需要 `GOARM≥7`，armv6 未验证 |
+| i386 (386) | ✅ | |
+| s390x | ✅ | |
+| riscv64 | ✅ | |
+
+**nftables 不可用时**：安装器会明确报错并中止（绝不降级），提示安装
+命令（`apt install nftables` / `dnf install nftables` / `apk add nftables`）并
+要求内核支持。运行期若 `nft` 命令消失或权限不足，面板仍可访问（便于登录排查），
+但流量统计与策略 enforcement 会失败并在 `policy_error` 中如实呈现——
+**绝不「警告一下然后假装成功」**。
+
 ## 当前版本
 
 ```text
