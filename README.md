@@ -177,6 +177,43 @@ v3.0.9
   生效；仅在线 IP 集合（allow set）的增删在 3 秒窗口内合并应用，避免被
   扫描流量诱发高频整表重写。
 
+## 版本化下载与回退
+
+`dist` 分支是 **rolling latest**（安装器按 `SHA256SUMS` 做**内容比对**决定是否
+下载，不按版本号），因此不存在会失效的版本化下载链接。为了可追溯与回退，
+发布时额外做了三件事：
+
+1. **历史归档**：每次发布的「小型可追溯件」按 `版本/commit` 归档在
+   `dist/archive/<version>/<commit7>/`，内含 `SHA256SUMS`、`sbx.sh`、
+   `sbx.sh.sha256`、`MANIFEST`（版本、commit、日期、各产物哈希）。
+   只保留最近 20 个版本。
+
+   ```bash
+   # 查看某次发布到底发了什么
+   curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/dist/archive/v3.0.9/<commit7>/MANIFEST
+   # 取当时的安装器（注意：它仍会从 dist 根下载最新二进制）
+   curl -fsSLO https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/dist/archive/v3.0.9/<commit7>/sbx.sh
+   ```
+
+2. **版本 Tag**：发布时若 `v<APP_VERSION>` 尚不存在，会创建一个指向当时 main
+   的注解 Tag（已存在则跳过，避免指针漂移）。Tag 用于定位「这个版本对应哪份源码」。
+
+3. **回退到指定 commit 的二进制**：归档刻意**不含二进制**（8 架构合计约 80MB/次，
+   归档几次就会把分支撑爆），但二进制可由 commit 完全复现，且归档里的
+   `SHA256SUMS` 可用于核对复现结果是否与当时发布的一致：
+
+   ```bash
+   git clone https://github.com/k6nfmm7dbr-commits/sbx.git && cd sbx
+   git checkout <commit7>
+   ./scripts/build-release.sh dist
+   # 与归档中的 SHA256SUMS 对比，确认复现一致
+   sha256sum -c <(curl -fsSL .../archive/v<version>/<commit7>/SHA256SUMS)
+   ```
+
+> 提示：`sbx --update` 只在**内容不一致**时替换二进制（先校验 `SHA256SUMS`，
+> 再执行自检、比对 `APP_VERSION`，最后原子替换 + 失败回滚），
+> 因此"重装同一版本"是幂等的、不会无谓重启服务。
+
 ## 升级
 
 ```bash

@@ -181,15 +181,70 @@ jobs:
           git add scripts/dist-manifest.txt
           # 发布前断言：dist 分支只能含产物 + 清单，不得夹带源码或子目录副本
           tracked="$(git ls-files | sort)"
+          # 顶层只允许：产物 + SHA256SUMS + 安装器 + 清单；archive/ 下的历史
+          # 归档单独校验（只允许 SHA256SUMS / sbx.sh / sbx.sh.sha256 / MANIFEST）
           expected="$(printf '%s\n' SHA256SUMS sbx.sh sbx.sh.sha256 \
             scripts/dist-manifest.txt $(cd dist && ls sbx-core-linux-*) | sort)"
+          tracked="$(git ls-files | grep -v '^archive/' | sort)"
+          bad_arch="$(git ls-files 'archive/*' | grep -vE '^archive/[^/]+/[0-9a-f]{7}/(SHA256SUMS|sbx\.sh|sbx\.sh\.sha256|MANIFEST)$' || true)"
+          if [[ -n "$bad_arch" ]]; then
+            echo "::error::archive/ 下存在不允许的文件"; echo "$bad_arch" | head; exit 1
+          fi
           if [[ "$tracked" != "$expected" ]]; then
             echo "::error::dist 分支内容不符合预期"
             diff <(echo "$expected") <(echo "$tracked") || true
             exit 1
           fi
+          # ---- 历史归档（审计项「滚动发布风险」）----
+          # 旧实现每次 force-push 一个**无历史的 orphan 提交**，旧产物直接消失，
+          # 用户无法回退到已知可用的版本。这里把每次发布的"小型可追溯件"
+          # （SHA256SUMS + 安装器 + 清单）按 版本/commit 归档。
+          #
+          # 刻意**不归档二进制**：8 架构合计约 80MB/次，归档几次就会把分支撑爆；
+          # 二进制可由 commit 完全复现（见 README「版本化下载与回退」），
+          # 而校验和 + 安装器足以让用户确认"当时发布的是什么"。
+          git fetch -q origin dist 2>/dev/null || true
+          if git rev-parse --verify -q FETCH_HEAD >/dev/null; then
+            # checkout <commit> -- <path> 会同时写入索引与工作区，无需再 reset
+            git checkout -q FETCH_HEAD -- archive 2>/dev/null || true
+          fi
+          ARCH="archive/v${VER}/${GITHUB_SHA::7}"
+          mkdir -p "$ARCH"
+          cp SHA256SUMS sbx.sh sbx.sh.sha256 "$ARCH/"
+          {
+            echo "version: v${VER}"
+            echo "commit: ${GITHUB_SHA}"
+            echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "artifacts:"
+            awk '{printf "  - %s  %s\n", $2, $1}' SHA256SUMS
+          } > "$ARCH/MANIFEST"
+          git add -f archive
+          # 只保留最近 20 个归档，防止分支体积无界增长
+          keep=$(git ls-files 'archive/*/MANIFEST' | sed -E 's#^archive/([^/]+)/.*#\1#' | sort -u | tail -20)
+          for v in $(git ls-files 'archive/*/MANIFEST' | sed -E 's#^archive/([^/]+)/.*#\1#' | sort -u); do
+            if ! printf '%s\n' "$keep" | grep -qx "$v"; then
+              git rm -r -q --cached "archive/$v" 2>/dev/null || true
+            fi
+          done
+          echo "归档: $ARCH（保留最近 $(printf '%s\n' "$keep" | grep -c . ) 个版本）"
+
           git commit -qm "dist: rebuild from ${GITHUB_SHA::7} (v$VER)"
           git push -f origin dist-new:dist
+
+      - name: 为当前版本打 Tag（已存在则跳过，重大版本可追溯）
+        if: steps.changed.outputs.skip != 'true'
+        run: |
+          VER="$(grep -m1 '^const Version' internal/version/version.go | sed 's/.*"\(.*\)".*/\1/')"
+          TAG="v$VER"
+          # 项目此前刻意不用 Tag（dist 是 rolling latest）。这里只补"可追溯锚点"：
+          # 同一版本重复发布不覆盖既有 Tag（避免指针漂移），Tag 指向当时的 main。
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG 已存在，跳过"
+          else
+            git tag -a "$TAG" -m "SBX $TAG (build ${GITHUB_SHA::7})" "$GITHUB_SHA"
+            git push origin "refs/tags/$TAG"
+            echo "已创建 Tag $TAG"
+          fi
 
       - name: 验证 raw 分发地址真实可用（amd64 + SHA256SUMS）
         if: steps.changed.outputs.skip != 'true'
