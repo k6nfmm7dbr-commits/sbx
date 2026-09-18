@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # actions/checkout@v4（pin 完整 commit SHA，防供应链替换）
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       # actions/setup-go@v5
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
@@ -94,7 +94,7 @@ jobs:
     runs-on: ubuntu-latest
     container: golang:1.27-alpine
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: gofmt / vet / test（musl）
         run: |
@@ -118,7 +118,7 @@ jobs:
   vulncheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
@@ -141,7 +141,7 @@ jobs:
       contents: write
     steps:
       # actions/checkout@v4
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       # actions/setup-go@v5
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
