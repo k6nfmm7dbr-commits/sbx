@@ -1286,6 +1286,8 @@ ExecStop=$CORE_BIN clear
 WantedBy=multi-user.target
 EOF
 
+# >>> panel-unit（tests/installer_flow_test.sh 提取本区块做沙箱路径校验；
+# 标记必须在行首——测试用 sed '/^# >>> panel-unit/' 提取，缩进会匹配不到）
       cat > /etc/systemd/system/sbx-panel.service <<EOF
 [Unit]
 Description=SBX traffic panel
@@ -1301,12 +1303,22 @@ RestartSec=3
 # v3.0.5 最小权限沙箱（经真机验证）。
 # 面板进程仍需 CAP_NET_ADMIN：sbx-core serve 内嵌 Collector 与策略层，需执行
 # nft（读计数器 / 应用 sbx_policy）；还需读 /proc（连接数、conntrack）、
-# 读写 /etc/sbx 与 /run/sbx（SQLite/状态文件）、绑定面板端口。
+# 读写 /etc/sbx（SQLite/状态文件/节点配置）、绑定面板端口。
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=full
-ReadWritePaths=/etc/sbx /run/sbx
+# 只列出**实际存在且确实要写**的路径。
+#
+# 为什么这条注释必须留着：ReadWritePaths 里出现不存在的路径时，
+# systemd < 248（Debian 11 / Ubuntu 20.04 / RHEL 8 等）会让服务以
+# status=226/NAMESPACE 无限重启，而 systemd ≥ 248 会静默忽略——同一份 unit
+# 在新系统上"看起来没问题"，到老系统上就是面板永远起不来。
+# 曾因此写过 /run/sbx：它在代码里从未被创建也从未被使用（全仓只有这一处提及），
+# 而 /run 是 tmpfs、每次重启清空，于是 Debian 11 上安装后面板直接不可用。
+# 规则：只写 $APP_DIR 这类安装时确实创建的路径；确需"可能不存在"的路径时
+# 必须加 "-" 前缀（systemd 会忽略缺失项）。
+ReadWritePaths=$APP_DIR
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
@@ -1321,6 +1333,7 @@ AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 [Install]
 WantedBy=multi-user.target
 EOF
+# <<< panel-unit
       systemctl daemon-reload
       systemctl enable sing-box sbx-firewall sbx-panel >/dev/null 2>&1
       ;;
@@ -1366,6 +1379,20 @@ EOF
       ;;
   esac
   ok "服务已注册（开机自启）"
+}
+
+# wait_service_active 轮询等待服务真正进入 active。
+#
+# 为什么需要：对 Restart=always 的 unit，`systemctl restart` 会立刻返回 0，
+# 即使进程随后就以 226/NAMESPACE 反复崩溃（unit 处于 activating/auto-restart）。
+# 只看 restart 的返回码会把"面板根本没起来"当成成功——真机事故就是这么漏掉的。
+wait_service_active() { # wait_service_active <unit> [最多等几秒]
+  local unit="$1" secs="${2:-10}" i
+  for ((i = 0; i < secs * 2; i++)); do
+    svc_do status "$unit" && return 0
+    sleep 0.5
+  done
+  return 1
 }
 
 start_all() {
@@ -2068,6 +2095,16 @@ do_install() {
   start_all
   # 全新安装的计数规则应用失败必须让用户知道，不能静默带过
   fw_apply || warn "计数规则应用失败，流量统计暂不可用；可在菜单中重试"
+
+  # 面板必须真的进入 active 才算安装成功。systemd 沙箱配置错误（例如
+  # ReadWritePaths 指向不存在的路径）在老 systemd 上会让服务无限重启，
+  # 而 `systemctl restart` 仍返回 0——不显式校验就会"安装完成"但面板是红的。
+  if ! wait_service_active sbx-panel 10; then
+    err "面板服务未能进入运行状态（当前: $(svc_do status sbx-panel 2>&1 || echo 未运行)）"
+    err "  排查：journalctl -u sbx-panel -n 50 --no-pager"
+    err "  若看到 status=226/NAMESPACE：说明服务沙箱路径与实际不符（多为路径不存在）"
+    warn "其它组件已安装完成；面板修好后运行 sbx 即可，或重新执行安装脚本"
+  fi
 
   local nnum
   nnum=$(core_node count)
