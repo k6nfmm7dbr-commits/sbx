@@ -211,14 +211,75 @@ install_deps() {
   info "检查依赖..."
   [[ "$PKG" == "apt" ]] && { apt-get update -qq >/dev/null 2>&1 || true; }
 
-  local need=()
-  command -v curl    >/dev/null 2>&1 || need+=(curl)
-  command -v tar     >/dev/null 2>&1 || need+=(tar)
-  command -v openssl >/dev/null 2>&1 || need+=(openssl)
-  # jq：候选配置提交前的 route.final 引用完整性自检需要（见 sanitize_candidate_route）。
-  # 缺失不阻断安装——自检会降级为告警，行为退回到修复前，不会更糟。
-  command -v jq      >/dev/null 2>&1 || need+=(jq)
-  ((${#need[@]})) && { info "安装: ${need[*]}"; pkg_install "${need[@]}"; }
+  # 依赖分「必需 / 可选」两类，各自独立处理。
+  #
+  # 为什么必须分开（真实故障）：早期实现把 curl/tar/openssl/jq 混在一次
+  # `pkg_install` 调用里，任一失败就被 `set -e` 整体中断——与代码里
+  # 「jq 缺失不阻断安装」的承诺自相矛盾。真机上出现过：Debian 11（已 EOL）
+  # 的 security 源被移除，apt 装 jq 报 404，整个安装器当场退出，
+  # 用户看到的是"装个 jq 失败就装不下去了"。
+  #
+  # 包管理器安装命令（按发行版给出可照抄的下一步；内联在函数内以便
+  # tests/installer_flow_test.sh 整体提取本函数后仍可独立运行）。
+  local pm_hint
+  case "$PKG" in
+    apt) pm_hint="apt-get install -y" ;;
+    dnf) pm_hint="dnf install -y" ;;
+    yum) pm_hint="yum install -y" ;;
+    apk) pm_hint="apk add" ;;
+    *)   pm_hint="请用本发行版的包管理器安装" ;;
+  esac
+
+  # ---- 必需依赖：缺失则无法下载/解包，装不上必须中止 ----
+  local required=()
+  command -v curl >/dev/null 2>&1 || required+=(curl)
+  command -v tar  >/dev/null 2>&1 || required+=(tar)
+  if ((${#required[@]})); then
+    info "安装必需依赖: ${required[*]}"
+    pkg_install "${required[@]}" || true   # 失败留给下面的复检统一报错
+  fi
+  local missing_req=()
+  for c in curl tar; do
+    command -v "$c" >/dev/null 2>&1 || missing_req+=("$c")
+  done
+  if ((${#missing_req[@]})); then
+    err "必需依赖安装失败: ${missing_req[*]}"
+    err "请先手动安装后重试：  $pm_hint ${missing_req[*]}"
+    err "若 apt 报 404 Not Found：该发行版很可能已 EOL、软件源被移除"
+    err "（例如 Debian 11 bullseye 需把源指向 archive.debian.org 后再 update）"
+    die "依赖缺失，已中止安装（未做任何改动）"
+  fi
+
+  # ---- 可选依赖：缺失只降级，绝不阻断安装 ----
+  #   · jq      ：候选配置提交前的 route.final 引用完整性自检（见
+  #               sanitize_candidate_route）；缺失时自检降级为告警
+  #   · openssl ：sha256sum 不可用时的 sha256 兜底实现
+  local optional=()
+  command -v jq      >/dev/null 2>&1 || optional+=(jq)
+  command -v openssl >/dev/null 2>&1 || optional+=(openssl)
+  if ((${#optional[@]})); then
+    info "安装可选依赖: ${optional[*]}"
+    if ! pkg_install "${optional[@]}"; then
+      local still=()
+      for c in "${optional[@]}"; do
+        command -v "$c" >/dev/null 2>&1 || still+=("$c")
+      done
+      if ((${#still[@]})); then
+        warn "可选依赖未能安装: ${still[*]}（不影响安装，相关功能自动降级）"
+        warn "  常见原因：发行版已 EOL，软件源被移除（apt 报 404 Not Found）"
+        warn "  如需补装：  $pm_hint ${still[*]}"
+        warn "  已 EOL 的 Debian（如 11 bullseye）需先把源指向 archive.debian.org"
+      fi
+    fi
+  fi
+
+  # 供应链校验能力：sha256sum 或 openssl 至少要有一个，否则无法校验下载产物。
+  # 这是 fail-closed 的硬要求——没有校验能力就绝不继续安装。
+  if ! command -v sha256sum >/dev/null 2>&1 && ! command -v openssl >/dev/null 2>&1; then
+    err "既没有 sha256sum 也没有 openssl，无法校验下载产物的完整性"
+    err "请安装 coreutils 或 openssl 后重试：  $pm_hint coreutils"
+    die "缺少校验工具，已中止安装（未做任何改动）"
+  fi
 
   # 计数/策略后端：nftables 是唯一后端（v3.0.9 起 nftables-only）。
   # 不存在回退：装不上或装完仍不可用一律中止安装，绝不静默降级到其它后端。

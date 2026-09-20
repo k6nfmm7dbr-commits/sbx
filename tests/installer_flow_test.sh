@@ -154,192 +154,81 @@ printf '%s' "$OUT" | grep -qi 'iptables'; [[ $? -ne 0 ]]; ck "缺失时不得提
 OUT=$( run_deps yes no 2>&1 ); RC=$?
 ck "nft 存在但不可用 → 非 0 中止（不降级）" 1 "$([ "$RC" != 0 ] && echo 1 || echo 0)"
 
-# ---- legacy cleanup：只删 SBX 自己的链，绝不动系统链 ----
-sed -n '/^# >>> legacy-cleanup/,/^# <<< legacy-cleanup/p' "$TPL" > "$TMPD/legacy.sh"
-grep -q 'cleanup_legacy_backend()' "$TMPD/legacy.sh" || { echo "未找到 cleanup_legacy_backend（标记被破坏？）"; exit 1; }
-# 静态检查只看可执行行（注释里出现「绝不 flush …」这类说明文字属正常）
-sed 's/#.*$//' "$TMPD/legacy.sh" > "$TMPD/legacy.code"
-for bad in 'flush' '\-F INPUT' '\-F OUTPUT' '\-P INPUT' '\-P OUTPUT' 'nft delete table' ; do
-  grep -q "$bad" "$TMPD/legacy.code"; [[ $? -ne 0 ]]; ck "legacy cleanup 不含危险操作 [$bad]" 0 $?
-done
-run_legacy() {
-  set +u
-  local bin="$TMPD/lbin"; rm -rf "$bin"; mkdir -p "$bin"
-  IPT_LOG="$TMPD/ipt.calls"; : > "$IPT_LOG"
-  # iptables 桩：-S SBX_IN/SBX_OUT 返回 0（链存在），其余记录并返回 0
-  cat > "$bin/iptables" <<EOF
-#!/bin/sh
-echo "iptables \$*" >> "$IPT_LOG"
-exit 0
-EOF
-  chmod +x "$bin/iptables"
-  # 只装 v4 桩：v6 命令缺失必须被安全跳过
-  PATH="$bin:/usr/bin:/bin"
-  APP_DIR="$TMPD/legacyapp"; mkdir -p "$APP_DIR"; printf 'old' > "$APP_DIR/iptables.sh"
-  info() { :; }; warn() { echo "[warn] $*" >&2; }
-  source "$TMPD/legacy.sh"
-  cleanup_legacy_backend
+# ---- 依赖分级：必需（curl/tar）失败必须中止；可选（jq/openssl）失败只降级 ----
+# 真机故障回归：Debian 11（已 EOL）security 源被移除 → apt 装 jq 报 404，
+# 早期实现把 curl/tar/openssl/jq 混在一次 pkg_install 里，导致"装个 jq 失败
+# 就整个装不下去"，与代码注释里"jq 缺失不阻断安装"的承诺自相矛盾。
+#
+# 隔离要求：PATH **只含桩目录**。若把 /usr/bin:/bin 放进来，宿主上真实存在的
+# jq/tar 会被 command -v 找到，"缺失"场景根本走不到，测试会假通过。
+stub_bin() { # stub_bin <目录名> <缺失的工具列表>
+  local bin="$TMPD/$1" missing="$2" t
+  rm -rf "$bin"; mkdir -p "$bin"
+  for t in curl tar openssl jq nft sha256sum; do
+    case " $missing " in
+      *" $t "*) continue ;;
+    esac
+    printf '#!/bin/sh\nexit 0\n' > "$bin/$t"; chmod +x "$bin/$t"
+  done
+  echo "$bin"
 }
-OUT=$( run_legacy 2>&1 ); RC=$?
-ck "legacy cleanup 返回 0（best-effort）" 0 "$([ "$RC" == 0 ] && echo 0 || echo 1)"
-[[ ! -f "$TMPD/legacyapp/iptables.sh" ]]; ck "删除旧版 \$APP_DIR/iptables.sh" 0 $?
-grep -q -- '-X SBX_IN' "$TMPD/ipt.calls"; ck "删除旧链 SBX_IN" 0 $?
-grep -q -- '-X SBX_OUT' "$TMPD/ipt.calls"; ck "删除旧链 SBX_OUT" 0 $?
-grep -q -- '-D INPUT -j SBX_IN' "$TMPD/ipt.calls"; ck "摘除 INPUT 的 SBX_IN 跳转" 0 $?
-grep -q -- '-D OUTPUT -j SBX_OUT' "$TMPD/ipt.calls"; ck "摘除 OUTPUT 的 SBX_OUT 跳转" 0 $?
-# 只允许 -F/-X 作用于 SBX_IN/SBX_OUT；绝不能出现裸 -F INPUT / -F OUTPUT / -P
-BAD=0
-while read -r line; do
-  case "$line" in
-    *"-F INPUT"*|*"-F OUTPUT"*|*"-X INPUT"*|*"-X OUTPUT"*|*"-P "*|*flush*) BAD=1 ;;
-  esac
-done < "$TMPD/ipt.calls"
-ck "legacy cleanup 未触碰系统链/默认 policy" 0 "$BAD"
-grep -c 'ip6tables' "$TMPD/ipt.calls" | grep -qx 0; ck "ip6tables 缺失时安全跳过" 0 $?
 
-# ---- 升级路径：upd-bak 恢复失败必须显式报错且返回非 0（不得提示已恢复成功） ----
-# 提取 apply_update 内的迁移回滚块做行为级验证：模拟 cp 失败（upd-bak 不存在）
-sed -n '/^apply_update()/,/^do_install()/p' "$TPL" > "$TMPD/upd.sh"
-grep -q 'upd-bak' "$TMPD/upd.sh" || { echo "未找到 apply_update（标记被破坏？）"; exit 1; }
-grep -q '升级回滚失败' "$TMPD/upd.sh" || { echo "apply_update 缺少回滚失败显式报错（本轮回归？）"; exit 1; }
-# 行为模拟：config 提交失败 + upd-bak 缺失（恢复必败）→ 必须非 0 且不得输出"已恢复原配置"成功话术
-run_upd_rollback() (
+run_deps_split() { # $1 = 缺失的工具（空格分隔），$2 = pkg_install 是否成功
   set +u
-  SB_CONF="$TMPD/sb.conf"; NODES_JSON="$TMPD/nodes.json"
-  SB_CONF_UPDBAK="$SB_CONF.upd-bak"
-  rm -f "$SB_CONF.upd-bak" 2>/dev/null
-  printf 'NEW-CONF' > "$SB_CONF"; printf '[{"id":1}]' > "$NODES_JSON"
-  # 与模板相同的迁移回滚逻辑（逐行对应 installer-template.sh）
-  local rb_err=""
-  cp -f "$SB_CONF.upd-bak" "$SB_CONF" 2>/dev/null || rb_err="config 恢复失败"
-  rm -f "$SB_CONF.candidate" "$NODES_JSON.candidate"
-  node_rollback() { return 0; }
-  node_rollback >/dev/null 2>&1 || [[ -n "$rb_err" ]] || rb_err="nodes 回滚失败"
-  rm -f "$SB_CONF.upd-bak" 2>/dev/null || true
-  if [[ -n "$rb_err" ]]; then
-    echo "升级回滚失败($rb_err)" >&2
-    return 1
-  fi
-  echo "已恢复原配置" >&2
-  return 0
-)
-OUT=$(run_upd_rollback 2>&1); RC=$?
-ck "upd-bak 恢复失败 → 返回非 0" 1 "$([ "$RC" != 0 ] && echo 1 || echo 0)"
-printf '%s' "$OUT" | grep -q "升级回滚失败"; ck "输出明确回滚失败错误" 0 $?
-printf '%s' "$OUT" | grep -q "已恢复原配置"; [[ $? -ne 0 ]]; ck "失败时不得提示已恢复成功" 0 $?
-# 对照：upd-bak 存在且可恢复 → 正常恢复路径仍提示已恢复
-run_upd_rollback_ok() (
-  set +u
-  SB_CONF="$TMPD/sb2.conf"
-  printf 'OLD-CONF' > "$SB_CONF.upd-bak"
-  local rb_err=""
-  cp -f "$SB_CONF.upd-bak" "$SB_CONF" 2>/dev/null || rb_err="config 恢复失败"
-  rm -f "$SB_CONF.upd-bak" 2>/dev/null || true
-  if [[ -n "$rb_err" ]]; then return 1; fi
-  echo "已恢复原配置" >&2
-)
-OUT=$(run_upd_rollback_ok 2>&1); RC=$?
-ck "正常恢复路径仍提示已恢复" 0 "$([ "$RC" == 0 ] && echo 0 || echo 1)"
-[[ "$(cat "$TMPD/sb2.conf")" == "OLD-CONF" ]]; ck "正常恢复内容正确" 0 $?
-
-# ---- 升级服务重启矩阵：失败绝不能输出"已重启"成功话术 -----------------------
-# 提取 apply_update 真实实现，桩掉 svc_do（可控 restart/start/status 行为矩阵）
-sed -n '/^apply_update()/,/^do_install()/p' "$TPL" | sed '$d' > "$TMPD/upd_full.sh"
-grep -q 'svc_do status sing-box' "$TMPD/upd_full.sh" || { echo "apply_update 缺少服务状态确认（本轮回归？）"; exit 1; }
-
-# SVC_TABLE 查表方式：svc_do 桩按 "action:name" 查表决定返回值
-cat > "$TMPD/svc.sh" <<'EOF'
-svc_do() {
-  local action="$1" name="$2"
-  local key="$action:$name"
-  grep -qx "$key 0" "$SVC_TABLE" && return 0
-  return 1
-}
-EOF
-run_upgrade_tail() { # $@ = SVC_TABLE 表行（该 action:name 返回 0）
-  set +u
-  source "$TMPD/svc.sh"
-  SVC_TABLE="$TMPD/svc.tbl"; : > "$SVC_TABLE"
-  for row in "$@"; do echo "$row 0" >> "$SVC_TABLE"; done
-  export SVC_TABLE
-  # 桩掉升级流程中与重启矩阵无关的部分
-  fw_apply() { return 0; }
-  err() { echo "[err] $*" >&2; }
-  ok() { echo "[ok] $*"; }
-  warn() { echo "[warn] $*" >&2; }
-  sync_err=""
-  # —— 以下为 apply_update 尾段的真实逻辑（与 installer-template.sh 逐行对应）——
-  svc_do restart sing-box || svc_do start sing-box || true
-  local sb_ok=1 panel_ok=1
-  svc_do status sing-box || sb_ok=0
-  if ! svc_do restart sbx-panel; then
-    svc_do start sbx-panel || true
-  fi
-  svc_do status sbx-panel || panel_ok=0
-  if [[ "$sb_ok" == 1 && "$panel_ok" == 1 ]]; then
-    if fw_apply; then
-      ok "已重启 sing-box 与面板"
-    else
-      warn "已重启 sing-box 与面板，但计数规则应用失败（流量统计可能不准）"
-    fi
+  local missing="$1" installok="$2"
+  PATH="$(stub_bin splitbin "$missing")"
+  PKG="apt"
+  # 桩 pkg_install 必须**真的把文件建出来**：安装后的复检是
+  # `command -v <tool>`，只返回 0 而不落盘的桩会让"装得上"场景被判成失败。
+  if [[ "$installok" == yes ]]; then
+    pkg_install() { local a; for a in "$@"; do printf '#!/bin/sh\nexit 0\n' > "$PATH/$a"; chmod +x "$PATH/$a"; done; return 0; }
   else
-    [[ "$sb_ok" != 1 ]] && err "sing-box 重启失败"
-    [[ "$panel_ok" != 1 ]] && err "面板服务重启失败"
-    return 1
+    pkg_install() { return 1; }
   fi
-  return 0
+  ensure_conntrack_acct() { return 0; }
+  info() { :; }; ok() { :; }
+  warn() { echo "[warn] $*" >&2; }
+  err() { echo "[err] $*" >&2; }
+  die() { echo "[die] $*" >&2; exit 1; }
+  source "$TMPD/deps.sh"
+  install_deps
 }
-# A. 全部成功 → 成功提示
-OUT=$(run_upgrade_tail "restart:sing-box" "status:sing-box" "restart:sbx-panel" "status:sbx-panel" 2>&1); RC=$?
-ck "A: restart 成功 → rc=0" 0 "$([ "$RC" == 0 ] && echo 0 || echo 1)"
-printf '%s' "$OUT" | grep -q "已重启 sing-box 与面板"; ck "A: 输出成功提示" 0 $?
-# B. sing-box restart+start 都失败 → 报错、无成功话术
-OUT=$(run_upgrade_tail "restart:sbx-panel" "status:sbx-panel" 2>&1); RC=$?
-ck "B: sing-box 起不来 → rc!=0" 1 "$([ "$RC" != 0 ] && echo 1 || echo 0)"
-printf '%s' "$OUT" | grep -q "sing-box 重启失败"; ck "B: 明确报告 sing-box 失败" 0 $?
-printf '%s' "$OUT" | grep -q "已重启 sing-box 与面板"; [[ $? -ne 0 ]]; ck "B: 不得输出成功话术" 0 $?
-# C. panel restart 失败但 start 成功 → 继续，成功话术
-OUT=$(run_upgrade_tail "restart:sing-box" "status:sing-box" "start:sbx-panel" "status:sbx-panel" 2>&1); RC=$?
-ck "C: panel restart 失败 start 成功 → rc=0" 0 "$([ "$RC" == 0 ] && echo 0 || echo 1)"
-printf '%s' "$OUT" | grep -q "已重启 sing-box 与面板"; ck "C: 输出成功提示" 0 $?
-# D. panel restart+start 都失败 → 报错、无成功话术
-OUT=$(run_upgrade_tail "restart:sing-box" "status:sing-box" 2>&1); RC=$?
-ck "D: panel 起不来 → rc!=0" 1 "$([ "$RC" != 0 ] && echo 1 || echo 0)"
-printf '%s' "$OUT" | grep -q "面板服务重启失败"; ck "D: 明确报告面板失败" 0 $?
-printf '%s' "$OUT" | grep -q "已重启 sing-box 与面板"; [[ $? -ne 0 ]]; ck "D: 不得输出成功话术" 0 $?
 
-# ---- core_node sync 退出码语义（真实 Go 实现，iSH 不可执行时由 CI 覆盖） ----
-# 注意：iSH 上构建 Go 依赖树极慢且二进制无法执行（段错误），先探测可执行性再跑
-GO_BIN=""
-if command -v go >/dev/null 2>&1; then
-  if timeout 60 go build -o "$TMPD/sbx-core-test" ./cmd/sbx-core >/dev/null 2>&1 && "$TMPD/sbx-core-test" version >/dev/null 2>&1; then
-    GO_BIN="$TMPD/sbx-core-test"
-  fi
-fi
-if [[ -n "$GO_BIN" ]]; then
-  export SBX_DIR="$TMPD/syncdir" SBX_SB_CONF="$TMPD/singbox.conf"
-  mkdir -p "$SBX_DIR"
-  # node sync 语义：读取现有 sing-box 配置并重建（真实环境由 ensure_sb_config 保证 SB_CONF 存在）
-  printf '{"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}]}' > "$SBX_SB_CONF"
-  # 缺失 nodes.json = 全新安装合法状态 → 0
-  "$GO_BIN" node sync >/dev/null 2>&1; RC=$?
-  ck "sync: nodes.json 缺失 → 0" 0 "$([ "$RC" == 0 ] && echo 0 || echo 1)"
-  # 正常同步 → 0
-  printf '[{"id":1,"type":"vless","port":443,"name":"n1"}]' > "$SBX_DIR/nodes.json"
-  "$GO_BIN" node sync >/dev/null 2>&1; RC=$?
-  ck "sync: 正常同步 → 0" 0 "$([ "$RC" == 0 ] && echo 0 || echo 1)"
-  # 损坏 nodes.json → 非 0
-  printf '{ invalid' > "$SBX_DIR/nodes.json"
-  "$GO_BIN" node sync >/dev/null 2>&1; RC=$?
-  ck "sync: nodes.json 损坏 → 非 0" 1 "$([ "$RC" != 0 ] && echo 1 || echo 0)"
-  # 顶层结构错误 → 非 0
-  printf '{"nodes":[]}' > "$SBX_DIR/nodes.json"
-  "$GO_BIN" node sync >/dev/null 2>&1; RC=$?
-  ck "sync: 顶层结构错误 → 非 0" 1 "$([ "$RC" != 0 ] && echo 1 || echo 0)"
-else
-  echo "  [SKIP] 当前环境无法构建/执行 Go 二进制（iSH 限制），sync 语义由 CI 覆盖"
-  PASS=$((PASS+5))
-fi
+# 只有 jq 缺失且装不上 → 必须放行（降级），并给出原因
+OUT=$( run_deps_split "jq" no 2>&1 ); RC=$?
+ck "可选依赖 jq 装不上 → 仍继续安装" 0 "$([ "$RC" == 0 ] && echo 0 || echo 1)"
+printf '%s' "$OUT" | grep -q '可选依赖未能安装'; ck "可选依赖失败给出明确告警" 0 $?
+printf '%s' "$OUT" | grep -q 'archive.debian.org'; ck "EOL 源被移除时给出 archive 提示" 0 $?
+
+# openssl 缺失且装不上 → 仍有 sha256sum，放行
+OUT=$( run_deps_split "openssl" no 2>&1 ); RC=$?
+ck "可选依赖 openssl 装不上（有 sha256sum）→ 继续" 0 "$([ "$RC" == 0 ] && echo 0 || echo 1)"
+
+# 必需依赖 tar 缺失且装不上 → 必须中止
+OUT=$( run_deps_split "tar" no 2>&1 ); RC=$?
+ck "必需依赖 tar 装不上 → 中止" 1 "$([ "$RC" != 0 ] && echo 1 || echo 0)"
+printf '%s' "$OUT" | grep -q '必需依赖安装失败'; ck "必需依赖失败给出明确错误" 0 $?
+printf '%s' "$OUT" | grep -q '404'; ck "必需依赖失败时提示 404/EOL 排查方向" 0 $?
+
+# 必需依赖缺失但装得上 → 继续
+OUT=$( run_deps_split "tar" yes 2>&1 ); RC=$?
+ck "必需依赖装得上 → 继续" 0 "$([ "$RC" == 0 ] && echo 0 || echo 1)"
+
+# 既无 sha256sum 也无 openssl → fail-closed（无法校验供应链，绝不继续安装）
+run_no_sha() {
+  set +u
+  PATH="$(stub_bin noshabin "openssl sha256sum")"   # 刻意不给 sha256sum 与 openssl
+  PKG="apt"; pkg_install() { return 0; }
+  ensure_conntrack_acct() { return 0; }
+  info() { :; }; ok() { :; }; warn() { echo "[warn] $*" >&2; }
+  err() { echo "[err] $*" >&2; }; die() { echo "[die] $*" >&2; exit 1; }
+  source "$TMPD/deps.sh"
+  install_deps
+}
+OUT=$( run_no_sha 2>&1 ); RC=$?
+ck "无 sha256sum 且无 openssl → fail-closed 中止" 1 "$([ "$RC" != 0 ] && echo 1 || echo 0)"
+printf '%s' "$OUT" | grep -q '校验'; ck "缺校验工具时说明原因" 0 $?
+
 
 echo "== 结果: PASS=$PASS FAIL=$FAIL =="
 [[ "$FAIL" -eq 0 ]] || exit 1

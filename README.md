@@ -72,6 +72,7 @@ SBX 唯一的 netfilter 后端是 **nftables**，不存在后端自动选择或�
 | RHEL / Rocky / Alma | 8 / 9 | systemd | dnf / yum | 支持 |
 | Fedora | 38+ | systemd | dnf | 支持 |
 | Alpine | 3.18+ | OpenRC | apk | 支持（二进制用 musl 构建） |
+| Debian | 10 / 11 | systemd | apt | ⚠️ 已 EOL，需改用 archive 源（见下） |
 
 | 架构 | 二进制 | 备注 |
 |---|---|---|
@@ -82,6 +83,21 @@ SBX 唯一的 netfilter 后端是 **nftables**，不存在后端自动选择或�
 | i386 (386) | ✅ | |
 | s390x | ✅ | |
 | riscv64 | ✅ | |
+
+**已 EOL 的发行版（如 Debian 10/11）**：官方安全源已下线，`apt-get install`
+会报 `404 Not Found`。安装器此时会给出明确提示（可选依赖失败只降级不阻断），
+但 **nftables 装不上就无法继续**——请先把软件源指向归档站再重试：
+
+```bash
+# Debian 11 (bullseye) 示例：换成归档源并关闭 Valid-Until 检查
+sudo sed -i 's|deb.debian.org|archive.debian.org|g; \
+              s|security.debian.org/debian-security|archive.debian.org/debian-security|g; \
+              /bullseye-updates/d' /etc/apt/sources.list
+echo 'Acquire::Check-Valid-Until "false";' | sudo tee /etc/apt/apt.conf.d/99no-check-valid-until
+sudo apt-get update
+```
+
+更推荐的做法是升级到仍在支持期内的发行版（Debian 12+）。
 
 **nftables 不可用时**：安装器会明确报错并中止（绝不降级），提示安装
 命令（`apt install nftables` / `dnf install nftables` / `apk add nftables`）并
