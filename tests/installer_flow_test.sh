@@ -435,5 +435,61 @@ else
   PASS=$((PASS+5))
 fi
 
+# ---- resolv.conf 误判修复（Go 程序 DNS 全废的真机事故）----
+# 真机事故：节点连得上、TLS 正常，但打开任何网站都失败。根因是 Debian 的
+# resolvconf 包在 head 模板里写了 "127.0.0.53 is the systemd-resolved stub
+# resolver."，而 Go 判断 systemd-resolved 是**对 resolv.conf 做子串匹配**
+# （不解析注释）→ 所有 DNS 走 D-Bus → 报 dbus-org.freedesktop.resolve1 不存在。
+sed -n '/^# >>> dns-guard/,/^# <<< dns-guard/p' "$TPL" > "$TMPD/dns.sh"
+grep -q 'fix_resolv_conf_misdetection()' "$TMPD/dns.sh" || { echo "未找到 dns-guard 区块"; exit 1; }
+
+run_dns_guard() { # $1 = systemd-resolved 是否在跑(yes/no)，$2 = head 内容，$3 = resolv.conf 内容
+  set +u
+  local d="$TMPD/dnsfix"; rm -rf "$d"; mkdir -p "$d/resolvconf.d"
+  printf '%s' "$2" > "$d/resolvconf.d/head"
+  printf '%s' "$3" > "$d/resolv.conf"
+  # 桩 systemctl：控制 is-active 结果
+  local bin="$TMPD/dnsbin"; rm -rf "$bin"; mkdir -p "$bin"
+  if [[ "$1" == yes ]]; then printf '#!/bin/sh\nexit 0\n' > "$bin/systemctl"
+  else printf '#!/bin/sh\nexit 3\n' > "$bin/systemctl"; fi
+  chmod +x "$bin/systemctl"
+  # 桩目录放最前（systemctl 用桩），但必须保留真实工具目录——
+  # 被测函数要用 sed/grep/readlink 改文件；PATH 只留桩会导致
+  # "sed: command not found" 而让断言假失败（本用例先踩过一次）。
+  PATH="$bin:/usr/bin:/bin"
+  warn() { :; }; err() { :; }
+  SBX_RESOLVCONF_HEAD="$d/resolvconf.d/head" SBX_RESOLV_CONF="$d/resolv.conf" \
+    bash -c 'source "'"$TMPD"'/dns.sh"; fix_resolv_conf_misdetection'
+  echo "$d"
+}
+
+HEAD_BAD='# header
+# 127.0.0.53 is the systemd-resolved stub resolver.
+'
+RESOLV_BAD='# 127.0.0.53 is the systemd-resolved stub resolver.
+nameserver 103.245.166.9
+'
+
+D=$( run_dns_guard no "$HEAD_BAD" "$RESOLV_BAD" )
+grep -q '127.0.0.53' "$D/resolvconf.d/head" && HB=1 || HB=0
+ck "head 模板里的误导注释被清除" 0 "$HB"
+grep -q '127.0.0.53' "$D/resolv.conf" && RB=1 || RB=0
+ck "生效 resolv.conf 里的误导注释被清除" 0 "$RB"
+grep -q 'nameserver 103.245.166.9' "$D/resolv.conf"; ck "真实 nameserver 必须保留" 0 $?
+
+# 反向：127.0.0.53 真的是 nameserver（systemd-resolved 真在用）→ 绝不能删，否则断网
+D=$( run_dns_guard no '' 'nameserver 127.0.0.53
+' )
+grep -q 'nameserver 127.0.0.53' "$D/resolv.conf"; ck "127.0.0.53 是真 nameserver 时不得删除（防断网）" 0 $?
+
+# systemd-resolved 在跑 → 什么都不动
+D=$( run_dns_guard yes "$HEAD_BAD" "$RESOLV_BAD" )
+grep -q '127.0.0.53' "$D/resolvconf.d/head"; ck "systemd-resolved 运行中时不改动配置" 0 $?
+
+# 安装与升级路径都必须调用该修复
+grep -q 'fix_resolv_conf_misdetection$' "$TPL"; ck "do_install 调用 DNS 误判修复" 0 $?
+[[ $(grep -c 'fix_resolv_conf_misdetection' "$TPL") -ge 3 ]]; ck "升级路径同样调用该修复" 0 $?
+
+
 echo "== 结果: PASS=$PASS FAIL=$FAIL =="
 [[ "$FAIL" -eq 0 ]] || exit 1

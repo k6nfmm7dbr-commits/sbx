@@ -1286,6 +1286,66 @@ ExecStop=$CORE_BIN clear
 WantedBy=multi-user.target
 EOF
 
+# >>> dns-guard（tests/installer_flow_test.sh 提取本区块做隔离测试）
+# fix_resolv_conf_misdetection —— 修掉让 Go 程序 DNS 全废的 resolv.conf 误判。
+#
+# 真机事故：节点能连上、TLS 握手正常，但打开任何网站都失败。sing-box 日志：
+#   open connection to www.google.com:443 using outbound/direct: lookup www.google.com:
+#   (exchange6: Unit dbus-org.freedesktop.resolve1.service not found. | exchange4: ...)
+#
+# 根因：Go 的 net 解析器判定"系统是否在用 systemd-resolved"是**对
+# /etc/resolv.conf 做子串匹配**（找 "127.0.0.53"），并不解析注释。而 Debian 的
+# resolvconf 包在 /etc/resolvconf/resolv.conf.d/head 里固定写着
+#   # 127.0.0.53 is the systemd-resolved stub resolver.
+# 于是即使实际 nameserver 完全正常、systemd-resolved 根本没装，Go 也会把所有
+# 查询走 D-Bus，直接报错。curl/getent（glibc）不受影响，所以表现为
+# "服务器自己 curl 谷歌正常，但走节点的流量全挂"——极难排查。
+#
+# 处理原则（保守）：
+#   · systemd-resolved 真在跑 → 127.0.0.53 是合法 stub，什么都不动；
+#   · 只删"提到 127.0.0.53 但不是 nameserver 行"的内容（注释/模板），
+#     绝不删真正的 nameserver 行（那会直接断网）；
+#   · 只改符号链接指向的真实文件（sed -i 直接作用在 /etc/resolv.conf 这个
+#     符号链接上会把链接替换成普通文件，破坏 resolvconf 的托管）。
+fix_resolv_conf_misdetection() {
+  # systemd-resolved 正在运行 → 不做任何改动
+  if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+    return 0
+  fi
+
+  # 路径可用环境变量覆盖：测试需要在临时目录上验证，且 CI 不能碰真实 /etc。
+  # 生产默认值即真实路径，不设这些变量时行为完全一致。
+  local fixed=0 head="${SBX_RESOLVCONF_HEAD:-/etc/resolvconf/resolv.conf.d/head}"
+  local resolv="${SBX_RESOLV_CONF:-/etc/resolv.conf}"
+  # 1) 源头：resolvconf 的 head 模板（改了它，重启/网络变化后也不会再生成回来）
+  if [[ -f "$head" ]] && grep -q '127\.0\.0\.53' "$head"; then
+    sed -i '/127\.0\.0\.53/d' "$head" && fixed=1
+  fi
+  # 2) 当前生效的文件：跟随符号链接改真实文件
+  local real
+  real="$(readlink -f "$resolv" 2>/dev/null || true)"
+  [[ -n "$real" && -f "$real" ]] || real="$resolv"
+  if [[ -f "$real" ]] && grep -q '127\.0\.0\.53' "$real"; then
+    # 仅当它**不是**真正的 nameserver 行时才删
+    if ! grep -qE '^[[:space:]]*nameserver[[:space:]]+127\.0\.0\.53([[:space:]]|$)' "$real"; then
+      sed -i '/127\.0\.0\.53/d' "$real" && fixed=1
+    fi
+  fi
+
+  if [[ "$fixed" == 1 ]]; then
+    # 让 resolvconf 用新模板重新生成（失败也不影响：文件本身已经改好了）
+    if command -v resolvconf >/dev/null 2>&1; then
+      resolvconf -u >/dev/null 2>&1 || true
+    fi
+    warn "已修掉 /etc/resolv.conf 里会误导 Go 解析器的 systemd-resolved 注释"
+    warn "  原因：Go 对 resolv.conf 做子串匹配判断 systemd-resolved，"
+    warn "        注释里的 127.0.0.53 会让 sing-box 的 DNS 全部走 D-Bus 而失败"
+    warn "        （表现为：节点连得上但打不开任何网站）"
+  fi
+  return 0
+}
+# <<< dns-guard
+
 # >>> panel-unit（tests/installer_flow_test.sh 提取本区块做沙箱路径校验；
 # 标记必须在行首——测试用 sed '/^# >>> panel-unit/' 提取，缩进会匹配不到）
       cat > /etc/systemd/system/sbx-panel.service <<EOF
@@ -2039,6 +2099,7 @@ apply_update() {
       fi
     fi
   fi
+  fix_resolv_conf_misdetection   # 升级路径同样修 DNS 误判（见函数注释）
   svc_do restart sing-box || svc_do start sing-box || true
   local sb_ok=1 panel_ok=1
   svc_do status sing-box || sb_ok=0
@@ -2092,6 +2153,8 @@ do_install() {
     info "未检测到可用的公网 IPv6，分享链接仅提供 IPv4 版本"
   fi
 
+  # 启动服务前修掉可能让 sing-box DNS 全废的 resolv.conf 误判（见函数注释）
+  fix_resolv_conf_misdetection
   start_all
   # 全新安装的计数规则应用失败必须让用户知道，不能静默带过
   fw_apply || warn "计数规则应用失败，流量统计暂不可用；可在菜单中重试"
