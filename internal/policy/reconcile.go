@@ -119,6 +119,7 @@ func (s *Service) reconcile(ctx context.Context) error {
 	newActiveTCP := map[string]int{}
 	quotaBlocked := map[string]bool{}
 	ipBlocked := map[string]map[string]bool{}
+	rateLimited := map[string]int{} // nodeID -> mbps
 
 	for _, n := range nodeList {
 		id := nodes.IDString(n)
@@ -154,6 +155,13 @@ func (s *Service) reconcile(ctx context.Context) error {
 			IPLimitOn:    cfg.IPLimitEnabled,
 			IPLimitMax:   cfg.IPLimitMax,
 			IPLimitState: "unlimited",
+			RateLimitOn:  cfg.RateLimitEnabled && cfg.RateLimitMbps > 0,
+			RateLimitMbps: func() int {
+				if cfg.RateLimitEnabled {
+					return cfg.RateLimitMbps
+				}
+				return 0
+			}(),
 		}
 		if cfg.QuotaEnabled {
 			st.QuotaState = "ok"
@@ -161,6 +169,11 @@ func (s *Service) reconcile(ctx context.Context) error {
 				st.QuotaState = "exceeded"
 				quotaBlocked[id] = true
 			}
+		}
+		// 限速：启用且 mbps>0 才写入 enforcement 目标。限速与 quota/ip-limit
+		// 相互独立，达 quota 的节点会被整段 drop，此时限速规则形同虚设但无害。
+		if cfg.RateLimitEnabled && cfg.RateLimitMbps > 0 {
+			rateLimited[id] = cfg.RateLimitMbps
 		}
 
 		// ---- Slot Manager admission ----
@@ -222,7 +235,7 @@ func (s *Service) reconcile(ctx context.Context) error {
 	// enforceErr 不阻断状态发布：nft 应用暂时失败（权限/瞬时错误）时面板
 	// 必须照常显示真实用量，并把错误如实呈现（policy_error），
 	// 而不是让 states 永远为空、UI 全显示「不限」。
-	enforceErr := s.applyEnforcement(ctx, quotaBlocked, ipBlocked, nodeList)
+	enforceErr := s.applyEnforcement(ctx, quotaBlocked, ipBlocked, rateLimited, nodeList)
 
 	s.mu.Lock()
 	s.states = newStates

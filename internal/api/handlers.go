@@ -135,6 +135,10 @@ func (s *Server) attachPolicyToSummary(sum *traffic.Summary) {
 		if st.IPLimitOn {
 			sum.Nodes[i].IPLimitState = st.IPLimitState
 		}
+		sum.Nodes[i].RateLimitOn = st.RateLimitOn
+		if st.RateLimitOn {
+			sum.Nodes[i].RateLimitMbps = st.RateLimitMbps
+		}
 	}
 }
 

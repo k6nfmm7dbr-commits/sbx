@@ -1,7 +1,7 @@
 /* SBX 流量面板 —— 前端逻辑（无外部依赖） */
 'use strict';
 
-var state = { days: 60, nodeId: null, summary: null, live: null };
+var state = { days: 180, nodeId: null, summary: null, live: null };
 
 var inflight = {};
 function api(path, params) {
@@ -102,6 +102,10 @@ function quotaLine(n) {
   if (!n.quota_enabled) return '<div class="node-stat"><span>流量配额</span><b>' + fmtBytes(n.quota_used_bytes) + ' / 不限</b></div>';
   return '<div class="node-stat"><span>流量配额</span><b>' + fmtBytes(n.quota_used_bytes) + ' / ' + fmtBytes(n.quota_limit_bytes) + '</b></div>';
 }
+function rateLine(n) {
+  var val = n.rate_limit_enabled && n.rate_limit_mbps > 0 ? (n.rate_limit_mbps + ' Mbps') : '不限';
+  return '<div class="node-stat"><span>限速</span><b>' + esc(val) + '</b></div>';
+}
 function nodeStatus(n) {
   if (n.quota_state === 'exceeded') return '<span class="status-pill danger">流量已用尽</span>';
   if (n.ip_limit_state === 'exceeded') return '<span class="status-pill warn">IP 已达上限</span>';
@@ -128,6 +132,7 @@ function renderNodeCards(s) {
       '<div class="node-stats">' +
         '<div class="node-stat"><span>累计流量</span><b>' + fmtBytes(total) + '</b></div>' +
         quotaLine(n) +
+        rateLine(n) +
         '<div class="node-stat"><span>TCP 连接</span><b data-node-live="' + esc(n.id) + '" data-kind="conns">—</b></div>' +
         '<div class="node-stat"><span>UDP 会话</span><b data-node-live="' + esc(n.id) + '" data-kind="conns_udp">—</b></div>' +
       '</div>' +
@@ -212,12 +217,12 @@ function renderTable(hostId, rows) {
 function drawDaily() { if (cache.daily) renderTable('daily-table', cache.daily); }
 function drawNodeDaily() { if (cache.nodeDaily) renderTable('node-daily-table', cache.nodeDaily); }
 function loadDaily() {
-  return api('/api/daily', { days: 60 }).then(function (d) { cache.daily = d.days; drawDaily(); })
+  return api('/api/daily', { days: 180 }).then(function (d) { cache.daily = d.days; drawDaily(); })
     .catch(function (e) { if (e.message !== '未登录') toast(e.message); });
 }
 function loadNodeDaily() {
   if (state.nodeId == null) return Promise.resolve();
-  return api('/api/daily', { days: 60, scope: 'node:' + state.nodeId })
+  return api('/api/daily', { days: 180, scope: 'node:' + state.nodeId })
     .then(function (d) { cache.nodeDaily = d.days; drawNodeDaily(); })
     .catch(function (e) { if (e.message !== '未登录') toast(e.message); });
 }
@@ -354,6 +359,9 @@ function showPolicy(nodeId) {
     document.getElementById('pol-quota-val').value = '';
   }
   document.getElementById('pol-ip-max').value = n.ip_limit_max > 0 ? n.ip_limit_max : '';
+  document.getElementById('pol-rate-enable').checked = !!n.rate_limit_enabled;
+  document.getElementById('pol-rate-box').classList.toggle('hidden', !n.rate_limit_enabled);
+  document.getElementById('pol-rate-mbps').value = n.rate_limit_mbps > 0 ? n.rate_limit_mbps : '';
   hidePolError();
   openDrawer('policy-drawer');
 }
@@ -382,18 +390,23 @@ function unitToBytes(val, unit) {
 function savePolicy() {
   var quotaOn = document.getElementById('pol-quota-enable').checked;
   var ipOn = document.getElementById('pol-ip-enable').checked;
+  var rateOn = document.getElementById('pol-rate-enable').checked;
   var quotaVal = document.getElementById('pol-quota-val').value;
   var quotaUnit = document.getElementById('pol-quota-unit').value;
   var ipMax = document.getElementById('pol-ip-max').value;
+  var rateMbps = document.getElementById('pol-rate-mbps').value;
 
   var body = {
     quota_enabled: quotaOn,
     quota_limit_bytes: quotaOn ? unitToBytes(quotaVal, quotaUnit) : 0,
     ip_limit_enabled: ipOn,
-    ip_limit_max: ipOn ? Number(ipMax) : 0
+    ip_limit_max: ipOn ? Number(ipMax) : 0,
+    rate_limit_enabled: rateOn,
+    rate_limit_mbps: rateOn ? Number(rateMbps) : 0
   };
   if (quotaOn && body.quota_limit_bytes <= 0) { showPolError('流量额度必须大于 0'); return; }
   if (ipOn && !(body.ip_limit_max >= 1)) { showPolError('最大 IP 数必须 ≥ 1'); return; }
+  if (rateOn && !(body.rate_limit_mbps >= 1)) { showPolError('限速值必须 ≥ 1 Mbps'); return; }
 
   var btn = document.getElementById('pol-save');
   btn.disabled = true; btn.textContent = '保存中…';
@@ -475,4 +488,7 @@ document.getElementById('pol-quota-enable').addEventListener('change', function 
 });
 document.getElementById('pol-ip-enable').addEventListener('change', function (e) {
   document.getElementById('pol-ip-box').classList.toggle('hidden', !e.target.checked);
+});
+document.getElementById('pol-rate-enable').addEventListener('change', function (e) {
+  document.getElementById('pol-rate-box').classList.toggle('hidden', !e.target.checked);
 });

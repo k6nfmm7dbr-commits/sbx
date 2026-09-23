@@ -78,14 +78,16 @@ type SummaryNode struct {
 	ConnsUDP *int     `json:"conns_udp"`
 	// 策略字段（由 API 层填充；traffic 层不感知 policy 语义）。
 	// 全部 omitempty：未启用策略的节点不输出这些键，保持旧 API shape 兼容。
-	QuotaEnabled bool   `json:"quota_enabled,omitempty"`
-	QuotaLimit   int64  `json:"quota_limit_bytes,omitempty"`
-	QuotaUsed    int64  `json:"quota_used_bytes,omitempty"`
-	QuotaState   string `json:"quota_state,omitempty"`
-	IPLimitOn    bool   `json:"ip_limit_enabled,omitempty"`
-	IPLimitMax   int    `json:"ip_limit_max,omitempty"`
-	ActiveIPs    int    `json:"active_ip_count,omitempty"`
-	IPLimitState string `json:"ip_limit_state,omitempty"`
+	QuotaEnabled  bool   `json:"quota_enabled,omitempty"`
+	QuotaLimit    int64  `json:"quota_limit_bytes,omitempty"`
+	QuotaUsed     int64  `json:"quota_used_bytes,omitempty"`
+	QuotaState    string `json:"quota_state,omitempty"`
+	IPLimitOn     bool   `json:"ip_limit_enabled,omitempty"`
+	IPLimitMax    int    `json:"ip_limit_max,omitempty"`
+	ActiveIPs     int    `json:"active_ip_count,omitempty"`
+	IPLimitState  string `json:"ip_limit_state,omitempty"`
+	RateLimitOn   bool   `json:"rate_limit_enabled,omitempty"`
+	RateLimitMbps int    `json:"rate_limit_mbps,omitempty"`
 }
 
 // Summary 对齐 build_summary 返回结构。

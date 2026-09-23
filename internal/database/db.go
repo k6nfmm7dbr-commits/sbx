@@ -59,7 +59,9 @@ CREATE TABLE IF NOT EXISTS node_policy (
     quota_limit_bytes      INTEGER NOT NULL DEFAULT 0,
     quota_reset_baseline   INTEGER NOT NULL DEFAULT 0,
     ip_limit_enabled       INTEGER NOT NULL DEFAULT 0,
-    ip_limit_max           INTEGER NOT NULL DEFAULT 0
+    ip_limit_max           INTEGER NOT NULL DEFAULT 0,
+    rate_limit_enabled     INTEGER NOT NULL DEFAULT 0,
+    rate_limit_mbps        INTEGER NOT NULL DEFAULT 0
 );
 `
 
@@ -167,6 +169,23 @@ func (d *DB) migrate() error {
 	if _, err := tx.Exec("UPDATE samples SET valid=0 WHERE duration_ms<=0"); err != nil {
 		return err
 	}
+	// 无损迁移旧库：v3.0.10 之前的 node_policy 没有 rate_limit_* 两列。
+	// CREATE TABLE IF NOT EXISTS 不会给既有表补列，必须显式 ALTER ADD，
+	// 否则升级后策略读写（8 列 SELECT/INSERT）会因「no such column」失败。
+	npCols, err := tableColumns(tx, "node_policy")
+	if err != nil {
+		return err
+	}
+	if _, ok := npCols["rate_limit_enabled"]; !ok {
+		if _, err := tx.Exec("ALTER TABLE node_policy ADD COLUMN rate_limit_enabled INTEGER NOT NULL DEFAULT 0"); err != nil {
+			return err
+		}
+	}
+	if _, ok := npCols["rate_limit_mbps"]; !ok {
+		if _, err := tx.Exec("ALTER TABLE node_policy ADD COLUMN rate_limit_mbps INTEGER NOT NULL DEFAULT 0"); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
 }
 
@@ -176,7 +195,18 @@ type querier interface {
 }
 
 func sampleColumns(q querier) (map[string]bool, error) {
-	rows, err := q.Query("PRAGMA table_info(samples)")
+	return tableColumns(q, "samples")
+}
+
+// tableColumns 返回指定表的列集合。table 只允许来自代码内的字面量表名
+// （非用户输入），这里仍做一次标识符白名单校验，杜绝把任意串拼进 PRAGMA。
+func tableColumns(q querier, table string) (map[string]bool, error) {
+	for _, r := range table {
+		if !(r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+			return nil, fmt.Errorf("非法表名: %q", table)
+		}
+	}
+	rows, err := q.Query("PRAGMA table_info(" + table + ")")
 	if err != nil {
 		return nil, err
 	}

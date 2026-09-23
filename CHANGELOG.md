@@ -6,6 +6,31 @@
 
 本文件记录**用户可见**与**运维相关**的变更。逐条实现细节见 git log。
 
+## v3.0.11 — 节点限速 + 趋势窗口延长
+
+### 新增
+
+- **节点限速（Mbps）**：Web 面板 → 节点管理抽屉新增「限速」开关，可为每个节点
+  单独设置带宽上限（单位 Mbps，上传 / 下载各自独立限到该值）。由 nftables
+  `limit rate over ... drop` policer 在内核执行，不引入 tc/qdisc；与 quota / IP 上限
+  相互独立。据实说明其性质：这是**限速器（policing，丢弃超额包）而非整形器
+  （shaping，排队）**——对 TCP 仍能有效限流（丢包触发拥塞回退），但不如 tc HTB
+  平滑、会有少量重传。节点卡片新增「限速」一行展示当前状态。
+- **每日趋势窗口 60 → 180 天**：面板「趋势」页与「节点详情」页的每日流量表由最近
+  60 天扩展到 180 天（`/api/daily` 后端上限仍为 365 天，未改）。
+
+### 数据
+
+- `node_policy` 表新增 `rate_limit_enabled` / `rate_limit_mbps` 两列；旧库升级时
+  由迁移逻辑 `ALTER TABLE ADD COLUMN` 无损补列（默认 0 = 不限速），既有配额 /
+  IP 限制配置原样保留。
+
+### 兼容性
+
+- **无破坏性变更**：`/api/summary` 与 `/api/nodes/<id>/policy` 仅**新增**
+  `rate_limit_enabled` / `rate_limit_mbps` 字段（omitempty，未启用不输出）；
+  其余 API 路由、JSON 字段、CLI、`panel.json` 结构均不变。
+
 ## v3.0.10 — 稳定性与安全审计
 
 ### 安全

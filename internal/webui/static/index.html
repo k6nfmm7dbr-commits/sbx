@@ -104,7 +104,7 @@
   <!-- ===== 每日趋势 ===== -->
   <section class="view" id="view-daily">
     <div class="panel glass">
-      <div class="panel-head"><h2>每日流量趋势</h2><span class="hint">最近 60 天</span></div>
+      <div class="panel-head"><h2>每日流量趋势</h2><span class="hint">最近 180 天</span></div>
       <div id="daily-table"></div>
     </div>
   </section>
@@ -185,6 +185,19 @@
       <div id="pol-ip-box" class="box hidden">
         <div class="field row">
           <input type="number" id="pol-ip-max" min="1" step="1" inputmode="numeric" placeholder="最大同时在线数">
+        </div>
+      </div>
+    </section>
+
+    <section class="sect">
+      <label class="switch-row">
+        <div><b>限速</b><small>上传 / 下载各自限到该带宽</small></div>
+        <input type="checkbox" id="pol-rate-enable" class="sw-input"><span class="sw" aria-hidden="true"></span>
+      </label>
+      <div id="pol-rate-box" class="box hidden">
+        <div class="field row">
+          <input type="number" id="pol-rate-mbps" min="1" step="1" inputmode="numeric" placeholder="带宽">
+          <select id="pol-rate-unit" disabled aria-label="单位"><option value="Mbps" selected>Mbps</option></select>
         </div>
       </div>
     </section>

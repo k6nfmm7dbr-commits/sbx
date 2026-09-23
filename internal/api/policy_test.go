@@ -78,8 +78,8 @@ func TestPolicyEndpoints(t *testing.T) {
 		t.Fatalf("默认应全不限: %+v", st)
 	}
 
-	// PUT 设置 quota
-	putBody := `{"quota_enabled":true,"quota_limit_bytes":1073741824,"ip_limit_enabled":true,"ip_limit_max":2}`
+	// PUT 设置 quota + 限速
+	putBody := `{"quota_enabled":true,"quota_limit_bytes":1073741824,"ip_limit_enabled":true,"ip_limit_max":2,"rate_limit_enabled":true,"rate_limit_mbps":50}`
 	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/nodes/1/policy", strings.NewReader(putBody))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+testToken)
@@ -93,6 +93,9 @@ func TestPolicyEndpoints(t *testing.T) {
 	if rr.StatusCode != 200 || !strings.Contains(string(buf[:n]), `"quota_enabled":true`) {
 		t.Fatalf("PUT policy 应 200 且生效: %d %s", rr.StatusCode, buf[:n])
 	}
+	if !strings.Contains(string(buf[:n]), `"rate_limit_enabled":true`) || !strings.Contains(string(buf[:n]), `"rate_limit_mbps":50`) {
+		t.Fatalf("PUT policy 限速应生效: %s", buf[:n])
+	}
 
 	// 参数校验：quota enabled 但 limit=0 → 400
 	bad := `{"quota_enabled":true,"quota_limit_bytes":0}`
@@ -103,6 +106,17 @@ func TestPolicyEndpoints(t *testing.T) {
 	rr2.Body.Close()
 	if rr2.StatusCode != 400 {
 		t.Fatalf("quota limit=0 应 400, got %d", rr2.StatusCode)
+	}
+
+	// 参数校验：限速 enabled 但 mbps=0 → 400
+	badRate := `{"rate_limit_enabled":true,"rate_limit_mbps":0}`
+	req3, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/nodes/1/policy", strings.NewReader(badRate))
+	req3.Header.Set("Content-Type", "application/json")
+	req3.Header.Set("Authorization", "Bearer "+testToken)
+	rr3, _ := http.DefaultClient.Do(req3)
+	rr3.Body.Close()
+	if rr3.StatusCode != 400 {
+		t.Fatalf("rate_limit_mbps=0 应 400, got %d", rr3.StatusCode)
 	}
 
 	// 不存在的节点 → 404

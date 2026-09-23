@@ -7,7 +7,7 @@ SBX 用一条命令在你的服务器上搭好 sing-box 代理节点,并附带�
 netfilter 后端是 **nftables-only**:流量统计、流量配额、在线 IP 上限全部由 nftables(表 `sbx_traffic` / `sbx_policy`)在内核里完成。不支持 iptables,也没有后端自动选择或回退——nftables 不可用时 SBX 会**明确失败并中止**,绝不静默降级或"假装成功"。
 
 <p>
-  <img alt="version" src="https://img.shields.io/badge/version-v3.0.10-blue">
+  <img alt="version" src="https://img.shields.io/badge/version-v3.0.11-blue">
   <img alt="go" src="https://img.shields.io/badge/Go-1.27.1%2B-00ADD8">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
   <img alt="backend" src="https://img.shields.io/badge/netfilter-nftables--only-orange">
@@ -353,7 +353,7 @@ sbx --update --force    # 强制重装当前/最新版本
 
    ```bash
    # 查看某次发布到底发了什么
-   curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/dist/archive/v3.0.10/<commit7>/MANIFEST
+   curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/dist/archive/v3.0.11/<commit7>/MANIFEST
    ```
 
 2. **版本 Tag** — 发布时若 `v<APP_VERSION>` 不存在则创建注解 Tag 指向当时 main(已存在则跳过,避免指针漂移)。
@@ -417,7 +417,7 @@ CI 门禁(`main` 推送全绿才发布):`gofmt` / `go vet` / `go test` / `go tes
 ## 当前版本
 
 ```text
-v3.0.10
+v3.0.11
 ```
 
 源码在 `main` 分支,二进制从 `dist` 分支分发(rolling latest)。

@@ -39,7 +39,9 @@ type State struct {
 	IPLimitMax   int    `json:"ip_limit_max"`
 	ActiveIPs    int    `json:"active_ip_count"`
 	IPLimitState string `json:"ip_limit_state"` // unlimited / ok / exceeded
-
+	// 限速（单向 Mbps，输入/输出各自独立限到此值）。0/false 表示不限速。
+	RateLimitOn   bool `json:"rate_limit_enabled"`
+	RateLimitMbps int  `json:"rate_limit_mbps"`
 }
 
 // Config 是持久化的策略配置（node_policy 表一行）。
@@ -50,6 +52,8 @@ type Config struct {
 	QuotaResetBaseline int64
 	IPLimitEnabled     bool
 	IPLimitMax         int
+	RateLimitEnabled   bool
+	RateLimitMbps      int
 }
 
 // Service 是策略核心：读配置、算 used、追踪 IP slot、生成并应用 nft 规则。
@@ -104,6 +108,7 @@ type Service struct {
 	// 已应用的 enforcement 快照（避免每轮 reconcile 无谓重写 nft）。
 	appliedQuota   map[string]bool
 	appliedIPLimit map[string]map[string]bool // nodeID -> ip set
+	appliedRate    map[string]int             // nodeID -> mbps（限速）
 
 	now func() time.Time
 
@@ -184,6 +189,7 @@ func New(db *sql.DB, appDir, policyConf string) *Service {
 		ipStates:           map[string]*NodeIPState{},
 		appliedQuota:       map[string]bool{},
 		appliedIPLimit:     map[string]map[string]bool{},
+		appliedRate:        map[string]int{},
 		now:                time.Now,
 		ipIdle:             ipIdleTimeout,
 		rejectedTTL:        rejectedTTL,
@@ -456,7 +462,7 @@ func (s *Service) IPStateSnapshot() map[string]NodeIPSnapshot {
 func (s *Service) loadConfigs(ctx context.Context) (map[string]Config, error) {
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT node_id,quota_enabled,quota_limit_bytes,quota_reset_baseline,"+
-			"ip_limit_enabled,ip_limit_max FROM node_policy")
+			"ip_limit_enabled,ip_limit_max,rate_limit_enabled,rate_limit_mbps FROM node_policy")
 	if err != nil {
 		return nil, err
 	}
@@ -464,13 +470,14 @@ func (s *Service) loadConfigs(ctx context.Context) (map[string]Config, error) {
 	out := map[string]Config{}
 	for rows.Next() {
 		var c Config
-		var qe, ile int
+		var qe, ile, rle int
 		if err := rows.Scan(&c.NodeID, &qe, &c.QuotaLimitBytes, &c.QuotaResetBaseline,
-			&ile, &c.IPLimitMax); err != nil {
+			&ile, &c.IPLimitMax, &rle, &c.RateLimitMbps); err != nil {
 			return nil, err
 		}
 		c.QuotaEnabled = qe != 0
 		c.IPLimitEnabled = ile != 0
+		c.RateLimitEnabled = rle != 0
 		out[c.NodeID] = c
 	}
 	return out, rows.Err()
@@ -523,12 +530,12 @@ func (s *Service) setResetBaseline(ctx context.Context, nodeID string, baseline 
 // GetConfig 读单个节点策略配置（不存在时返回默认「全不限」）。
 func (s *Service) GetConfig(ctx context.Context, nodeID string) (Config, error) {
 	var c Config
-	var qe, ile int
+	var qe, ile, rle int
 	err := s.db.QueryRowContext(ctx,
 		"SELECT node_id,quota_enabled,quota_limit_bytes,quota_reset_baseline,"+
-			"ip_limit_enabled,ip_limit_max FROM node_policy WHERE node_id=?",
+			"ip_limit_enabled,ip_limit_max,rate_limit_enabled,rate_limit_mbps FROM node_policy WHERE node_id=?",
 		nodeID).Scan(&c.NodeID, &qe, &c.QuotaLimitBytes, &c.QuotaResetBaseline,
-		&ile, &c.IPLimitMax)
+		&ile, &c.IPLimitMax, &rle, &c.RateLimitMbps)
 	if err == sql.ErrNoRows {
 		return Config{NodeID: nodeID}, nil
 	}
@@ -537,28 +544,34 @@ func (s *Service) GetConfig(ctx context.Context, nodeID string) (Config, error) 
 	}
 	c.QuotaEnabled = qe != 0
 	c.IPLimitEnabled = ile != 0
+	c.RateLimitEnabled = rle != 0
 	return c, nil
 }
 
 // UpsertConfig 写回（或更新）节点策略配置。
 func (s *Service) UpsertConfig(ctx context.Context, c Config) error {
-	qe, ile := 0, 0
+	qe, ile, rle := 0, 0, 0
 	if c.QuotaEnabled {
 		qe = 1
 	}
 	if c.IPLimitEnabled {
 		ile = 1
 	}
+	if c.RateLimitEnabled {
+		rle = 1
+	}
 	_, err := s.db.ExecContext(ctx,
 		"INSERT INTO node_policy(node_id,quota_enabled,quota_limit_bytes,"+
-			"quota_reset_baseline,ip_limit_enabled,ip_limit_max) "+
-			"VALUES(?,?,?,?,?,?) "+
+			"quota_reset_baseline,ip_limit_enabled,ip_limit_max,rate_limit_enabled,rate_limit_mbps) "+
+			"VALUES(?,?,?,?,?,?,?,?) "+
 			"ON CONFLICT(node_id) DO UPDATE SET quota_enabled=excluded.quota_enabled,"+
 			"quota_limit_bytes=excluded.quota_limit_bytes,"+
 			"quota_reset_baseline=excluded.quota_reset_baseline,"+
 			"ip_limit_enabled=excluded.ip_limit_enabled,"+
-			"ip_limit_max=excluded.ip_limit_max",
-		c.NodeID, qe, c.QuotaLimitBytes, c.QuotaResetBaseline, ile, c.IPLimitMax)
+			"ip_limit_max=excluded.ip_limit_max,"+
+			"rate_limit_enabled=excluded.rate_limit_enabled,"+
+			"rate_limit_mbps=excluded.rate_limit_mbps",
+		c.NodeID, qe, c.QuotaLimitBytes, c.QuotaResetBaseline, ile, c.IPLimitMax, rle, c.RateLimitMbps)
 	return err
 }
 
@@ -622,6 +635,7 @@ func (s *Service) DeleteNode(ctx context.Context, nodeID string) error {
 	}
 	delete(s.appliedQuota, nodeID)
 	delete(s.appliedIPLimit, nodeID)
+	delete(s.appliedRate, nodeID)
 	s.mu.Lock()
 	delete(s.states, nodeID)
 	delete(s.ipSnaps, nodeID)

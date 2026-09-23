@@ -29,9 +29,9 @@ func TestGenPolicyNFTIsDeterministic(t *testing.T) {
 	}
 	quota := map[int64]bool{8443: true, 443: true}
 
-	first := genPolicyNFT(quota, ipLimits, list)
+	first := genPolicyNFT(quota, ipLimits, nil, list)
 	for i := 0; i < 200; i++ {
-		if got := genPolicyNFT(quota, ipLimits, list); got != first {
+		if got := genPolicyNFT(quota, ipLimits, nil, list); got != first {
 			t.Fatalf("第 %d 次生成与首次不一致(map 迭代顺序泄漏到输出)\n--- want ---\n%s\n--- got ---\n%s",
 				i, first, got)
 		}
@@ -87,7 +87,7 @@ func TestPolicyNFTOnlyTouchesOwnTable(t *testing.T) {
 		"id": json.Number("1"), "type": "vless", "port": json.Number("443"),
 	}}
 	script := genPolicyNFT(map[int64]bool{443: true},
-		map[string]map[string]bool{"1": {"1.1.1.1": true}}, list)
+		map[string]map[string]bool{"1": {"1.1.1.1": true}}, nil, list)
 
 	if !strings.HasPrefix(script, "#!/usr/sbin/nft -f") {
 		t.Errorf("策略脚本必须是 nft 脚本, 首行: %q", strings.SplitN(script, "\n", 2)[0])

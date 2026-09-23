@@ -118,6 +118,58 @@ func TestMigrateLegacySamples(t *testing.T) {
 	}
 }
 
+// TestMigrateLegacyNodePolicy 无损迁移旧格式库：v3.0.10 之前的 node_policy
+// 没有 rate_limit_enabled/rate_limit_mbps 两列，重新打开应自动补列（默认 0），
+// 且既有行数据保留。CREATE TABLE IF NOT EXISTS 不补列，必须靠 ALTER 迁移。
+func TestMigrateLegacyNodePolicy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy_np.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 手工降级出“旧库”结构：无 rate_limit_* 两列
+	for _, q := range []string{
+		"DROP TABLE node_policy",
+		"CREATE TABLE node_policy (node_id TEXT PRIMARY KEY," +
+			" quota_enabled INTEGER NOT NULL DEFAULT 0," +
+			" quota_limit_bytes INTEGER NOT NULL DEFAULT 0," +
+			" quota_reset_baseline INTEGER NOT NULL DEFAULT 0," +
+			" ip_limit_enabled INTEGER NOT NULL DEFAULT 0," +
+			" ip_limit_max INTEGER NOT NULL DEFAULT 0)",
+		"INSERT INTO node_policy(node_id,quota_enabled,quota_limit_bytes,ip_limit_enabled,ip_limit_max)" +
+			" VALUES('7',1,1073741824,1,3)",
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+
+	db2, err := Open(path) // 重新打开触发迁移
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db2.Close()
+
+	cols, err := tableColumns(db2, "node_policy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cols["rate_limit_enabled"] || !cols["rate_limit_mbps"] {
+		t.Fatalf("迁移未补 rate_limit_* 列: %v", cols)
+	}
+	// 既有行保留，新列默认 0
+	var qe, rle, rmbps int
+	if err := db2.QueryRow(
+		"SELECT quota_enabled,rate_limit_enabled,rate_limit_mbps FROM node_policy WHERE node_id='7'").
+		Scan(&qe, &rle, &rmbps); err != nil {
+		t.Fatal(err)
+	}
+	if qe != 1 || rle != 0 || rmbps != 0 {
+		t.Errorf("迁移后旧数据应保留、新列默认 0, got qe=%d rle=%d mbps=%d", qe, rle, rmbps)
+	}
+}
+
 func TestTransactionAtomicity(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {

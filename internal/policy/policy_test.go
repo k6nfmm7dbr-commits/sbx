@@ -3,6 +3,7 @@ package policy
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -177,7 +178,7 @@ func TestQuotaExceededReconcile(t *testing.T) {
 
 func TestGenPolicyNFT(t *testing.T) {
 	list := []nodes.Node{{"id": int64(1), "type": "vless", "port": int64(443)}}
-	script := genPolicyNFT(map[int64]bool{443: true}, nil, list)
+	script := genPolicyNFT(map[int64]bool{443: true}, nil, nil, list)
 	if script == "" {
 		t.Fatal("脚本不应为空")
 	}
@@ -186,7 +187,7 @@ func TestGenPolicyNFT(t *testing.T) {
 		t.Errorf("quota 脚本缺端口: %s", script)
 	}
 	// IP limit allow set
-	script2 := genPolicyNFT(nil, map[string]map[string]bool{"1": {"1.1.1.1": true}}, list)
+	script2 := genPolicyNFT(nil, map[string]map[string]bool{"1": {"1.1.1.1": true}}, nil, list)
 	if !containsStr(script2, "ip_allow_1_v4") || !containsStr(script2, "1.1.1.1") {
 		t.Errorf("IP limit 脚本缺 allow set: %s", script2)
 	}
@@ -194,10 +195,71 @@ func TestGenPolicyNFT(t *testing.T) {
 	if !containsStr(script2, "ct state established") {
 		t.Errorf("IP limit 脚本缺 ct state established: %s", script2)
 	}
+	// 限速：100 Mbps → 12500000 bytes/second（双向各一条 tcp/udp limit rate over drop）
+	script3 := genPolicyNFT(nil, nil, map[int64]int{443: 100}, list)
+	if !containsStr(script3, "limit rate over 12500000 bytes/second") {
+		t.Errorf("限速脚本缺 limit rate: %s", script3)
+	}
+	if !containsStr(script3, "tcp dport 443 limit rate over") || !containsStr(script3, "tcp sport 443 limit rate over") {
+		t.Errorf("限速应双向(dport 入站/sport 出站)各一条: %s", script3)
+	}
 }
 
 func containsStr(haystack, needle string) bool {
 	return len(haystack) >= len(needle) && indexStr(haystack, needle) >= 0
+}
+
+// TestRateLimitStateAndScript 验证限速：配置生效后 State 正确、nft 脚本含双向 policer。
+func TestRateLimitStateAndScript(t *testing.T) {
+	var scripts []string
+	s := newTestService(t)
+	s.SetNFTApply(func(ctx context.Context, p string) error {
+		b, _ := os.ReadFile(p)
+		scripts = append(scripts, string(b))
+		return nil
+	})
+	seedNode(t, s, 1, "vless", 443)
+	ctx := context.Background()
+
+	// 未启用 → State 不限速
+	if err := s.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := s.Snapshot(); st["1"].RateLimitOn {
+		t.Fatalf("默认不应限速: %+v", st["1"])
+	}
+
+	// 启用 200 Mbps
+	if err := s.UpsertConfig(ctx, Config{NodeID: "1", RateLimitEnabled: true, RateLimitMbps: 200}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := s.Snapshot()
+	if !st["1"].RateLimitOn || st["1"].RateLimitMbps != 200 {
+		t.Fatalf("限速状态应为 on/200, got %+v", st["1"])
+	}
+	last := scripts[len(scripts)-1]
+	// 200 Mbps → 25000000 bytes/second，双向各 tcp/udp
+	if !containsStr(last, "limit rate over 25000000 bytes/second") {
+		t.Fatalf("脚本缺 200Mbps policer: %s", last)
+	}
+	if !containsStr(last, "tcp dport 443 limit rate over") || !containsStr(last, "tcp sport 443 limit rate over") {
+		t.Fatalf("限速应双向: %s", last)
+	}
+
+	// 关闭限速 → 规则消失
+	if err := s.UpsertConfig(ctx, Config{NodeID: "1", RateLimitEnabled: false}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	last = scripts[len(scripts)-1]
+	if containsStr(last, "limit rate over") {
+		t.Fatalf("关闭限速后脚本不应再含 policer: %s", last)
+	}
 }
 
 func indexStr(h, n string) int {

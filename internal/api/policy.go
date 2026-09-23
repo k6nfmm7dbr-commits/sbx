@@ -82,11 +82,17 @@ func (s *Server) getPolicy(w http.ResponseWriter, r *http.Request, nodeID string
 
 // putPolicyRequest 是 PUT /api/nodes/:id/policy 的请求体。
 type putPolicyRequest struct {
-	QuotaEnabled    bool  `json:"quota_enabled"`
-	QuotaLimitBytes int64 `json:"quota_limit_bytes"`
-	IPLimitEnabled  bool  `json:"ip_limit_enabled"`
-	IPLimitMax      int   `json:"ip_limit_max"`
+	QuotaEnabled     bool  `json:"quota_enabled"`
+	QuotaLimitBytes  int64 `json:"quota_limit_bytes"`
+	IPLimitEnabled   bool  `json:"ip_limit_enabled"`
+	IPLimitMax       int   `json:"ip_limit_max"`
+	RateLimitEnabled bool  `json:"rate_limit_enabled"`
+	RateLimitMbps    int   `json:"rate_limit_mbps"`
 }
+
+// maxRateLimitMbps 是单节点限速上限（Mbps）。设一个宽松但有限的上界，
+// 防止误填天文数字导致 nft 计算的 bytes/second 溢出或无意义。
+const maxRateLimitMbps = 100000 // 100 Gbps
 
 // maxPolicyBody 限制策略请求体大小（实际请求只有 4 个字段，1 MiB 已极宽裕）。
 const maxPolicyBody = 1 << 20
@@ -118,6 +124,11 @@ func (s *Server) putPolicy(w http.ResponseWriter, r *http.Request, nodeID string
 			map[string]string{"error": "ip_limit_max 必须 >= 1"})
 		return
 	}
+	if req.RateLimitEnabled && (req.RateLimitMbps < 1 || req.RateLimitMbps > maxRateLimitMbps) {
+		s.sendJSON(w, r, http.StatusBadRequest,
+			map[string]string{"error": "rate_limit_mbps 必须在 1 ~ 100000 之间"})
+		return
+	}
 
 	cur, err := s.policy.GetConfig(r.Context(), nodeID)
 	if err != nil {
@@ -129,6 +140,8 @@ func (s *Server) putPolicy(w http.ResponseWriter, r *http.Request, nodeID string
 	cur.QuotaLimitBytes = req.QuotaLimitBytes
 	cur.IPLimitEnabled = req.IPLimitEnabled
 	cur.IPLimitMax = req.IPLimitMax
+	cur.RateLimitEnabled = req.RateLimitEnabled
+	cur.RateLimitMbps = req.RateLimitMbps
 
 	if err := s.policy.UpsertConfig(r.Context(), cur); err != nil {
 		s.failInternalNode(w, r, codePolicySave, nodeID, err)
@@ -178,13 +191,15 @@ func (s *Server) ipState(w http.ResponseWriter, r *http.Request, nodeID string) 
 
 func policyStateDefault() policy.State {
 	return policy.State{
-		QuotaEnabled: false,
-		QuotaLimit:   0,
-		QuotaUsed:    0,
-		QuotaState:   "unlimited",
-		IPLimitOn:    false,
-		IPLimitMax:   0,
-		ActiveIPs:    0,
-		IPLimitState: "unlimited",
+		QuotaEnabled:  false,
+		QuotaLimit:    0,
+		QuotaUsed:     0,
+		QuotaState:    "unlimited",
+		IPLimitOn:     false,
+		IPLimitMax:    0,
+		ActiveIPs:     0,
+		IPLimitState:  "unlimited",
+		RateLimitOn:   false,
+		RateLimitMbps: 0,
 	}
 }
