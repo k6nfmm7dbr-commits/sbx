@@ -42,7 +42,7 @@ ck "安装脚本退出码 0" $?
 grep -q "安装完成" /tmp/e2e-install.log; ck "输出含「安装完成」" $?
 [[ -x "$CORE" ]]; ck "sbx-core 已安装" $?
 [[ -x "$ROOT/usr/local/bin/sing-box" ]]; ck "sing-box 已安装" $?
-"$CORE" version | grep -q "v3.0.9"; ck "core 版本 3.0.9 ($("$CORE" version))" $?
+"$CORE" version | grep -q "v3.0.10"; ck "core 版本 3.0.10 ($("$CORE" version))" $?
 jq -e '.token and (.port|type)=="number" and .port>=1 and .port<=65535' "$PANEL_CONF" >/dev/null 2>&1
 ck "panel.json 合法(token+port)" $?
 # nftables-only（v3.0.9）：新装配置不得含废弃后端键，必须含 nft_conf
