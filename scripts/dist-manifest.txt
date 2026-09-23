@@ -1,0 +1,8 @@
+sbx-core-linux-amd64
+sbx-core-linux-arm64
+sbx-core-linux-armv7
+sbx-core-linux-armv6
+sbx-core-linux-386
+sbx-core-linux-s390x
+sbx-core-linux-riscv64
+SHA256SUMS
