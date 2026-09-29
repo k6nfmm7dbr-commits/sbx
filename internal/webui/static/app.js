@@ -98,13 +98,16 @@ function renderSummary(s) {
 
 /* ---------- 节点卡片 ---------- */
 function portText(n) { return n.port != null ? n.port : '—'; }
-function quotaLine(n) {
-  if (!n.quota_enabled) return '<div class="node-stat"><span>流量配额</span><b>' + fmtBytes(n.quota_used_bytes) + ' / 不限</b></div>';
-  return '<div class="node-stat"><span>流量配额</span><b>' + fmtBytes(n.quota_used_bytes) + ' / ' + fmtBytes(n.quota_limit_bytes) + '</b></div>';
+/* 流量配额：未启用 → 弱化「不限」；启用 → 已用/上限 + 用量进度条（≥90% 变黄、达限变红） */
+function quotaCell(n) {
+  if (!n.quota_enabled) return '<b class="muted">不限</b>';
+  var pct = n.quota_limit_bytes > 0 ? Math.min(100, Math.round(n.quota_used_bytes * 100 / n.quota_limit_bytes)) : 0;
+  var cls = pct >= 100 ? ' danger' : (pct >= 90 ? ' warn' : '');
+  return '<b>' + fmtBytes(n.quota_used_bytes) + ' / ' + fmtBytes(n.quota_limit_bytes) + '</b>' +
+    '<div class="quota-bar' + cls + '"><i style="width:' + pct + '%"></i></div>';
 }
-function rateLine(n) {
-  var val = n.rate_limit_enabled && n.rate_limit_mbps > 0 ? (n.rate_limit_mbps + ' Mbps') : '不限';
-  return '<div class="node-stat"><span>限速</span><b>' + esc(val) + '</b></div>';
+function rateText(n) {
+  return n.rate_limit_enabled && n.rate_limit_mbps > 0 ? (n.rate_limit_mbps + ' Mbps') : '不限';
 }
 function nodeStatus(n) {
   if (n.quota_state === 'exceeded') return '<span class="status-pill danger">流量已用尽</span>';
@@ -116,6 +119,7 @@ function renderNodeCards(s) {
   if (!s.nodes.length) { host.innerHTML = '<div class="empty">暂无节点，运行 sbx 菜单添加</div>'; return; }
   host.innerHTML = s.nodes.map(function (n) {
     var total = (n.total && (n.total.rx + n.total.tx)) || 0;
+    var today = (n.today && (n.today.rx + n.today.tx)) || 0;
     var ipVal = (n.active_ip_count || 0) + (n.ip_limit_enabled ? ' / ' + n.ip_limit_max : '');
     return '<div class="node-card">' +
       '<div class="node-top">' +
@@ -130,11 +134,13 @@ function renderNodeCards(s) {
         '</div>' +
       '</div>' +
       '<div class="node-stats">' +
-        '<div class="node-stat"><span>累计流量</span><b>' + fmtBytes(total) + '</b></div>' +
-        quotaLine(n) +
-        rateLine(n) +
-        '<div class="node-stat"><span>TCP 连接</span><b data-node-live="' + esc(n.id) + '" data-kind="conns">—</b></div>' +
-        '<div class="node-stat"><span>UDP 会话</span><b data-node-live="' + esc(n.id) + '" data-kind="conns_udp">—</b></div>' +
+        '<div class="node-stat"><span>累计 / 今日</span><b>' + fmtBytes(total) +
+          '<span class="sep">/</span>' + fmtBytes(today) + '</b></div>' +
+        '<div class="node-stat"><span>流量配额</span>' + quotaCell(n) + '</div>' +
+        '<div class="node-stat"><span>限速</span><b>' + esc(rateText(n)) + '</b></div>' +
+        '<div class="node-stat"><span>TCP / UDP</span><b>' +
+          '<i data-node-live="' + esc(n.id) + '" data-kind="conns">—</i><span class="sep">/</span>' +
+          '<i data-node-live="' + esc(n.id) + '" data-kind="conns_udp">—</i></b></div>' +
       '</div>' +
       '<button class="ip-strip" data-view-ips="' + esc(n.id) + '">' +
         '<span class="ip-strip-label">在线 IP</span>' +

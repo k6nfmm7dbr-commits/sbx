@@ -195,8 +195,16 @@ button { -webkit-tap-highlight-color: transparent; }
 .node-stat { min-width: 0; padding: 10px 8px 10px 0; }
 .node-stat:nth-child(even) { padding-left: 12px; border-left: 1px solid var(--line); }
 .node-stat:nth-child(n+3) { border-top: 1px solid var(--line); }
-.node-stat span { display: block; color: var(--text-3); font-size: 10.5px; }
+.node-stat > span { display: block; color: var(--text-3); font-size: 10.5px; }
 .node-stat b { display: block; overflow: hidden; margin-top: 2px; color: var(--text); font-size: 12.5px; font-weight: 630; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.node-stat b.muted { color: var(--text-3); font-weight: 560; }
+.node-stat b i { font-style: normal; }
+.node-stat .sep { margin: 0 4px; color: var(--text-3); font-weight: 500; }
+/* 配额用量进度条：随 quotaCell 输出，位于数值下方 */
+.quota-bar { height: 3px; margin-top: 5px; border-radius: 2px; overflow: hidden; background: var(--line-2); }
+.quota-bar i { display: block; height: 100%; border-radius: 2px; background: var(--accent); transition: width .5s ease; }
+.quota-bar.warn i { background: var(--warn); }
+.quota-bar.danger i { background: var(--bad); }
 
 .ip-strip {
   display: flex;
@@ -304,6 +312,8 @@ select, input[type="number"], input[type="password"], input[type="text"] {
 }
 select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(102,140,255,.10); }
 select { padding-right: 31px; background-image: linear-gradient(45deg,transparent 50%,var(--text-3) 50%),linear-gradient(135deg,var(--text-3) 50%,transparent 50%); background-position: calc(100% - 16px) 53%,calc(100% - 11px) 53%; background-repeat: no-repeat; background-size: 5px 5px; }
+/* 抽屉里的单位选择（GiB/TiB、Mbps）：单位即文案，箭头属多余装饰 */
+select.unit { padding-right: 12px; background-image: none; }
 #node-select { width: auto; max-width: 220px; }
 
 /* Drawer */

@@ -164,7 +164,7 @@
       <div id="pol-quota-box" class="box hidden">
         <div class="field row">
           <input type="number" id="pol-quota-val" min="1" step="1" inputmode="decimal" placeholder="500">
-          <select id="pol-quota-unit">
+          <select id="pol-quota-unit" class="unit">
             <option value="GiB" selected>GiB</option>
             <option value="TiB">TiB</option>
           </select>
@@ -197,7 +197,7 @@
       <div id="pol-rate-box" class="box hidden">
         <div class="field row">
           <input type="number" id="pol-rate-mbps" min="1" step="1" inputmode="numeric" placeholder="带宽">
-          <select id="pol-rate-unit" disabled aria-label="单位"><option value="Mbps" selected>Mbps</option></select>
+          <select id="pol-rate-unit" class="unit" disabled aria-label="单位"><option value="Mbps" selected>Mbps</option></select>
         </div>
       </div>
     </section>

@@ -7,7 +7,7 @@ SBX 用一条命令在你的服务器上搭好 sing-box 代理节点,并附带�
 netfilter 后端是 **nftables-only**:流量统计、流量配额、在线 IP 上限全部由 nftables(表 `sbx_traffic` / `sbx_policy`)在内核里完成。不支持 iptables,也没有后端自动选择或回退——nftables 不可用时 SBX 会**明确失败并中止**,绝不静默降级或"假装成功"。
 
 <p>
-  <img alt="version" src="https://img.shields.io/badge/version-v3.0.12-blue">
+  <img alt="version" src="https://img.shields.io/badge/version-v3.0.13-blue">
   <img alt="go" src="https://img.shields.io/badge/Go-1.27.1%2B-00ADD8">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
   <img alt="backend" src="https://img.shields.io/badge/netfilter-nftables--only-orange">
@@ -202,9 +202,9 @@ sudo apt-get update
 
 | 页签 | 内容 |
 |---|---|
-| **首页** | 节点卡片(实时速率 / 累计流量 / TCP·UDP 连接数 / 在线 IP / 配额状态)+ 顶部 KPI 汇总 |
-| **每日** | 全节点流量趋势(近 60 天)与单节点详情 |
-| **节点** | 节点管理抽屉——流量配额、IP 上限、重置已用流量、查看在线 IP |
+| **首页** | 节点卡片 + 顶部 KPI 汇总。卡片为整齐的 2×2 统计区：「累计 / 今日」流量（同格以 / 分隔）｜「流量配额」（未启用显示弱化的"不限"；启用显示"已用 / 上限"并用进度条呈现用量，≥90% 变黄、达限变红）｜「限速」｜「TCP / UDP」连接数；下方为在线 IP 条与状态徽标 |
+| **每日** | 全节点流量趋势(近 180 天)与单节点详情 |
+| **节点** | 节点管理抽屉——流量配额、IP 上限、限速、重置已用流量、查看在线 IP |
 
 实时性由两条通道保证:
 
@@ -215,7 +215,7 @@ sudo apt-get update
 
 | 路由 | 方法 | 说明 |
 |---|---|---|
-| `/healthz` | GET | 健康检查,免鉴权,返回 `{"ok":true}` |
+| `/healthz` | GET | 健康检查,免鉴权,恒为 HTTP 200 + `{"ok":true}`;降级时**追加** `collector_error` / `policy_error` / `sample_age_s`(距上次成功采样的秒数),便于外部监控区分"进程活着"与"采集/策略在报错" |
 | `/api/summary` | GET | 汇总:节点列表 + KPI + 策略状态(短 TTL 缓存) |
 | `/api/live` | GET | 轻量实时:速率 + 连接数(短 TTL 缓存) |
 | `/api/events` | GET | SSE,推送在线 IP 增量 |
@@ -417,7 +417,7 @@ CI 门禁(`main` 推送全绿才发布):`gofmt` / `go vet` / `go test` / `go tes
 ## 当前版本
 
 ```text
-v3.0.12
+v3.0.13
 ```
 
 源码在 `main` 分支,二进制从 `dist` 分支分发(rolling latest)。
