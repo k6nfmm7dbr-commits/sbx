@@ -45,12 +45,15 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// last 缓存已推送内容的序列化结果：既做去重判据，又直接复用为发送 payload，
-	// 避免旧实现「一次 Marshal 算 hash + 一次 Marshal 发送」的双份开销
-	// （成本随 SSE 连接数 × 节点数 增长）。
+	// last 缓存已推送内容的序列化结果：既做去重判据，又直接复用为发送 payload。
+	// payload 本身来自 ssePayloads() 的跨连接共享缓存（同一策略版本的所有连接
+	// 共用一次序列化结果），本连接的 last 只负责「这个节点我这轮推过没有」。
 	last := make(map[string]string, len(snap))
-	for id, ns := range snap {
-		last[id] = marshalSnap(ns)
+	{
+		payloads, _ := s.ssePayloads()
+		for id, pl := range payloads {
+			last[id] = pl
+		}
 	}
 
 	notify, unsub := s.policy.Subscribe()
@@ -76,9 +79,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		case <-fallback.C:
 		}
 
-		cur := s.policy.IPStateSnapshot()
-		for id, ns := range cur {
-			payload := marshalSnap(ns)
+		payloads, _ := s.ssePayloads()
+		for id, payload := range payloads {
 			if payload == "" || last[id] == payload {
 				continue
 			}
@@ -89,7 +91,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		// 已删除节点：清掉缓存，避免残留。
 		for id := range last {
-			if _, ok := cur[id]; !ok {
+			if _, ok := payloads[id]; !ok {
 				delete(last, id)
 			}
 		}
@@ -97,12 +99,44 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 // marshalSnap 序列化节点快照；失败返回空串（调用方跳过该节点）。
+//
+// 测试可替换 marshalSnapFn 统计调用次数（验证跨连接共享缓存生效）。
+var marshalSnapFn = marshalSnap
+
 func marshalSnap(ns policy.NodeIPSnapshot) string {
 	b, err := json.Marshal(ns)
 	if err != nil {
 		return ""
 	}
 	return string(b)
+}
+
+// ssePayloads 返回当前策略版本对应的「nodeID → 序列化 payload」缓存。
+//
+// 为什么需要它：reconcile 每秒发布一次新快照并向所有 SSE 订阅者广播，旧实现里
+// **每个连接**各自调用 IPStateSnapshot() 并对**每个节点**做一次完整 JSON
+// marshal（哪怕内容没变，也要先序列化才能做去重比较）。序列化成本随
+// 「节点数 × 在线 IP 数 × SSE 连接数」相乘增长——50 节点 × 5 个浏览器标签页
+// 时，每秒要白做 4 份一模一样的全量 marshal。改为按 policy.Version() 缓存
+// 一份：同一版本的所有连接共享同一份 payload，序列化只发生一次。
+//
+// 正确性依据：Version() 在每次 reconcile 发布新快照时单调自增（mu 保护），
+// 版本不变则快照必然不变——缓存不可能返回过期内容。
+func (s *Server) ssePayloads() (map[string]string, uint64) {
+	ver := s.policy.Version()
+	s.sseMu.Lock()
+	defer s.sseMu.Unlock()
+	if s.sseVer == ver && s.sseCache != nil {
+		return s.sseCache, ver
+	}
+	snap := s.policy.IPStateSnapshot()
+	payloads := make(map[string]string, len(snap))
+	for id, ns := range snap {
+		payloads[id] = marshalSnapFn(ns)
+	}
+	s.sseVer = ver
+	s.sseCache = payloads
+	return payloads, ver
 }
 
 // writeSSE 写一条 SSE 事件并 flush。返回 false 表示写入失败（客户端已断开）。

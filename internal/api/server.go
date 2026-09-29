@@ -48,6 +48,12 @@ type Server struct {
 	// 懒初始化：零值 Server（单测直接构造）也能安全使用，见 cacheFor。
 	cacheOnce sync.Once
 	cacheInst *ttlCache
+
+	// sse 缓存「当前策略版本 → 各节点 SSE payload」，跨连接共享序列化结果
+	// （见 ssePayloads 的注释）。
+	sseMu    sync.Mutex
+	sseVer   uint64
+	sseCache map[string]string
 }
 
 // cacheFor 返回缓存实例（懒初始化，保证零值 Server 可用）。
@@ -162,7 +168,29 @@ func (s *Server) serveRoutes(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, route string) {
 	switch route {
 	case "/healthz":
-		s.sendJSON(w, r, http.StatusOK, map[string]any{"ok": true})
+		// 存活探针：语义保持不变（HTTP 200 + ok:true，任何异常都算"进程活着"，
+		// 供 systemd/外部监控用），只**追加**降级详情字段。这样既不破坏既有
+		// 探活脚本，又能让人/监控一眼区分「活着」与「健康」：
+		//   collector_error —— 采集器最近一次错误（nft 缺失/权限/规则被删…）
+		//   policy_error    —— 策略 enforcement 最近一次错误（nft 应用失败…）
+		//   sample_age_s    —— 距上次成功采样的秒数（超过若干个 interval 即停摆）
+		// 三个字段全部 omitempty：一切正常时输出与旧版完全一致。
+		resp := map[string]any{"ok": true}
+		if s.src != nil {
+			st := s.src.Snapshot()
+			if st.Error != "" {
+				resp["collector_error"] = st.Error
+			}
+			if st.LastOK > 0 {
+				resp["sample_age_s"] = time.Now().Unix() - st.LastOK
+			}
+		}
+		if s.policy != nil {
+			if perr := s.policy.LastError(); perr != "" {
+				resp["policy_error"] = perr
+			}
+		}
+		s.sendJSON(w, r, http.StatusOK, resp)
 
 	case "/", "/index.html":
 		if !s.authorized(r) {

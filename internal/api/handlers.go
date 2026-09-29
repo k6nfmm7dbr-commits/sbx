@@ -1,7 +1,6 @@
 package api
 
 import (
-	"database/sql"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -198,29 +197,66 @@ func (s *Server) tryPolicyRoute(w http.ResponseWriter, r *http.Request, route st
 	return true
 }
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
-	rows, err := queryExportRows(s.db.DB)
+	// 流式导出：逐行从数据库读、逐行写响应，不在内存里攒整份 CSV。
+	// daily 表无清理策略、随运行年限增长（50 节点 × 3 年 ≈ 5.5 万行），
+	// 旧实现「全表读进 []exportRow + strings.Builder 拼完再写」在大库上有
+	// 数 MB 到数十 MB 的瞬时内存尖峰；流式后驻留内存与单行等价。
+	rows, err := s.db.Query(
+		"SELECT day,scope,rx,tx,rx_pkts,tx_pkts FROM daily ORDER BY day,scope")
 	if err != nil {
 		s.failInternal(w, r, codeExportFailed, err)
 		return
 	}
-	var b strings.Builder
-	b.WriteString("day,scope,rx_bytes,tx_bytes,rx_pkts,tx_pkts\n")
-	for _, row := range rows {
-		b.WriteString(row.day)
-		b.WriteByte(',')
-		b.WriteString(row.scope)
-		b.WriteByte(',')
-		b.WriteString(strconv.FormatInt(row.rx, 10))
-		b.WriteByte(',')
-		b.WriteString(strconv.FormatInt(row.tx, 10))
-		b.WriteByte(',')
-		b.WriteString(strconv.FormatInt(row.rxPkts, 10))
-		b.WriteByte(',')
-		b.WriteString(strconv.FormatInt(row.txPkts, 10))
-		b.WriteByte('\n')
-	}
+	defer rows.Close()
+
 	w.Header().Set("Content-Disposition", "attachment; filename=sbx-traffic.csv")
-	s.send(w, r, http.StatusOK, "text/csv; charset=utf-8", []byte(b.String()))
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	// 与 s.send() 的安全响应头保持一致（send() 面向整包 body，这里流式写出）。
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodHead {
+		return
+	}
+
+	var buf [512]byte
+	line := buf[:0]
+	writeLine := func(b []byte) bool {
+		if _, err := w.Write(b); err != nil {
+			return false // 客户端断开等：停止导出，错误随连接终止呈现
+		}
+		return true
+	}
+	line = append(line[:0], "day,scope,rx_bytes,tx_bytes,rx_pkts,tx_pkts\n"...)
+	if !writeLine(line) {
+		return
+	}
+	for rows.Next() {
+		var e exportRow
+		if err := rows.Scan(&e.day, &e.scope, &e.rx, &e.tx, &e.rxPkts, &e.txPkts); err != nil {
+			// 响应头已发出，无法改写状态码：截断输出即"导出不完整"，
+			// CSV 语义上比 500 更诚实（客户端拿到的就是残缺文件）。
+			return
+		}
+		line = line[:0]
+		line = append(line, e.day...)
+		line = append(line, ',')
+		line = append(line, e.scope...)
+		line = append(line, ',')
+		line = strconv.AppendInt(line, e.rx, 10)
+		line = append(line, ',')
+		line = strconv.AppendInt(line, e.tx, 10)
+		line = append(line, ',')
+		line = strconv.AppendInt(line, e.rxPkts, 10)
+		line = append(line, ',')
+		line = strconv.AppendInt(line, e.txPkts, 10)
+		line = append(line, '\n')
+		if !writeLine(line) {
+			return
+		}
+	}
 }
 
 type exportRow struct {
@@ -228,22 +264,4 @@ type exportRow struct {
 	rx, tx     int64
 	rxPkts     int64
 	txPkts     int64
-}
-
-func queryExportRows(db *sql.DB) ([]exportRow, error) {
-	rows, err := db.Query(
-		"SELECT day,scope,rx,tx,rx_pkts,tx_pkts FROM daily ORDER BY day,scope")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []exportRow{}
-	for rows.Next() {
-		var e exportRow
-		if err := rows.Scan(&e.day, &e.scope, &e.rx, &e.tx, &e.rxPkts, &e.txPkts); err != nil {
-			return nil, err
-		}
-		out = append(out, e)
-	}
-	return out, rows.Err()
 }

@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"unsafe"
 )
 
 // ConntrackFlow 是一条 /proc/net/nf_conntrack 流摘要（TCP 保留连接状态）。
@@ -68,7 +69,11 @@ func ReadConntrack(path string) ConntrackResult {
 		}
 		return ConntrackResult{Available: false, Partial: true, Err: err}
 	}
-	text := string(b)
+	// 零拷贝转 string：text 的生命周期由 ParseConntrack 返回的子串引用维持
+	// （流字段共享底层存储），b 在本函数返回后不会被修改。
+	// 繁忙服务器上这张表可达数 MB，且本函数每秒执行一次——旧的 string(b)
+	// 隐式拷贝是纯浪费的分配与 GC 压力。
+	text := unsafe.String(unsafe.SliceData(b), len(b))
 	entries := countEntries(text)
 	if entries == 0 {
 		// 文件存在可读却一条都没有：内核未真正跟踪连接（缺少引用 ct 的规则）。
