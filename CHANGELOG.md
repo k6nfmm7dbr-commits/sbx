@@ -43,7 +43,7 @@ profile 优化后 50×50 reconcile pprof Top 从 `NodeIPState.Reconcile`（约 3
 转为 `buildActivity` / map hashing / runtime scan，后续若继续优化应先针对真实
 代理连接数 workload 采样，而不是继续微调排序。
 
-端到端最终复测（2 核真机、50 节点 × 1095 天、90s）：CPU **0.76% 单核**、RSS **22.6MB**，`/api/live` p50 1.9ms、`/api/summary` p50 2.2ms、`/api/daily` p50 6.6ms。v3.0.15 基线此前 151s 采样为 CPU 0.81% / RSS 21.4MB（窗口长度不同，端到端数字只作方向参考）；无可见 CPU/延迟回归，RSS 多约 1.2MB、仍在 21–24MB 观测区间（Go heap 高水位/机器连接数有波动）。主要收益在重度活跃 IP 数下 reconcile 的可量化余量与每轮 GC 压力，而非空载面板体感。
+端到端复测（2 核真机、50 节点 × 1095 天）：90s 采样 CPU 0.76% 单核 / RSS 22.6MB；最终修复状态发布顺序后再跑 60s，CPU **0.74%** / RSS **21.6MB**，`/api/live` p50 1.9ms、`/api/summary` p50 2.3ms、`/api/daily` 7.1ms（仅 1 个样本）。v3.0.15 基线此前 151s 采样为 CPU 0.81% / RSS 21.4MB（窗口长度不同，端到端数字只作方向参考）；无可见 CPU/延迟回归，RSS 仍处 21–23MB 区间（Go heap 高水位/机器连接数有波动）。主要收益在重度活跃 IP 数下 reconcile 的可量化余量与每轮 GC 压力，而非空载面板体感。
 
 ### 正确性验证
 

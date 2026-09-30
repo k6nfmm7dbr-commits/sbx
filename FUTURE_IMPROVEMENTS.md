@@ -589,7 +589,7 @@ flow 集合 map）和 map hashing/GC。SQL 两查询合计约 0.29ms，但未排
 | Slot reconcile 稳态 50 IP | 43.9µs / 6464B / 15 allocs | **10.5µs / 3160B / 5 allocs** | **76% time / 51% B / 67% allocs** |
 | Slot reconcile 稳态 250 IP | 268µs / 46.8KB / 21 allocs | **55.5µs / 19.8KB / 5 allocs** | **79% time / 58% B / 76% allocs** |
 
-端到端最终复测 90s CPU 0.76% 单核 / RSS 22.6MB，`/api/live`、`/api/summary`、`/api/daily` p50 分别约 1.9/2.2/6.6ms；v3.0.15 基线旧采样窗为 CPU 0.81% / RSS 21.4MB，窗口长度不同仅作方向参考。未见 CPU/延迟回归；RSS 约多 1.2MB，仍在 21–24MB 小机观测区间（受 Go heap 高水位和机器连接数影响）。
+端到端最终确认（同机 2 核、50 节点 × 1095 天）：最终修复状态发布顺序后复跑 60s CPU 0.74% 单核 / RSS 21.6MB，live/summary p50 1.9/2.3ms，daily 单次 7.1ms。v3.0.15 基线 151s 采样 CPU 0.81% / RSS 21.4MB；采样窗不同仅作方向参考。无可见 CPU/延迟回归；RSS 在 21–23MB 区间，受 Go heap 高水位与机器连接数影响。
 
 ### 19.4 验证矩阵
 
