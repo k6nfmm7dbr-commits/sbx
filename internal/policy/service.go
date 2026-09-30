@@ -119,6 +119,12 @@ type Service struct {
 	conntrack      func(path string) connection.ConntrackResult
 	remoteIPs      func(list []nodes.Node) (map[string]connection.RemoteIPSet, bool, error)
 
+	// 节点端口归属索引：nodes.json 未变化时跨 reconcile 复用，避免每秒重新
+	// ParsePorts + 构造 port→node map。activityNodes 指向 strict loader 的共享
+	// 不可变 slice；原子替换得到新 slice 时指针变化，自动失效。
+	activityNodes    []nodes.Node
+	activityPortNode map[int]string
+
 	// flow tracker：conntrack flow 状态，runMu 保护。
 	flows     map[flowKey]flowState
 	flowEpoch uint64 // buildActivity 每轮递增，代替每轮分配 currentFlowKeys map
@@ -328,66 +334,9 @@ func (s *Service) ActiveIPs(nodeID string) []string {
 
 // buildActiveIPsLocked 在 runMu 下由 reconcile 调用，生成某节点的在线 IP 有序列表
 // （非 provisional 的 granted slot，按最近活跃时间倒序、同刻按 IP 升序）。
+// 生产路径由 buildNodeSnapshots 单遍构造；此包装保留给测试/诊断。
 func buildActiveIPsFromState(st *NodeIPState) []string {
-	if st == nil {
-		return []string{}
-	}
-	type kv struct {
-		ip   string
-		last time.Time
-	}
-	// 高频稳态：reconcile 的上一阶段已把所有在线 slot.LastSeen 设为同一个 now，
-	// 所以最终顺序退化为 IP 升序。先只建一个 []string；仅在时钟回拨等确实出现
-	// 不同 lastActive 时，才临时建 kv 切片走完整的时间倒序排序。
-	ips := make([]string, 0, len(st.Slots))
-	var first time.Time
-	sameTime := true
-	for ip, slot := range st.Slots {
-		if slot.Provisional {
-			continue
-		}
-		last := slot.LastSeen
-		if slot.LastTraffic.After(last) {
-			last = slot.LastTraffic
-		}
-		if len(ips) == 0 {
-			first = last
-		} else if !last.Equal(first) {
-			sameTime = false
-		}
-		ips = append(ips, ip)
-	}
-	if sameTime {
-		slices.Sort(ips)
-		return ips
-	}
-	arr := make([]kv, 0, len(ips))
-	for _, ip := range ips {
-		slot := st.Slots[ip]
-		last := slot.LastSeen
-		if slot.LastTraffic.After(last) {
-			last = slot.LastTraffic
-		}
-		arr = append(arr, kv{ip: ip, last: last})
-	}
-	slices.SortFunc(arr, func(a, b kv) int {
-		if !a.last.Equal(b.last) {
-			if a.last.After(b.last) {
-				return -1
-			}
-			return 1
-		}
-		if a.ip < b.ip {
-			return -1
-		}
-		if a.ip > b.ip {
-			return 1
-		}
-		return 0
-	})
-	for i := range ips {
-		ips[i] = arr[i].ip
-	}
+	_, ips := buildNodeSnapshots("", st)
 	return ips
 }
 
@@ -443,16 +392,28 @@ type NodeIPSnapshot struct {
 
 // buildNodeIPSnapshot 由 reconcile 在 runMu 下调用，把私有 NodeIPState
 // 转成不可变展示快照。切片/字段一律新建，发布后绝不再修改。
+// 生产路径由 buildNodeSnapshots 单遍构造；此包装保留给测试/诊断。
 func buildNodeIPSnapshot(nodeID string, st *NodeIPState) NodeIPSnapshot {
+	snap, _ := buildNodeSnapshots(nodeID, st)
+	return snap
+}
+
+// buildNodeSnapshots 单次遍历 Slots/Observed，同时生成 API snapshot 与 active IP
+// 列表。此前两者分别构造，各自扫描 Slots、查 Observed、做排序；合并后减少
+// 每个节点每个 reconcile 的重复 map 遍历与排序准备。
+func buildNodeSnapshots(nodeID string, st *NodeIPState) (NodeIPSnapshot, []string) {
 	snap := NodeIPSnapshot{NodeID: nodeID, IPs: []IPEntry{}, Rejected: []IPEntry{}}
 	if st == nil {
-		return snap
+		return snap, []string{}
 	}
 	snap.Limited = st.MaxIPs > 0
 	snap.MaxIPs = st.MaxIPs
+	activeIPs := make([]string, 0, len(st.Slots))
+	var firstActive time.Time
+	sameActiveTime := true
 	for ip, slot := range st.Slots {
 		if slot.Provisional {
-			continue // 候选（尚未 ESTABLISHED）不算在线，不进主列表
+			continue
 		}
 		snap.Granted++
 		e := IPEntry{IP: ip, Granted: true}
@@ -461,6 +422,16 @@ func buildNodeIPSnapshot(nodeID string, st *NodeIPState) NodeIPSnapshot {
 			e.UDP = o.UDPSessions
 		}
 		snap.IPs = append(snap.IPs, e)
+		activeIPs = append(activeIPs, ip)
+		last := slot.LastSeen
+		if slot.LastTraffic.After(last) {
+			last = slot.LastTraffic
+		}
+		if len(activeIPs) == 1 {
+			firstActive = last
+		} else if !last.Equal(firstActive) {
+			sameActiveTime = false
+		}
 	}
 	for ip := range st.Rejected {
 		e := IPEntry{IP: ip, Granted: false}
@@ -481,7 +452,42 @@ func buildNodeIPSnapshot(nodeID string, st *NodeIPState) NodeIPSnapshot {
 	}
 	slices.SortFunc(snap.IPs, cmpIP)
 	slices.SortFunc(snap.Rejected, cmpIP)
-	return snap
+	if sameActiveTime {
+		slices.Sort(activeIPs)
+		return snap, activeIPs
+	}
+	type kv struct {
+		ip   string
+		last time.Time
+	}
+	arr := make([]kv, 0, len(activeIPs))
+	for _, ip := range activeIPs {
+		slot := st.Slots[ip]
+		last := slot.LastSeen
+		if slot.LastTraffic.After(last) {
+			last = slot.LastTraffic
+		}
+		arr = append(arr, kv{ip: ip, last: last})
+	}
+	slices.SortFunc(arr, func(a, b kv) int {
+		if !a.last.Equal(b.last) {
+			if a.last.After(b.last) {
+				return -1
+			}
+			return 1
+		}
+		if a.ip < b.ip {
+			return -1
+		}
+		if a.ip > b.ip {
+			return 1
+		}
+		return 0
+	})
+	for i := range activeIPs {
+		activeIPs[i] = arr[i].ip
+	}
+	return snap, activeIPs
 }
 
 // NodeIPSnapshot 返回单个节点的在线 IP 快照（读已发布的不可变快照）。

@@ -219,11 +219,11 @@ func (s *Service) reconcile(ctx context.Context) error {
 			ipBlocked[id] = allowSet
 		}
 
-		snap := buildNodeIPSnapshot(id, ipState)
+		snap, activeIPs := buildNodeSnapshots(id, ipState)
 		st.ActiveIPs = snap.Granted
 		newStates[id] = st
 		newSnaps[id] = snap
-		newActiveIPs[id] = buildActiveIPsFromState(ipState)
+		newActiveIPs[id] = activeIPs
 	}
 
 	// 清理已删除节点的运行时状态（flows 由 buildActivity 的 GC 兜底）。
@@ -303,9 +303,17 @@ func (s *Service) refreshSelfIPs(now time.Time) {
 //     所以 Bytes==0 可以可靠地判定「这条流没有计费数据」。
 //
 //     全局探测仍保留，但只用于打一次提示日志（告诉用户开 sysctl 更精确）。
-func (s *Service) buildActivity(nodeList []nodes.Node, cr connection.ConntrackResult, procSplit map[string]connection.RemoteIPSet, now time.Time) (map[string]map[string]IPActivity, map[string]map[string]IPActivity) {
-	portNode := map[int]string{}
-	for _, n := range nodeList {
+//
+// activityPortIndex 返回当前 nodes.json 的端口归属索引。strict loader 命中时会复用
+// 同一个不可变 []Node 底层数组，因此可以用首元素地址 + 长度判断输入是否未变；
+// 文件原子替换后 loader 产生新 slice，自动重建。该索引只由 runMu 下的 reconcile
+// 调用，字段无需额外锁。
+func (s *Service) activityPortIndex(list []nodes.Node) map[int]string {
+	if len(list) == len(s.activityNodes) && (len(list) == 0 || &list[0] == &s.activityNodes[0]) {
+		return s.activityPortNode
+	}
+	portNode := make(map[int]string, len(list))
+	for _, n := range list {
 		id := nodes.IDString(n)
 		for _, r := range nodes.ParsePorts(n) {
 			for p := int(r[0]); p <= int(r[1]); p++ {
@@ -313,6 +321,14 @@ func (s *Service) buildActivity(nodeList []nodes.Node, cr connection.ConntrackRe
 			}
 		}
 	}
+	s.activityNodes = list
+	s.activityPortNode = portNode
+	return portNode
+}
+
+// buildActivity 产出每个节点的活跃 IP 与候选 IP。
+func (s *Service) buildActivity(nodeList []nodes.Node, cr connection.ConntrackResult, procSplit map[string]connection.RemoteIPSet, now time.Time) (map[string]map[string]IPActivity, map[string]map[string]IPActivity) {
+	portNode := s.activityPortIndex(nodeList)
 
 	active := map[string]map[string]IPActivity{}
 	candidates := map[string]map[string]IPActivity{}

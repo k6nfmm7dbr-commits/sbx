@@ -596,7 +596,45 @@ flow 集合 map）和 map hashing/GC。SQL 两查询合计约 0.29ms，但未排
 - `go test -count=1 ./...` / `go vet ./...` / `go test -race -count=1 ./...` 全绿；
 - 测试显式锁定 admission priority、provisional 抢占、flow 超时 GC、排序语义、
   same-mtime/size 原子替换失效、conntrack 大缓冲不被长期 key 引用；
-- 真机端到端最终复测 CPU 0.72% 单核 / RSS 21.3MB，`/api/live`、`/api/summary`、
-  `/api/daily` p50 分别约 1.8/2.2/6.4ms；与 v3.0.15 端到端数据处于同一量级，
-  无功能或性能回归。
+- 真机端到端最终复测 CPU 0.74% 单核 / RSS 21.6MB，live/summary p50 1.9/2.3ms，
+  daily 单次 7.1ms；与 v3.0.15 同量级，无功能或性能回归。
 
+## 20. v3.0.17 二次审计：节点端口索引缓存与单遍 snapshot
+
+### 20.1 全仓复核范围
+
+在 v3.0.16 之后重新检查了：生产/测试 deadcode、所有 reconcile/collector/API
+读写路径、`go vet`、全量 race、安装器流程、真机 `cpuprofile`/`memprofile` 与
+50 节点 × 10/50 flow A/B。当前 deadcode 报告中剩余的 `ttlCache.size`、
+`allPorts`、`ParseRemoteIPs`、`RemoteIPsByPort`、`SaveNodesFile`、
+`grantedCount`、`activeGrantedCount`、`buildActiveIPsFromState`、
+`activeTCPConn`、`buildNodeIPSnapshot` 均被测试作为契约/基准/诊断辅助使用，
+不属于可直接删除的生产死码；强删会削弱测试覆盖，故保留。
+
+### 20.2 采纳的低风险改动
+
+- `Service.activityPortIndex` 以 strict loader 返回的不可变 nodes slice 首元素地址
+  + 长度判断是否复用端口索引。nodes.json 原子替换得到新 slice，自动重建；
+  端口变更有回归测试。正常每秒不再 `ParsePorts` 和重建 `portNode` map。
+- `buildNodeSnapshots` 一遍 Slots/Observed 遍历同时产出 API snapshot 与 active IP
+  顺序，并从 `snap.Granted` 填入 `State.ActiveIPs`。发布顺序明确为「先填
+  `st.ActiveIPs`，再写 `newStates`」，避免快照字段滞后。
+
+### 20.3 结果与未采纳项
+
+同机最终基准（50 节点，benchtime=2000x）：50×10 flow 为 **0.851ms /
+269KB / 1852 allocs**；50×50 flow 为 **3.408ms / 0.961MB / 2153 allocs**。相对
+v3.0.15 基线（1.189ms/404KB/3624 与 5.963ms/1.538MB/8141），累计降幅约
+28%/33%/49% 与 43%/37%/74%。单次 CPU 受真机调度波动，分配与内存更稳定；
+主要新增收益是每轮少约 57 次分配、少约 5KB，并消除节点端口索引重复构造。
+端到端最终 60s CPU 0.74% 单核、RSS 21.6MB、live/summary p50 1.9/2.3ms，
+未见稳定性或 API schema 回归。
+
+本轮重新评估但不做：
+
+- SSE 连接上限：存在理论上的公网资源耗尽面，但属于产品容量策略，需要配置项、
+  反向代理/多标签页语义与用户容量目标后再加，避免无提示地拒绝合法面板连接；
+- prepared statement 长期复用：SQLite 单连接且实测查询/Prepare 不是主要热点，
+  长生命周期关闭/连接重建复杂度高于收益；
+- 大范围 map/slice 池化：会延长对象生命周期、增加并发/清空错误风险，当前
+  profile 已将大头降到 buildActivity/runtime map，继续池化需先有真实高连接数数据。

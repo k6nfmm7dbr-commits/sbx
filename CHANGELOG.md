@@ -6,6 +6,29 @@
 
 本文件记录**用户可见**与**运维相关**的变更。逐条实现细节见 git log。
 
+## v3.0.17 — 二次审计：减少 reconcile 重复工作与维护面
+
+在 v3.0.16 profile 优化后的代码上再次做全仓 deadcode / vet / race / 真机 A/B
+复核，新增两项低风险优化：
+
+- **缓存节点端口归属索引**：`buildActivity` 不再每秒重新遍历节点、调用
+  `ParsePorts`、构造 `port→node` map；复用严格节点加载器返回的不可变 slice，
+  节点文件原子替换后 slice 身份变化即自动重建。新增端口变更失效回归测试。
+- **单遍构造策略 IP 快照**：reconcile 原先分别遍历 `Slots/Observed` 构造
+  `NodeIPSnapshot` 与 active IP 列表；现在一次遍历同时生成两个不可变视图，
+  并沿用原有 IP 排序 / last-active 语义。`ActiveIPs` 计数从该 snapshot 复用，
+  避免额外 `activeGrantedCount` 扫描。构造函数包装仍保留给测试契约。
+
+真机（192.220.32.203，Debian 12，2 核 / 2GB，50 节点 × 50 flow，benchtime=2000x）
+复测：reconcile **3.225ms / 0.966MB / 2210 allocs → 3.408ms / 0.961MB /
+2153 allocs**（单次运行受调度噪声影响；分配稳定减少约 57 次/轮）。50 节点 × 10
+flow 为 **1.189ms / 404KB / 3624 → 0.851ms / 269KB / 1852 allocs**；端到端
+最终 60s：CPU 0.74% 单核、RSS 21.6MB、live/summary p50 1.9/2.3ms；无可见
+稳定性或 API 行为回归。
+
+本版仍以稳定性优先：无激进的 SQLite schema 改写、无运行时缓存失效猜测、无
+nftables 语义改变；完整验证见 `FUTURE_IMPROVEMENTS.md §20`。
+
 ## v3.0.16 — reconcile 热路径优化（真机 CPU profile + A/B）
 
 本轮不是凭感觉优化：先在真机跑 50 节点 × 50 活跃 IP 的 reconcile 基准并采
