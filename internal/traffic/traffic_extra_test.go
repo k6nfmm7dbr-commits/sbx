@@ -59,14 +59,13 @@ func TestLocationFallbacks(t *testing.T) {
 	}
 }
 
-func TestTodayStr(t *testing.T) {
+func TestTodayAtCrossDay(t *testing.T) {
 	// 同一 UTC 时刻在 UTC+8 已跨天（22:13Z -> 次日 06:13+08）
 	u := time.Date(2023, 11, 14, 22, 13, 20, 0, time.UTC)
-	got := u.In(Location("Asia/Shanghai")).Format("2006-01-02")
-	if got != "2023-11-15" {
-		t.Fatalf("前置检查失败: %s", got)
+	if got := TodayAt("Asia/Shanghai", u); got != "2023-11-15" {
+		t.Fatalf("跨天日期错误: %s", got)
 	}
-	if TodayStr("Asia/Shanghai")[4] != '-' { // 冒烟：格式合法
+	if TodayAt("Asia/Shanghai", time.Now())[4] != '-' { // 冒烟：格式合法
 		t.Fatal("日期格式非法")
 	}
 }

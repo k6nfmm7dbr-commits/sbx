@@ -99,15 +99,10 @@ func RemConnected(rem string) bool {
 	return stripped != "" || !(port == "0" || port == "0000")
 }
 
-// CountByPort 读多个 /proc 文件，聚合每个本地端口的命中数。
-// 返回 (hits, partial)：partial 表示至少一个文件「存在但读取失败」
-// （如权限/临时 I/O 故障）。文件不存在（os.ErrNotExist）不算失败——
-// 纯 IPv4 机器没有 /proc/net/tcp6 属正常。
-func CountByPort(files []string, keep Keep, readFile func(string) (string, error)) (map[int]int, bool) {
-	return CountByPortFiltered(files, keep, readFile, allPorts)
-}
-
-// CountByPortFiltered 同 CountByPort，但只记录 want 认可的本地端口。
+// CountByPortFiltered 读多个 /proc 文件，聚合每个本地端口的命中数，
+// 只记录 want 认可的本地端口。返回 (hits, partial)：partial 表示至少一个文件
+// 「存在但读取失败」（如权限/临时 I/O 故障）。文件不存在（os.ErrNotExist）
+// 不算失败——纯 IPv4 机器没有 /proc/net/tcp6 属正常。
 func CountByPortFiltered(files []string, keep Keep, readFile func(string) (string, error), want PortFilter) (map[int]int, bool) {
 	hits := map[int]int{}
 	partial := false
@@ -244,7 +239,7 @@ func ParseRemoteIPs(text string, keep Keep) map[string]bool {
 
 // RemoteIPsByPort 读多个 /proc 文件，聚合每个本地端口的远端 IP 集合。
 // 返回 (port -> set(ip), partial)。TCP keep 传 ESTABLISHED 判定，
-// UDP keep 传 RemConnected 判定（与 CountByPort 口径一致）。
+// UDP keep 传 RemConnected 判定（与 CountByPortFiltered 口径一致）。
 func RemoteIPsByPort(files []string, keep Keep, readFile func(string) (string, error)) (map[int]map[string]bool, bool) {
 	return RemoteIPsByPortFiltered(files, keep, readFile, allPorts)
 }
@@ -289,28 +284,6 @@ func RemoteIPsByPortFiltered(files []string, keep Keep, readFile func(string) (s
 		})
 	}
 	return out, partial
-}
-
-// NodeRemoteIPs 返回每个节点的活跃远端 IP 集合（TCP ESTABLISHED + UDP 已连接会话）。
-// 与 CountForNodes 同一套 /proc 读取与归属逻辑，但目标是「独立公网源 IP」而非连接数。
-// readFile 为 nil 时使用真实 os.ReadFile。
-func NodeRemoteIPs(list []nodes.Node, readFile func(string) (string, error)) (map[string]map[string]bool, bool, error) {
-	split, partial, err := NodeRemoteIPsSplit(list, readFile)
-	if err != nil {
-		return nil, false, err
-	}
-	result := make(map[string]map[string]bool, len(split))
-	for id, rs := range split {
-		set := make(map[string]bool, len(rs.TCP)+len(rs.UDP))
-		for ip := range rs.TCP {
-			set[ip] = true
-		}
-		for ip := range rs.UDP {
-			set[ip] = true
-		}
-		result[id] = set
-	}
-	return result, partial, nil
 }
 
 // RemoteIPSet 是某节点 TCP 与 UDP 各自的活跃远端 IP 集合。

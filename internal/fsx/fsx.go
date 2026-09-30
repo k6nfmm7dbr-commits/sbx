@@ -115,25 +115,3 @@ func isUnsupportedSync(err error) bool {
 		errors.Is(err, syscall.ENOTSUP) ||
 		errors.Is(err, syscall.EOPNOTSUPP)
 }
-
-// WriteJSONAtomic 以 Python 兼容格式（indent 可选 + 结尾换行）原子写 JSON。
-func WriteJSONAtomic(path string, v any, indent bool) error {
-	var (
-		data []byte
-		err  error
-	)
-	if indent {
-		data, err = MarshalIndent(v)
-	} else {
-		data, err = MarshalCompact(v)
-	}
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	mode := os.FileMode(0644)
-	if st, serr := os.Stat(path); serr == nil {
-		mode = st.Mode().Perm() // 保持原权限位
-	}
-	return WriteFileAtomic(path, data, mode)
-}

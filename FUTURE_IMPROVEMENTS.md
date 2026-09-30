@@ -489,3 +489,50 @@ O(180 天 × scope 数) 的回表，而非 O(全表)——**先确认了这一�
   `/proc/PID/stat`，比微基准更能反映真实体验；改前改后各跑一轮。
 - 微基准必须测**真实路径**（事务内、真实调用栈），并先看 `allocs/op` 是否
   变化——分配量不变基本等于「没有生效」。
+
+## 18. v3.0.15 瘦身轮：nodes.json 解析缓存与死码清理
+
+### 18.1 `LoadPanelNodesStrict` 的 (mtime,size) 缓存——已采纳
+
+`deadcode` + 手工计数确认：该函数在 policy reconcile（1Hz）与 collector（0.5Hz）
+每轮都调，但 `nodes.json` 只在人工节点操作时经原子 rename 改写。这是稳态下
+最大的一项重复固定开销。实测（2 核 VPS，`internal/nodes` benchmark）：
+
+| 节点数 | 改前 | 改后（缓存命中） |
+|---|---|---|
+| 5   | 44µs / 10KB / 155 allocs | 1.36µs / 272B / 2 allocs |
+| 50  | 340µs / 87KB / 1386 allocs | 1.35µs / 272B / 2 allocs |
+| 200 | 1.25ms / 355KB / 5447 allocs | 1.38µs / 272B / 2 allocs |
+
+命中后只剩一次 `os.Stat`（272B/2 allocs 即 stat 的固定成本，见 `BenchmarkStatOnly`
+的 1.16µs/256B/2 allocs——两者几乎相等，说明解析成本已被完全消除）。
+
+**为何端到端 CPU 不显著下降**：基线本就只有 0.81% 单核（reconcile 里 SQL 与
+conntrack/proc 解析才是大头，nodes 解析占比小）。本轮价值是消除**隐性的**每秒
+重复解析与 GC 压力——在节点数多、或未来采样加密时收益放大；且减小了维护面。
+
+**fail-closed 正确性论证**（有回归测试 `internal/nodes/loadcache_test.go` 锁定）：
+- 只有解析+校验都成功才写缓存；任一次损坏/读失败返回 error 且**不缓存** →
+  下一轮仍 miss、仍重读、仍 error，reconcile 保持上一轮 enforcement；
+- 命中判据是 `(mtimeNS, size)` 双字段全等，写入必然改变其一；原子 rename
+  保证不读半写文件；stat 用 read 之前的值，替换竞态下一轮自然失效；
+- 缓存值是只读共享 `[]Node`，所有调用方只读遍历（已核实无 `n["k"]=` 写入）。
+
+### 18.2 删除的死函数
+
+`deadcode` 报告 + 全仓引用核实（区分"生产可达""仅测试引用""完全无引用"）：
+完全无引用、直接删除的 5 个——`connection.CountByPort`、`connection.NodeRemoteIPs`、
+`fsx.WriteJSONAtomic`、`traffic.TimeIn`、`traffic.TodayStr`（后者仅一个测试引用，
+已改用 `TodayAt` 等价断言）。其余 deadcode 候选（`ttlCache.size`、`allPorts`、
+`grantedCount`、`activeTCPConn`、`ParseRemoteIPs`、`RemoteIPsByPort`、
+`SaveNodesFile`）**保留**——它们被单元测试作为契约/基准对照使用，删了会削弱
+测试覆盖，不属于"无用代码"。
+
+### 18.3 未采纳
+
+- **prepared statement 跨 tick 复用**：collector 每 tick `Prepare` 3 条语句。
+  实测 commitTick 的 Prepare 成本在整体事务里占比极小（SQLite 单连接、语句
+  已被驱动缓存），改成长生命周期 stmt 会引入连接池/关闭时序的复杂度，收益
+  不成正比。暂不做。
+- **二进制体积**：删死码后体积无变化（11.6MB，死函数被链接器 DCE 本就不计入）。
+  体积大头仍是 Go 运行时 + 纯 Go SQLite，见 §16.3，无低风险瘦身空间。

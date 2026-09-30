@@ -83,11 +83,6 @@ func atoi(s string) int {
 	return n
 }
 
-// TodayStr 返回配置时区下的今天（YYYY-MM-DD）。
-func TodayStr(tzName string) string {
-	return TimeIn(tzName).Format("2006-01-02")
-}
-
 // TimeNow 是包级时钟接缝：生产为 wall clock，测试注入固定时间，
 // 保证采集入账与 summary 构建的“今天”完全由同一时钟驱动。
 var TimeNow = time.Now
@@ -95,11 +90,6 @@ var TimeNow = time.Now
 // TodayAt 返回 t 在配置时区下的日期串。
 func TodayAt(tzName string, t time.Time) string {
 	return t.In(Location(tzName)).Format("2006-01-02")
-}
-
-// TimeIn 返回配置时区下的当前时间。
-func TimeIn(tzName string) time.Time {
-	return time.Now().In(Location(tzName))
 }
 
 // LocalZoneName 返回本地时区缩写名，用于 conf.tz 为空时的展示兜底。

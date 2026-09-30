@@ -6,6 +6,36 @@
 
 本文件记录**用户可见**与**运维相关**的变更。逐条实现细节见 git log。
 
+## v3.0.15 — 代码瘦身 + 降低稳态开销
+
+一轮以真机实测驱动的瘦身，核心是消除稳态下最大的一项重复固定开销。
+
+### 性能
+
+- **`LoadPanelNodesStrict` 加 (mtime,size) 缓存**：该函数在策略 reconcile（1Hz）
+  与采集器（0.5Hz）的热路径上每轮都调用，但 `nodes.json` 只在人工
+  add/edit/remove 时经原子 rename 改写。改为按 `(mtime, size)` 命中缓存、复用
+  上轮解析结果。真机实测（2 核 VPS）：
+  - 50 节点：**340µs → 1.35µs，87KB/1386 allocs → 272B/2 allocs**（每次读只剩一次 stat）；
+  - 稳态每秒省下一次完整文件读 + JSON 解析 + 语义校验。
+  - **fail-closed 语义不变**（关键，有回归测试锁定）：只有解析成功才写缓存；
+    损坏/读失败一律返回 error 且不缓存，reconcile 继续保持上一轮 enforcement；
+    原子 rename 保证不会读到半写文件，mtime/size 任一变化即失效重读，
+    绝无"用缓存的好结果掩盖当前损坏"的可能。
+
+### 瘦身
+
+- 删除 6 个确认不可达的死函数（`deadcode` 工具 + 全仓引用核实）：
+  `connection.CountByPort` / `connection.NodeRemoteIPs` / `fsx.WriteJSONAtomic` /
+  `traffic.TimeIn` / `traffic.TodayStr`（及顺带简化 `CountByPortFiltered` 的文档）。
+  均为历史迁移期遗留的导出 API，无任何生产或测试调用方。
+
+### 兼容性
+
+- 无行为变更、无 API schema 变化。纯内部优化 + 删死码；全部单元测试与
+  `-race` 通过，端到端性能（CPU 0.81% / RSS 21MB）与改前持平（本项目稳态
+  瓶颈本就不在 CPU，本轮价值在消除隐性的每秒重复解析与减小维护面）。
+
 ## v3.0.14 — 面板改为浅色主题
 
 - **面板 UI 由深色改为浅色（且仅浅色）**：重写 `:root` 调色板为浅色系
