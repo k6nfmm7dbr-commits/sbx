@@ -6,13 +6,62 @@
 
 本文件记录**用户可见**与**运维相关**的变更。逐条实现细节见 git log。
 
+## v3.0.16 — reconcile 热路径优化（真机 CPU profile + A/B）
+
+本轮不是凭感觉优化：先在真机跑 50 节点 × 50 活跃 IP 的 reconcile 基准并采
+CPU profile，定位到稳态成本集中在 IP slot 排序、flow tracker 每轮字符串/对象
+分配、以及为 GC 构造整轮 current-flow 集合；再逐项改、逐项 A/B。
+
+### 性能（真机同机、同一组 benchmark，基线 v3.0.15 vs 本版）
+
+- **IP slot 稳态不再排序，并移除冗余 seen map**：IP 集合没有新 admission 时，
+  排序不会改变任何 slot 决策，直接跳过；输入 active/candidates 本身已经是去重 map，
+  不再每轮构造第三张 `seen` 临时表。出现新 IP 时仍保留原优先级/FirstSeen/IP
+  tie-break。50 IP 稳态单节点 `NodeIPState.Reconcile`：**43.9µs → 10.5µs
+  （-76%）**；250 IP：268µs → 55.5µs（-79%）。
+- **conntrack flow tracker 去分配**：key 从每轮拼接的字符串改为结构体键
+  `(nodeID, srcIP, srcPort)`；value 由 `*flowState` 改内联 `flowState`；GC 用持久
+  `SeenEpoch` 标记替代每轮新建 `currentFlowKeys` 全量 map。计费模式提示也并入
+  主 flow 扫描，不再单独重复遍历 conntrack 列表。IP 只在首次进入长期状态时
+  `strings.Clone`，防止 key 子串使整份 conntrack 文件缓冲区（可能数 MB）长驻堆。
+- **展示排序改 typed sort + 稳态快路径**：使用 `slices.SortFunc` 移除反射
+  `sort.Slice` swapper；`buildActiveIPsFromState` 在通常“所有 LastSeen 同一轮”
+  情况只生成一个 IP 切片、按 IP 排序；时钟回拨等时间确实不同时仍走原完整
+  last-active 倒序规则。
+- **关键 fail-closed 缓存补强**：节点文件缓存命中除 `(mtime,size)` 外再用
+  `os.SameFile` 比较身份；即使原子 rename 后新旧文件刚好同大小、mtime 被保留，
+  也必然失效重读（有回归测试）。
+
+| reconcile workload | v3.0.15 | v3.0.16 | 改善 |
+|---|---:|---:|---:|
+| 50 节点 × 10 活跃 IP：ns/op | 1.189ms | **0.905ms** | **-24%** |
+| 同 workload：B/op / allocs | 404KB / 3624 | **273KB / 1909** | **-32% / -47%** |
+| 50 节点 × 50 活跃 IP：ns/op | 5.963ms | **3.225ms** | **-46%** |
+| 同 workload：B/op / allocs | 1.538MB / 8141 | **0.966MB / 2210** | **-37% / -73%** |
+
+profile 优化后 50×50 reconcile pprof Top 从 `NodeIPState.Reconcile`（约 31% cum）
+转为 `buildActivity` / map hashing / runtime scan，后续若继续优化应先针对真实
+代理连接数 workload 采样，而不是继续微调排序。
+
+端到端最终复测（2 核真机、50 节点 × 1095 天、90s）：CPU **0.76% 单核**、RSS **22.6MB**，`/api/live` p50 1.9ms、`/api/summary` p50 2.2ms、`/api/daily` p50 6.6ms。v3.0.15 基线此前 151s 采样为 CPU 0.81% / RSS 21.4MB（窗口长度不同，端到端数字只作方向参考）；无可见 CPU/延迟回归，RSS 多约 1.2MB、仍在 21–24MB 观测区间（Go heap 高水位/机器连接数有波动）。主要收益在重度活跃 IP 数下 reconcile 的可量化余量与每轮 GC 压力，而非空载面板体感。
+
+### 正确性验证
+
+- `go test ./...`、`go vet ./...`、`go test -race ./...` 全绿；真机 Debian 12
+  x86_64（2 核/2GB，gcc + nftables）。
+- 回归测试覆盖：新 active 抢占 provisional、SYN admission 优先级、
+  stale flow GC、last-active 排序与同刻 IP tie-break、1MiB conntrack 底层缓冲
+  不被 flow/IP 长期状态保留、同 mtime/size 原子替换节点文件仍失效。
+- 端到端 API schema、nft enforcement 与配置语义不变。
+
+
 ## v3.0.15 — 代码瘦身 + 降低稳态开销
 
 一轮以真机实测驱动的瘦身，核心是消除稳态下最大的一项重复固定开销。
 
 ### 性能
 
-- **`LoadPanelNodesStrict` 加 (mtime,size) 缓存**：该函数在策略 reconcile（1Hz）
+- **`LoadPanelNodesStrict` 加文件身份 + (mtime,size) 缓存**：该函数在策略 reconcile（1Hz）
   与采集器（0.5Hz）的热路径上每轮都调用，但 `nodes.json` 只在人工
   add/edit/remove 时经原子 rename 改写。改为按 `(mtime, size)` 命中缓存、复用
   上轮解析结果。真机实测（2 核 VPS）：
@@ -20,12 +69,12 @@
   - 稳态每秒省下一次完整文件读 + JSON 解析 + 语义校验。
   - **fail-closed 语义不变**（关键，有回归测试锁定）：只有解析成功才写缓存；
     损坏/读失败一律返回 error 且不缓存，reconcile 继续保持上一轮 enforcement；
-    原子 rename 保证不会读到半写文件，mtime/size 任一变化即失效重读，
+    原子 rename 保证不会读到半写文件，文件身份 / mtime / size 任一变化即失效重读，
     绝无"用缓存的好结果掩盖当前损坏"的可能。
 
 ### 瘦身
 
-- 删除 6 个确认不可达的死函数（`deadcode` 工具 + 全仓引用核实）：
+- 删除 5 个确认不可达的死函数（`deadcode` 工具 + 全仓引用核实）：
   `connection.CountByPort` / `connection.NodeRemoteIPs` / `fsx.WriteJSONAtomic` /
   `traffic.TimeIn` / `traffic.TodayStr`（及顺带简化 `CountByPortFiltered` 的文档）。
   均为历史迁移期遗留的导出 API，无任何生产或测试调用方。

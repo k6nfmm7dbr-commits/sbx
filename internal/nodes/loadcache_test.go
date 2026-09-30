@@ -3,6 +3,7 @@ package nodes
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -48,6 +49,47 @@ func TestLoadStrictCacheInvalidateOnChange(t *testing.T) {
 	l, err := LoadPanelNodesStrict(p)
 	if err != nil || len(l) != 3 {
 		t.Fatalf("内容变化后应返回 3, got n=%d err=%v", len(l), err)
+	}
+}
+
+// 同大小、同 mtime 的原子替换也必须失效：仅看 (mtime,size) 会把旧节点配置
+// 缓存命中；os.SameFile 能识别 inode 已替换。
+func TestLoadStrictCacheInvalidateOnSameMtimeSizeRename(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "nodes.json")
+	writeNodes(t, p, twoNodes)
+	before, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadPanelNodesStrict(p); err != nil {
+		t.Fatal(err)
+	}
+
+	updated := strings.Replace(twoNodes, `"name":"a"`, `"name":"z"`, 1)
+	if len(updated) != len(twoNodes) {
+		t.Fatal("fixture replacement must preserve byte length")
+	}
+	tmp := p + ".candidate"
+	writeNodes(t, tmp, updated)
+	if err := os.Chtimes(tmp, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, p); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) {
+		t.Skip("filesystem cannot preserve mtime/size for same-size rename")
+	}
+	list, err := LoadPanelNodesStrict(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := DisplayName(list[0]); got != "z" {
+		t.Fatalf("rename 后缓存返回陈旧内容: name=%q, want z", got)
 	}
 }
 

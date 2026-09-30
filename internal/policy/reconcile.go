@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strconv"
+	"strings"
 	"time"
 
 	"github.com/k6nfmm7dbr-commits/sbx/internal/connection"
@@ -205,8 +205,8 @@ func (s *Service) reconcile(ctx context.Context) error {
 		}
 		allowSet, hasRejected := ipState.Reconcile(nodeActive, nodeCandidates, maxIPs, now, s.ipIdle, s.rejectedTTL, s.provisionalTTL)
 
-		// 「在线 IP」= 已建立（非 provisional）的 granted 数量。
-		st.ActiveIPs = ipState.activeGrantedCount()
+		// 「在线 IP」= 已建立（非 provisional）的 granted 数量。由下一步 snapshot
+		// 同一遍 Slots 遍历得到，避免再单独扫描一次。
 		newActiveTCP[id] = activeTCPCount(nodeActive)
 
 		if cfg.IPLimitEnabled {
@@ -219,8 +219,10 @@ func (s *Service) reconcile(ctx context.Context) error {
 			ipBlocked[id] = allowSet
 		}
 
+		snap := buildNodeIPSnapshot(id, ipState)
+		st.ActiveIPs = snap.Granted
 		newStates[id] = st
-		newSnaps[id] = buildNodeIPSnapshot(id, ipState)
+		newSnaps[id] = snap
 		newActiveIPs[id] = buildActiveIPsFromState(ipState)
 	}
 
@@ -323,34 +325,23 @@ func (s *Service) buildActivity(nodeList []nodes.Node, cr connection.ConntrackRe
 		return m
 	}
 
-	currentFlowKeys := map[string]bool{}
+	// 用持久 flowState.SeenEpoch 标记本轮出现的 flow，代替每轮分配
+	// currentFlowKeys（2500 flow 下约数千条临时 map entry）。
+	s.flowEpoch++
+	if s.flowEpoch == 0 { // uint64 回绕（理论上 5840 亿年）；避免旧 marker 碰撞
+		for k, fs := range s.flows {
+			fs.SeenEpoch = 0
+			s.flows[k] = fs
+		}
+		s.flowEpoch = 1
+	}
+	flowEpoch := s.flowEpoch
 
 	if cr.Available {
-		// 全局探测：仅用于提示用户开启 sysctl（判活本身是逐流的，见下）。
+		// 全局计费提示与 flow 判活共用同一遍遍历，避免稳态每秒重复扫整个
+		// conntrack 表（高并发机可有数万行）。计数过滤口径与原探测一致：
+		// 只统计目标是节点端口、且源 IP 不是本机的 flow。
 		relevant, withBytes := 0, 0
-		for _, f := range cr.Flows {
-			if portNode[f.DstPort] == "" || s.selfIPs[f.SrcIP] {
-				continue
-			}
-			relevant++
-			if f.Bytes != 0 {
-				withBytes++
-			}
-		}
-		if relevant > 0 {
-			acctOff := withBytes == 0
-			if acctOff != s.acctDisabled {
-				if acctOff {
-					slog.Warn("检测到 nf_conntrack 未开启字节计费(nf_conntrack_acct=0)，" +
-						"已降级为「ESTABLISHED 即在线」；建议执行 " +
-						"sysctl -w net.netfilter.nf_conntrack_acct=1 以恢复精确判活")
-				} else {
-					slog.Info("nf_conntrack 字节计费已可用，恢复字节增量判活")
-				}
-			}
-			s.acctDisabled = acctOff
-		}
-
 		for _, f := range cr.Flows {
 			nodeID := portNode[f.DstPort]
 			if nodeID == "" {
@@ -359,6 +350,10 @@ func (s *Service) buildActivity(nodeList []nodes.Node, cr connection.ConntrackRe
 			// 规则 1：本机自身发起的出站流不是客户端。
 			if s.selfIPs[f.SrcIP] {
 				continue
+			}
+			relevant++
+			if f.Bytes != 0 {
+				withBytes++
 			}
 			// 候选：TCP 握手尚未完成。
 			if f.Proto == "tcp" && (f.State == "SYN_SENT" || f.State == "SYN_RECV") {
@@ -371,29 +366,36 @@ func (s *Service) buildActivity(nodeList []nodes.Node, cr connection.ConntrackRe
 			}
 
 			// 活跃流：tcp ESTABLISHED 或 udp。
-			fkey := nodeID + "\x00" + f.SrcIP + ":" + strconv.Itoa(f.SrcPort)
-			currentFlowKeys[fkey] = true
+			// 结构体 key 避免每轮拼接 nodeID + IP + port 字符串；只在首次
+			// 插入持久 flow map 时 Clone IP，避免保存到 flowKey 的 IP 子串
+			// 将整个 conntrack 文件缓冲区一并保活。
+			fkey := flowKey{nodeID: nodeID, srcIP: f.SrcIP, srcPort: f.SrcPort}
+			prev, had := s.flows[fkey]
 			traffic := false
 			switch {
 			case f.Bytes == 0:
-				// 规则 2：这条流没有计费数据 → 无从判断流量增减，
-				// conntrack 仍在跟踪就视为活跃（宁可多留，不误踢在用连接）。
-				s.flows[fkey] = &flowState{Bytes: f.Bytes, LastSeen: now}
-				traffic = true
-			default:
-				prev := s.flows[fkey]
-				switch {
-				case prev == nil:
-					s.flows[fkey] = &flowState{Bytes: f.Bytes, LastSeen: now}
-					traffic = true
-				case f.Bytes != prev.Bytes:
-					s.flows[fkey] = &flowState{Bytes: f.Bytes, LastSeen: now}
-					traffic = true
-				case now.Sub(prev.LastSeen) <= s.ipIdle:
-					// 静默但仍在 grace → 活跃
-				default:
-					continue // 死连接：整条流不活跃
+				// 无字节计费：conntrack 仍跟踪就视为活跃，并刷新 LastSeen。
+				if !had {
+					fkey.srcIP = strings.Clone(f.SrcIP)
 				}
+				s.flows[fkey] = flowState{Bytes: f.Bytes, LastSeen: now, SeenEpoch: flowEpoch}
+				traffic = true
+			case !had || f.Bytes != prev.Bytes:
+				if !had {
+					fkey.srcIP = strings.Clone(f.SrcIP)
+				}
+				s.flows[fkey] = flowState{Bytes: f.Bytes, LastSeen: now, SeenEpoch: flowEpoch}
+				traffic = true
+			case now.Sub(prev.LastSeen) <= s.ipIdle:
+				// 静默但仍在 grace → 活跃，沿用原始 LastSeen（不刷新 grace）。
+				prev.SeenEpoch = flowEpoch
+				s.flows[fkey] = prev
+			default:
+				// flow 仍存在于 conntrack，但字节静默超过 idle：仍保留 tracker，
+				// 与旧 currentFlowKeys 语义一致，只不把它计入 active。
+				prev.SeenEpoch = flowEpoch
+				s.flows[fkey] = prev
+				continue
 			}
 
 			m := agg(active, nodeID)
@@ -408,6 +410,19 @@ func (s *Service) buildActivity(nodeList []nodes.Node, cr connection.ConntrackRe
 				a.Traffic = true
 			}
 			m[f.SrcIP] = a
+		}
+		if relevant > 0 {
+			acctOff := withBytes == 0
+			if acctOff != s.acctDisabled {
+				if acctOff {
+					slog.Warn("检测到 nf_conntrack 未开启字节计费(nf_conntrack_acct=0)，" +
+						"已降级为「ESTABLISHED 即在线」；建议执行 " +
+						"sysctl -w net.netfilter.nf_conntrack_acct=1 以恢复精确判活")
+				} else {
+					slog.Info("nf_conntrack 字节计费已可用，恢复字节增量判活")
+				}
+			}
+			s.acctDisabled = acctOff
 		}
 	} else if procSplit != nil {
 		// conntrack 不可用：回退 /proc。
@@ -439,9 +454,9 @@ func (s *Service) buildActivity(nodeList []nodes.Node, cr connection.ConntrackRe
 		}
 	}
 
-	// flow tracker GC：不在本轮且超空闲的流清理，防 map 无限增长。
+	// flow tracker GC：conntrack 快照中本轮未出现且超空闲的 flow 清理。
 	for k, fs := range s.flows {
-		if !currentFlowKeys[k] && now.Sub(fs.LastSeen) > s.ipIdle {
+		if fs.SeenEpoch != flowEpoch && now.Sub(fs.LastSeen) > s.ipIdle {
 			delete(s.flows, k)
 		}
 	}

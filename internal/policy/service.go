@@ -20,7 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -119,9 +119,9 @@ type Service struct {
 	conntrack      func(path string) connection.ConntrackResult
 	remoteIPs      func(list []nodes.Node) (map[string]connection.RemoteIPSet, bool, error)
 
-	// flow tracker：conntrack 字节增量判活状态（key: node\x00ip:sport）。
-	// reconcile 私有，runMu 保护；DeleteNode 清理。
-	flows map[string]*flowState
+	// flow tracker：conntrack flow 状态，runMu 保护。
+	flows     map[flowKey]flowState
+	flowEpoch uint64 // buildActivity 每轮递增，代替每轮分配 currentFlowKeys map
 
 	// acctDisabled 记录「conntrack 存在流但全部 bytes=0」——即内核
 	// net.netfilter.nf_conntrack_acct=0（Debian/Ubuntu 默认）。
@@ -195,7 +195,7 @@ func New(db *sql.DB, appDir, policyConf string) *Service {
 		rejectedTTL:        rejectedTTL,
 		provisionalTTL:     provisionalTTL,
 		conntrack:          connection.ReadConntrack,
-		flows:              map[string]*flowState{},
+		flows:              map[flowKey]flowState{},
 		subs:               map[chan struct{}]struct{}{},
 		enforceMinInterval: enforceMinInterval,
 		nftApply:           nil, // nil 表示用真实 nft 执行
@@ -336,34 +336,73 @@ func buildActiveIPsFromState(st *NodeIPState) []string {
 		ip   string
 		last time.Time
 	}
-	arr := make([]kv, 0, len(st.Slots))
+	// 高频稳态：reconcile 的上一阶段已把所有在线 slot.LastSeen 设为同一个 now，
+	// 所以最终顺序退化为 IP 升序。先只建一个 []string；仅在时钟回拨等确实出现
+	// 不同 lastActive 时，才临时建 kv 切片走完整的时间倒序排序。
+	ips := make([]string, 0, len(st.Slots))
+	var first time.Time
+	sameTime := true
 	for ip, slot := range st.Slots {
 		if slot.Provisional {
-			continue // 候选尚未建立，不算「在线」
+			continue
 		}
 		last := slot.LastSeen
 		if slot.LastTraffic.After(last) {
 			last = slot.LastTraffic
 		}
-		arr = append(arr, kv{ip, last})
-	}
-	sort.Slice(arr, func(i, j int) bool {
-		if !arr[i].last.Equal(arr[j].last) {
-			return arr[i].last.After(arr[j].last)
+		if len(ips) == 0 {
+			first = last
+		} else if !last.Equal(first) {
+			sameTime = false
 		}
-		return arr[i].ip < arr[j].ip
-	})
-	out := make([]string, 0, len(arr))
-	for _, it := range arr {
-		out = append(out, it.ip)
+		ips = append(ips, ip)
 	}
-	return out
+	if sameTime {
+		slices.Sort(ips)
+		return ips
+	}
+	arr := make([]kv, 0, len(ips))
+	for _, ip := range ips {
+		slot := st.Slots[ip]
+		last := slot.LastSeen
+		if slot.LastTraffic.After(last) {
+			last = slot.LastTraffic
+		}
+		arr = append(arr, kv{ip: ip, last: last})
+	}
+	slices.SortFunc(arr, func(a, b kv) int {
+		if !a.last.Equal(b.last) {
+			if a.last.After(b.last) {
+				return -1
+			}
+			return 1
+		}
+		if a.ip < b.ip {
+			return -1
+		}
+		if a.ip > b.ip {
+			return 1
+		}
+		return 0
+	})
+	for i := range ips {
+		ips[i] = arr[i].ip
+	}
+	return ips
+}
+
+// flowKey 标识一条 conntrack flow；结构化字段避免每轮字符串拼接分配。
+type flowKey struct {
+	nodeID  string
+	srcIP   string
+	srcPort int
 }
 
 // flowState 是 conntrack 单条流（node + ip + sport）的判活状态。
 type flowState struct {
-	Bytes    int64
-	LastSeen time.Time
+	Bytes     int64
+	LastSeen  time.Time
+	SeenEpoch uint64 // 最近一次在 conntrack 快照里出现的轮次
 }
 
 func (s *Service) signalNotify() {
@@ -411,11 +450,11 @@ func buildNodeIPSnapshot(nodeID string, st *NodeIPState) NodeIPSnapshot {
 	}
 	snap.Limited = st.MaxIPs > 0
 	snap.MaxIPs = st.MaxIPs
-	snap.Granted = st.activeGrantedCount()
 	for ip, slot := range st.Slots {
 		if slot.Provisional {
 			continue // 候选（尚未 ESTABLISHED）不算在线，不进主列表
 		}
+		snap.Granted++
 		e := IPEntry{IP: ip, Granted: true}
 		if o, ok := st.Observed[ip]; ok {
 			e.TCP = o.TCPSessions
@@ -431,8 +470,17 @@ func buildNodeIPSnapshot(nodeID string, st *NodeIPState) NodeIPSnapshot {
 		}
 		snap.Rejected = append(snap.Rejected, e)
 	}
-	sort.Slice(snap.IPs, func(i, j int) bool { return snap.IPs[i].IP < snap.IPs[j].IP })
-	sort.Slice(snap.Rejected, func(i, j int) bool { return snap.Rejected[i].IP < snap.Rejected[j].IP })
+	cmpIP := func(a, b IPEntry) int {
+		if a.IP < b.IP {
+			return -1
+		}
+		if a.IP > b.IP {
+			return 1
+		}
+		return 0
+	}
+	slices.SortFunc(snap.IPs, cmpIP)
+	slices.SortFunc(snap.Rejected, cmpIP)
 	return snap
 }
 
@@ -626,10 +674,9 @@ func (s *Service) DeleteNode(ctx context.Context, nodeID string) error {
 	// states / ipSnaps / activeIPs 是已发布快照 → 必须在 mu 下改。
 	s.runMu.Lock()
 	delete(s.ipStates, nodeID)
-	// flow tracker 键前缀 nodeID，需整体清除。
-	prefix := nodeID + "\x00"
+	// flow tracker 按结构化 nodeID 键逐条清除。
 	for k := range s.flows {
-		if strings.HasPrefix(k, prefix) {
+		if k.nodeID == nodeID {
 			delete(s.flows, k)
 		}
 	}

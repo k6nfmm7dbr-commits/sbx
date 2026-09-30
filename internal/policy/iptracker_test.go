@@ -110,8 +110,8 @@ func TestDeleteNodeCleansIPState(t *testing.T) {
 		t.Fatal("删除节点后 ipStates 应清空")
 	}
 	for k := range s.flows {
-		if len(k) >= 2 && k[:2] == "1\x00" {
-			t.Fatalf("删除节点后 flow tracker 应清空, still %q", k)
+		if k.nodeID == "1" {
+			t.Fatalf("删除节点后 flow tracker 应清空, still %+v", k)
 		}
 	}
 }

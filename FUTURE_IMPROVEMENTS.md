@@ -536,3 +536,67 @@ conntrack/proc 解析才是大头，nodes 解析占比小）。本轮价值是�
   不成正比。暂不做。
 - **二进制体积**：删死码后体积无变化（11.6MB，死函数被链接器 DCE 本就不计入）。
   体积大头仍是 Go 运行时 + 纯 Go SQLite，见 §16.3，无低风险瘦身空间。
+## 19. v3.0.16 reconcile 热路径：profile 定位后再优化
+
+### 19.1 基线与热点
+
+测试机：Debian 12 x86_64，2 核 / 1967MB / Go 1.27.1 / gcc；实验 workload
+50 个 VLESS 节点、每节点 10 或 50 条 ESTABLISHED conntrack flow；SQLite / nft
+真实运行，`nftApply` 基准里为 no-op（它自身已实测低于总开销，不在本轮范围）。
+
+`BenchmarkReconcile` + `-cpuprofile` 定位：原始 v3.0.15 50×50 每轮
+**5.96ms / 1.54MB / 8141 allocs**；累计热点集中于 `NodeIPState.Reconcile`
+（排序 + 比较器内重复 map lookup）、`buildActivity`（flow key 拼接/状态对象/本轮
+flow 集合 map）和 map hashing/GC。SQL 两查询合计约 0.29ms，但未排入本轮——
+它不是 50×50 活跃负载里的首要热点，合并查询会增加查询结构复杂度，收益未证实。
+
+### 19.2 采纳的改动与正确性约束
+
+1. **`ipslot.Reconcile` 稳态跳过排序并移除冗余 seen map**：先判断所有 active/candidate
+   是否已持 slot 或刚释放；若无新 admission，顺序不影响任何授予/拒绝决策，跳过排序。
+   active/candidates 输入本身是去重 map，因此删除额外 `seen` map，用源 map 直接判重/判离线。
+   新 IP 时仍保持原优先级/FirstSeen/IP tie-break，不改变严格 admission 语义。
+2. **flow tracker 用 `flowKey` 结构体 + 内联 value**：去掉每条 flow 每 tick 的
+   `nodeID + "\x00" + IP + ":" + strconv.Itoa(port)` 拼接，以及 `*flowState`
+   每次字节变化/Bytes=0 时的独立堆对象。语义保留「bytes 增量刷新 LastSeen；
+   静默 grace 不刷新；超时但 conntrack 仍存在则不计 active、但保留 tracker」。
+3. **`SeenEpoch` 替代本轮 `currentFlowKeys` map**：每次 buildActivity 增加 epoch，
+   在持久 flowState 上标记本轮出现。GC 条件仍精确等价于旧逻辑：只有「本轮未出现
+   且距 LastSeen > ipIdle」才删。删除节点按结构体 key 的 nodeID 字段精确清理。
+4. **克隆长生命周期 IP key**：conntrack parser 返回的 SrcIP 是整张 conntrack
+   文本的 substring；若直接持久化 map key，会把整个数 MB 文件缓冲区随着单个
+   活跃 IP 长期保留。IP 第一次进入 Observed/flow tracker 时 `strings.Clone`，
+   后续用内容相等的 substring lookup，不再重复 clone。
+5. **快照排序快路径**：常规 reconcile 中所有 slot 的 LastSeen 是同一轮 now，
+   于是 active IP 排序等价于 IP 升序。检测到全部 last-active 时间相同就直接对
+   `[]string` 排序（只分配一个切片）；时钟回拨等不同时间场景回到原完整时间排序。
+   `IPEntry` / Rejected 的确定性输出排序改用 Go `slices.SortFunc`，移除
+   `sort.Slice` 的 reflect swapper 热路径。
+6. **计费模式提示与 flow 扫描合并**：`nf_conntrack_acct=0` 的提示逻辑原先先扫一遍
+   `cr.Flows` 计数、随后主逻辑再扫一遍处理 flow。计数过滤仍使用相同的节点端口与
+   本机出站过滤，改为在主扫描中累加，循环结束后发相同状态变更日志。
+7. **节点文件缓存失效加文件身份**：在既有 mtime+size 之外检查 `os.SameFile`，
+   原子 rename 替换即使刻意保持同大小与 mtime 也不会误命中旧内容。
+
+### 19.3 A/B 实测
+
+同一台真机、同一个 workload、benchtime=2000x（slot 基准单节点、reconcile 基准 50 节点）：
+
+| workload | v3.0.15 | v3.0.16 | 降幅 |
+|---|---:|---:|---:|
+| Reconcile 50 节点 × 10 IP | 1.189ms / 404KB / 3624 allocs | **0.905ms / 273KB / 1909 allocs** | **24% time / 32% B / 47% allocs** |
+| Reconcile 50 节点 × 50 IP | 5.963ms / 1.538MB / 8141 allocs | **3.225ms / 0.966MB / 2210 allocs** | **46% time / 37% B / 73% allocs** |
+| Slot reconcile 稳态 50 IP | 43.9µs / 6464B / 15 allocs | **10.5µs / 3160B / 5 allocs** | **76% time / 51% B / 67% allocs** |
+| Slot reconcile 稳态 250 IP | 268µs / 46.8KB / 21 allocs | **55.5µs / 19.8KB / 5 allocs** | **79% time / 58% B / 76% allocs** |
+
+端到端最终复测 90s CPU 0.76% 单核 / RSS 22.6MB，`/api/live`、`/api/summary`、`/api/daily` p50 分别约 1.9/2.2/6.6ms；v3.0.15 基线旧采样窗为 CPU 0.81% / RSS 21.4MB，窗口长度不同仅作方向参考。未见 CPU/延迟回归；RSS 约多 1.2MB，仍在 21–24MB 小机观测区间（受 Go heap 高水位和机器连接数影响）。
+
+### 19.4 验证矩阵
+
+- `go test -count=1 ./...` / `go vet ./...` / `go test -race -count=1 ./...` 全绿；
+- 测试显式锁定 admission priority、provisional 抢占、flow 超时 GC、排序语义、
+  same-mtime/size 原子替换失效、conntrack 大缓冲不被长期 key 引用；
+- 真机端到端最终复测 CPU 0.72% 单核 / RSS 21.3MB，`/api/live`、`/api/summary`、
+  `/api/daily` p50 分别约 1.8/2.2/6.4ms；与 v3.0.15 端到端数据处于同一量级，
+  无功能或性能回归。
+

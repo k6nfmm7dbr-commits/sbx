@@ -2,6 +2,7 @@ package policy
 
 import (
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -84,22 +85,22 @@ func (st *NodeIPState) Reconcile(active, candidates map[string]IPActivity, maxIP
 		ip     string
 		active bool
 	}
-	seen := map[string]bool{}
 	all := make([]want, 0, len(active)+len(candidates))
 
-	// 1) 更新 Observed（active 与 candidate 都算「见过」）。
+	// 1) 更新 Observed（active 与 candidate 都算「见过」）。active/candidates
+	// 本身已经是去重 map；再额外构造一个 seen map 只为记录同样的 membership
+	// 会多一次每 IP 的写入与整张临时 map。候选重叠直接查 active，slot 保留则查
+	// 两个源 map，消除该临时集合而不改变去重/释放语义。
 	for ip, a := range active {
-		st.touchObserved(ip, a, now)
-		seen[ip] = true
-		all = append(all, want{ip, true})
+		stableIP := st.touchObserved(ip, a, now)
+		all = append(all, want{ip: stableIP, active: true})
 	}
 	for ip, a := range candidates {
-		if seen[ip] {
+		if _, ok := active[ip]; ok {
 			continue // 已在 active 里
 		}
-		st.touchObserved(ip, a, now)
-		seen[ip] = true
-		all = append(all, want{ip, false})
+		stableIP := st.touchObserved(ip, a, now)
+		all = append(all, want{ip: stableIP, active: false})
 	}
 
 	// 2) Rejected TTL 清理。
@@ -114,7 +115,9 @@ func (st *NodeIPState) Reconcile(active, candidates map[string]IPActivity, maxIP
 	// released 记录本轮刚释放的 IP，admission 不得在同一轮立刻 re-grant。
 	released := map[string]bool{}
 	for ip, slot := range st.Slots {
-		if !seen[ip] {
+		_, isActive := active[ip]
+		_, isCandidate := candidates[ip]
+		if !isActive && !isCandidate {
 			delete(st.Slots, ip)
 			released[ip] = true
 			continue
@@ -125,42 +128,58 @@ func (st *NodeIPState) Reconcile(active, candidates map[string]IPActivity, maxIP
 		}
 	}
 
-	// 4) 排序（优先级从高到低）：
-	//      ① 已建立且已持有正式 slot —— 在用的真实客户端，绝不能被挤掉
-	//      ② 已建立（active）—— 完成过握手，比只发 SYN 的可信
-	//      ③ 已持有 provisional slot 的候选
-	//      ④ 其余候选
-	//    再按 FirstSeen、IP 兜底保证确定性。
-	//
-	// 为什么 active 必须排在「持有 provisional slot 的候选」之前：
-	// 只发 SYN 的陌生 IP 会先拿到 provisional slot，若「持有 slot」优先级最高，
-	// 它就能在名额满时把真正 ESTABLISHED 的客户端推进 Rejected；每 10s
-	// （provisionalTTL）内重发一次 SYN 即可持续拒服。max_ips=1 时最明显。
-	rank := func(w want) int {
-		slot, has := st.Slots[w.ip]
-		switch {
-		case has && !slot.Provisional && w.active:
-			return 0
-		case w.active:
-			return 1
-		case has && slot.Provisional:
-			return 2
-		default:
-			return 3
+	// 4) 只有出现「没有 slot、且非本轮刚释放」的新 IP 时才需要排序。
+	// 稳态每秒重复看到的 IP 已全部持有 slot，admission 顺序不会改变任何结果，
+	// 原先仍对所有 IP 排序（50 个在线 IP/node × 50 节点 → 每秒约 15k 次
+	// comparator/map lookup）。现在稳态跳过 sort；发生新 IP admission 时则保留
+	// 完全相同的优先级与 FirstSeen/IP tie-break 语义。
+	needsAdmission := false
+	for i := range all {
+		if _, has := st.Slots[all[i].ip]; !has && !released[all[i].ip] {
+			needsAdmission = true
+			break
 		}
 	}
-	sort.Slice(all, func(i, j int) bool {
-		a, b := all[i], all[j]
-		ra, rb := rank(a), rank(b)
-		if ra != rb {
-			return ra < rb
+	if needsAdmission {
+		// 排序元数据只在有新 IP 时临时分配，稳态路径的 want slice 保持紧凑。
+		type rankedWant struct {
+			want
+			priority  uint8
+			firstSeen time.Time
 		}
-		fa, fb := st.Observed[a.ip].FirstSeen, st.Observed[b.ip].FirstSeen
-		if !fa.Equal(fb) {
-			return fa.Before(fb)
+		ranked := make([]rankedWant, len(all))
+		for i, w := range all {
+			entry := rankedWant{want: w}
+			slot, has := st.Slots[w.ip]
+			switch {
+			case has && !slot.Provisional && w.active:
+				entry.priority = 0
+			case w.active:
+				entry.priority = 1
+			case has && slot.Provisional:
+				entry.priority = 2
+			default:
+				entry.priority = 3
+			}
+			if o := st.Observed[w.ip]; o != nil {
+				entry.firstSeen = o.FirstSeen
+			}
+			ranked[i] = entry
 		}
-		return a.ip < b.ip
-	})
+		sort.Slice(ranked, func(i, j int) bool {
+			a, b := ranked[i], ranked[j]
+			if a.priority != b.priority {
+				return a.priority < b.priority
+			}
+			if !a.firstSeen.Equal(b.firstSeen) {
+				return a.firstSeen.Before(b.firstSeen)
+			}
+			return a.ip < b.ip
+		})
+		for i := range all {
+			all[i] = ranked[i].want
+		}
+	}
 
 	// 5) Admission。
 	for _, w := range all {
@@ -265,9 +284,13 @@ func oldestProvisional(st *NodeIPState) string {
 	return best
 }
 
-func (st *NodeIPState) touchObserved(ip string, a IPActivity, now time.Time) {
+func (st *NodeIPState) touchObserved(ip string, a IPActivity, now time.Time) string {
 	o, ok := st.Observed[ip]
 	if !ok {
+		// IP 字符串常来自 conntrack 的 unsafe.String 子串；持久 map key 若直接
+		// 保存它，会把整张 conntrack 文件缓冲区保活到 IP idle GC。只在新 IP
+		// 首次落入长期状态时克隆这几字节，避免每 tick 保留整份大文件。
+		ip = strings.Clone(ip)
 		o = &ObservedIP{IP: ip, FirstSeen: now}
 		st.Observed[ip] = o
 	}
@@ -277,6 +300,7 @@ func (st *NodeIPState) touchObserved(ip string, a IPActivity, now time.Time) {
 	if a.Traffic {
 		o.LastTraffic = now
 	}
+	return o.IP
 }
 
 // grantedCount 返回持有 slot 的 IP 数（含 provisional）。

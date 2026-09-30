@@ -8,8 +8,10 @@ import (
 // osStat 抽成变量便于测试注入（模拟 stat 失败/替换竞态）。
 var osStat = os.Stat
 
-// panelStrictCacheEntry 缓存一次成功解析的结果，用 (mtime, size) 作为失效判据。
+// panelStrictCacheEntry 缓存一次成功解析的结果。mtime+size 检测普通写入，
+// os.SameFile 检测原子 rename 替换（即使新旧文件恰好同大小且 mtime 相同）。
 type panelStrictCacheEntry struct {
+	info    os.FileInfo
 	mtimeNS int64
 	size    int64
 	list    []Node
@@ -23,8 +25,9 @@ type panelStrictCacheEntry struct {
 //
 // 为什么不会读到陈旧数据：
 //   - 只在成功解析后写入；任一次损坏/读失败都返回 error 且不缓存；
-//   - 命中判据是 (mtimeNS, size) 双字段完全一致，写入必然改变 mtime（纳秒）
-//     或 size；原子 rename 保证不会读到半写文件；
+//   - 命中判据为同一文件身份（os.SameFile）+ (mtime,size) 双字段全等；原子 rename
+//     必然更换文件身份，即使新旧文件同大小、刻意保留 mtime 也会失效重读；
+//     原子写保证不会读到半写文件；
 //   - 缓存值是只读共享的 []Node，调用方不得改写。
 type panelStrictCacheT struct {
 	mu sync.RWMutex
@@ -33,30 +36,20 @@ type panelStrictCacheT struct {
 
 var panelStrictCache = &panelStrictCacheT{m: map[string]panelStrictCacheEntry{}}
 
-// lookup 返回路径缓存的 (mtime,size,list)；调用方已 stat 得到当前 (mtime,size)，
-// 二者完全一致才算命中。把 stat 交给调用方做，全流程只需 1 次 stat。
-func (c *panelStrictCacheT) lookup(path string, mtimeNS, size int64) ([]Node, bool) {
+// lookup 返回路径缓存的解析结果；调用方已 stat 得到当前 FileInfo，必须文件身份、
+// mtime、size 三者都匹配才算命中。stat 只执行一次。
+func (c *panelStrictCacheT) lookup(path string, fi os.FileInfo) ([]Node, bool) {
 	c.mu.RLock()
 	e, ok := c.m[path]
 	c.mu.RUnlock()
-	if !ok || e.mtimeNS != mtimeNS || e.size != size {
+	if !ok || !os.SameFile(e.info, fi) || e.mtimeNS != fi.ModTime().UnixNano() || e.size != fi.Size() {
 		return nil, false
 	}
 	return e.list, true
 }
 
-func (c *panelStrictCacheT) put(path string, mtimeNS, size int64, list []Node) {
+func (c *panelStrictCacheT) put(path string, fi os.FileInfo, list []Node) {
 	c.mu.Lock()
-	c.m[path] = panelStrictCacheEntry{mtimeNS: mtimeNS, size: size, list: list}
+	c.m[path] = panelStrictCacheEntry{info: fi, mtimeNS: fi.ModTime().UnixNano(), size: fi.Size(), list: list}
 	c.mu.Unlock()
-}
-
-// statMtimeSize 返回文件的修改时间（纳秒）与大小。文件不存在或 stat 失败时
-// 返回 err，调用方据此走完整读取路径（并处理 NotExist）。
-func statMtimeSize(path string) (mtimeNS, size int64, err error) {
-	fi, err := osStat(path)
-	if err != nil {
-		return 0, 0, err
-	}
-	return fi.ModTime().UnixNano(), fi.Size(), nil
 }
