@@ -42,9 +42,10 @@ type cacheEntry struct {
 
 // cacheCall 是一次进行中的加载；等待者共享同一结果。
 type cacheCall struct {
-	wg  sync.WaitGroup
-	val any
-	err error
+	wg      sync.WaitGroup
+	val     any
+	err     error
+	waiters int // 仅在 ttlCache.mu 下读写，便于诊断/测试单飞等待者状态
 }
 
 func newTTLCache(ttl time.Duration) *ttlCache {
@@ -66,6 +67,7 @@ func (c *ttlCache) load(key string, fn func() (any, error)) (any, error) {
 	}
 	// 命中进行中的加载：等它完成（单飞）
 	if call, ok := c.inflight[key]; ok {
+		call.waiters++
 		c.mu.Unlock()
 		call.wg.Wait()
 		return call.val, call.err

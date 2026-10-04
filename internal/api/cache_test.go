@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -207,7 +208,22 @@ func TestCacheLoaderPanicReleasesWaiters(t *testing.T) {
 		})
 		waiterDone <- err
 	}()
-	time.Sleep(20 * time.Millisecond)
+	// 确认 follower 已在 inflight call 上注册，避免依赖固定 sleep 时长（Alpine CI
+	// 慢调度下可能让 waiter 尚未运行就释放 leader）。
+	deadline := time.Now().Add(time.Second)
+	for {
+		c.mu.Lock()
+		call := c.inflight["panic"]
+		registered := call != nil && call.waiters > 0
+		c.mu.Unlock()
+		if registered {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("waiter did not register with inflight loader")
+		}
+		runtime.Gosched()
+	}
 	close(release)
 	select {
 	case <-leaderDone:
