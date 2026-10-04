@@ -42,7 +42,7 @@ ck "安装脚本退出码 0" $?
 grep -q "安装完成" /tmp/e2e-install.log; ck "输出含「安装完成」" $?
 [[ -x "$CORE" ]]; ck "sbx-core 已安装" $?
 [[ -x "$ROOT/usr/local/bin/sing-box" ]]; ck "sing-box 已安装" $?
-"$CORE" version | grep -q "v3.0.21"; ck "core 版本 3.0.21 ($("$CORE" version))" $?
+"$CORE" version | grep -q "v3.0.22"; ck "core 版本 3.0.22 ($("$CORE" version))" $?
 jq -e '.token and (.port|type)=="number" and .port>=1 and .port<=65535' "$PANEL_CONF" >/dev/null 2>&1
 ck "panel.json 合法(token+port)" $?
 # nftables-only（v3.0.9）：新装配置不得含废弃后端键，必须含 nft_conf
@@ -53,10 +53,9 @@ grep -q '^#!/usr/sbin/nft -f' "$APP_DIR/nft.conf"; ck "nft.conf 是 nft 脚本" 
 
 # ---------------------------------------------------------------- 2. 菜单加节点
 section "2. 菜单添加 Shadowsocks 2022 节点"
-# 按键序列（v3.0.x 菜单顺序）：
-#   1=添加节点 → 2=Shadowsocks → 1=加密算法(128) → 端口 → 备注 → 回车(pause) → 0=退出
+# 按键序列：主菜单 1=节点配置 → 1=添加节点 → 2=Shadowsocks → 1=算法 → 端口/备注 → pause → 0=退出
 # 密码由 `sbx-core node ss2022-key` 用 crypto/rand 生成，菜单不再询问。
-printf '1\n2\n1\n18388\nss-e2e\n\n0\n' | env SBX_ROOT="$ROOT" SBX_NO_SERVICE=1 \
+printf '1\n1\n2\n1\n18388\nss-e2e\n\n0\n' | env SBX_ROOT="$ROOT" SBX_NO_SERVICE=1 \
   NO_COLOR=1 bash "$ROOT/usr/local/bin/sbx" >/tmp/e2e-menu.log 2>&1
 ck "菜单流程退出码 0" $?
 jq -e 'length==1 and .[0].type=="shadowsocks" and .[0].port==18388 and .[0].name=="ss-e2e"' "$NODES_JSON" >/dev/null 2>&1

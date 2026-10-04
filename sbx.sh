@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 APP_NAME="SBX"
-APP_VERSION="3.0.21"
+APP_VERSION="3.0.22"
 RAW_URL="${SBX_RAW_URL:-https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh}"
 
 # SBX_ROOT 仅用于测试/沙箱安装（把整套目录挪到前缀下），正常安装留空
@@ -1679,22 +1679,9 @@ menu_show_links() {
   pause
 }
 
-menu_traffic() {
-  banner
-  printf '%s流量统计%s\n' "$C_B" "$C_RESET"
-  hr
-  "$CORE_BIN" show
-  hr
-  printf '%s最近 14 天%s\n' "$C_B" "$C_RESET"
-  "$CORE_BIN" daily 14
-  hr
-  show_panel_info
-  pause
-}
-
 menu_panel_settings() {
   banner
-  printf '%s面板设置%s\n\n' "$C_B" "$C_RESET"
+  printf '%s面板设置与统计维护%s\n\n' "$C_B" "$C_RESET"
   show_panel_info
   echo "  1) 修改端口"
   echo "  2) 修改采集间隔（当前 $(panel_get interval) 秒）"
@@ -1843,23 +1830,19 @@ main_menu() {
       "$(panel_running && echo "${C_GREEN}●${C_RESET}" || echo "${C_RED}●${C_RESET}")" \
       "$C_DIM" "$APP_VERSION" "$C_RESET"
     printf '  面板: %s%s%s\n\n' "$C_CYAN" "$(panel_url)" "$C_RESET"
-    echo "  1) 添加节点"
-    echo "  2) 节点管理"
-    echo "  3) 流量统计"
-    echo "  4) 系统设置"
-    echo "  5) 检查更新"
-    echo "  6) 卸载"
+    echo "  1) 节点配置"
+    echo "  2) 系统设置与运维"
+    echo "  3) 检查更新"
+    echo "  4) 卸载"
     echo "  0) 退出"
     echo
     printf '请选择: '
     read -r c || true
     case "$c" in
-      1) menu_add_node ;;
-      2) menu_nodes ;;
-      3) menu_traffic ;;
-      4) menu_settings ;;
-      5) do_update; pause ;;
-      6) uninstall_all ;;
+      1) menu_nodes ;;
+      2) menu_settings ;;
+      3) do_update; pause ;;
+      4) uninstall_all ;;
       0|"") clear 2>/dev/null || true; exit 0 ;;
       *) warn "无效选择"; sleep 1 ;;
     esac
@@ -1869,20 +1852,20 @@ main_menu() {
 menu_nodes() {
   while :; do
     banner
-    printf '%s节点管理%s\n\n' "$C_B" "$C_RESET"
-    core_node list
-    echo
-    echo "  1) 查看分享链接"
-    echo "  2) 修改节点（端口 / SNI）"
-    echo "  3) 删除节点"
+    printf '%s节点配置%s\n\n' "$C_B" "$C_RESET"
+    echo "  1) 添加节点"
+    echo "  2) 查看分享链接"
+    echo "  3) 修改节点（端口 / SNI）"
+    echo "  4) 删除节点"
     echo "  0) 返回"
     echo
     printf '请选择: '
     read -r c || true
     case "$c" in
-      1) menu_show_links ;;
-      2) menu_edit_node ;;
-      3) menu_remove_node ;;
+      1) menu_add_node ;;
+      2) menu_show_links ;;
+      3) menu_edit_node ;;
+      4) menu_remove_node ;;
       0|"") return 0 ;;
       *) warn "无效选择" ;;
     esac
@@ -1892,8 +1875,8 @@ menu_nodes() {
 menu_settings() {
   while :; do
     banner
-    printf '%s系统设置%s\n\n' "$C_B" "$C_RESET"
-    echo "  1) 面板设置（端口 / 间隔 / 监听 / 自检 / 清空）"
+    printf '%s系统设置与运维%s\n\n' "$C_B" "$C_RESET"
+    echo "  1) 面板设置与统计维护（端口 / 间隔 / 监听 / 自检 / 清空）"
     echo "  2) 分享地址（域名 / IP）"
     echo "  3) 服务管理（重启 / 停止 / 日志）"
     echo "  0) 返回"
@@ -2176,7 +2159,7 @@ do_install() {
   ok "安装完成"
   hr
   if [[ "$nnum" == "0" ]]; then
-    printf '%s还没有任何节点。%s在菜单里选「1) 添加节点」即可创建。\n' "$C_B" "$C_RESET"
+    printf '%s还没有任何节点。%s在菜单里选「1) 节点配置 → 1) 添加节点」即可创建。\n' "$C_B" "$C_RESET"
   else
     printf '%s节点分享链接%s\n' "$C_B" "$C_RESET"
     core_node links --host "$host" || true
@@ -2184,7 +2167,7 @@ do_install() {
   show_panel_info
   printf '\n%s提示%s\n' "$C_B" "$C_RESET"
   printf '  · 随时运行 %ssbx%s 打开管理菜单\n' "$C_CYAN" "$C_RESET"
-  printf '  · 首次使用请在菜单「1) 添加节点」创建你要的节点\n'
+  printf '  · 首次使用请在菜单「1) 节点配置 → 1) 添加节点」创建你要的节点\n'
   if [[ -n "$host6" ]]; then
     printf '  · 本机支持 IPv6，添加节点后会同时给出 IPv4 与 IPv6 两条分享链接\n'
   fi

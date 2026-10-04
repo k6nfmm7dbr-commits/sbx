@@ -162,9 +162,7 @@ function renderNodeSelect(s) {
 /* ---------- 渲染：实时（高频 live） ---------- */
 function renderLive(v) {
   state.live = v;
-  var healthy = v.healthy, live = v.rate_known !== false;
-  setText('status-txt', healthy ? '实时监控中' : (v.error ? '采集异常' : '等待采集'));
-  document.getElementById('pulse').className = 'pulse' + (live ? '' : ' stale');
+  var live = v.rate_known !== false;
 
   var rt = v.rate_total || { rx: 0, tx: 0 };
   easeTo('hero-rate', live ? rt.rx + rt.tx : 0, function (n) { return live ? fmtRate(n) : '—'; });

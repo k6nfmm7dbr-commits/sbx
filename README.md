@@ -7,7 +7,7 @@ SBX 用一条命令在你的服务器上搭好 sing-box 代理节点,并附带�
 netfilter 后端是 **nftables-only**:流量统计、节点暂停、在线 IP 上限和节点限速全部由 nftables(表 `sbx_traffic` / `sbx_policy`)在内核里完成。不支持 iptables,也没有后端自动选择或回退——nftables 不可用时 SBX 会**明确失败并中止**,绝不静默降级或"假装成功"。
 
 <p>
-  <img alt="version" src="https://img.shields.io/badge/version-v3.0.21-blue">
+  <img alt="version" src="https://img.shields.io/badge/version-v3.0.22-blue">
   <img alt="go" src="https://img.shields.io/badge/Go-1.27.1%2B-00ADD8">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
   <img alt="backend" src="https://img.shields.io/badge/netfilter-nftables--only-orange">
@@ -170,19 +170,18 @@ sudo apt-get update
 
 ---
 
-## 管理菜单
+`sbx` 主菜单聚焦于 CLI 节点配置与系统运维；首页流量总览、每日趋势、节点流量/连接数、在线 IP 和暂停/IP限制/限速设置统一放在 Web 面板中，避免重复入口。主菜单布局为：
 
-安装后直接运行 `sbx` 进入交互式菜单,常用操作都在这里(节点暂停、IP 上限与限速在 Web 面板里设置,不进 CLI 菜单):
+```text
+1) 节点配置          添加 / 查看分享链接 / 修改 / 删除
+2) 系统设置与运维    面板访问设置 / 分享地址 / 服务启停与日志 / 统计自检与清空
+3) 检查更新
+4) 卸载
+0) 退出
+```
 
-```
-添加节点        1) VLESS + Reality  2) Shadowsocks 2022  3) Trojan  4) AnyTLS  5) Snell
-删除节点        选择节点删除(可选是否一并清除其历史流量)
-节点管理        改端口 / 改加密方式 / 改 Snell 版本 / 查看分享链接
-流量统计        今日/累计、每日趋势、运行自检、清空统计
-面板设置        改端口 / 采集间隔 / 仅本机或公网访问
-服务管理        全部重启/停止/启动、重建计数规则、查看 sing-box 日志
-升级 / 卸载     在线升级、彻底卸载
-```
+流量统计和每日趋势可直接打开菜单顶部显示的面板地址；节点启用/暂停、IP 上限和限速在面板的节点卡片「管理」中设置。CLI 子命令 `sbx-core show` / `daily` 仍保留，供终端、脚本及自动化调用，但不作为交互菜单入口。
+
 
 ---
 
@@ -198,6 +197,8 @@ sudo apt-get update
 ---
 
 ## Web 面板
+
+首页保持浅色主题，页面从实时速率与现有 KPI 直接开始（不再显示品牌/连接状态顶栏）；桌面速率卡采用左右分栏，手机端上传/下载并列。下列既有页签、字段和操作保持不变。
 
 底部三页签,令牌登录(HttpOnly Cookie,`SameSite=Lax`,`Max-Age=7d`):
 
@@ -417,7 +418,7 @@ CI 门禁(`main` 推送全绿才发布):`gofmt` / `go vet` / `go test` / `go tes
 ## 当前版本
 
 ```text
-v3.0.21
+v3.0.22
 ```
 
 源码在 `main` 分支,二进制从 `dist` 分支分发(rolling latest)。
