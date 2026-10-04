@@ -155,11 +155,6 @@ func (s *Server) serveRoutes(w http.ResponseWriter, r *http.Request) {
 		}
 		s.handleGet(w, r, route)
 	case http.MethodPost:
-		// 仅策略的 quota/reset 需要 POST；其余 /api 路径维持旧行为（404 文本）。
-		if strings.HasPrefix(route, "/api/nodes/") && isPolicyPostRoute(route) {
-			s.handleAPI(w, r, route)
-			return
-		}
 		s.handlePost(w, r, route)
 	case http.MethodPut:
 		if strings.HasPrefix(route, "/api/") {

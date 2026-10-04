@@ -34,6 +34,14 @@ func TestOpenCreatesSchema(t *testing.T) {
 		}
 	}
 
+	cols, err := tableColumns(db, "node_policy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cols["paused"] || cols["quota_enabled"] || cols["quota_limit_bytes"] || cols["quota_reset_baseline"] {
+		t.Fatalf("fresh node_policy schema must contain paused and no quota columns: %v", cols)
+	}
+
 	var idx int
 	if err := db.QueryRow(
 		"SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_samples_ts'").Scan(&idx); err != nil || idx != 1 {
@@ -118,16 +126,12 @@ func TestMigrateLegacySamples(t *testing.T) {
 	}
 }
 
-// TestMigrateLegacyNodePolicy 无损迁移旧格式库：v3.0.10 之前的 node_policy
-// 没有 rate_limit_enabled/rate_limit_mbps 两列，重新打开应自动补列（默认 0），
-// 且既有行数据保留。CREATE TABLE IF NOT EXISTS 不补列，必须靠 ALTER 迁移。
-func TestMigrateLegacyNodePolicy(t *testing.T) {
+func TestMigrateLegacyNodePolicyDropsQuotaAndPreservesRemainingPolicy(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "legacy_np.db")
 	db, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 手工降级出“旧库”结构：无 rate_limit_* 两列
 	for _, q := range []string{
 		"DROP TABLE node_policy",
 		"CREATE TABLE node_policy (node_id TEXT PRIMARY KEY," +
@@ -135,38 +139,45 @@ func TestMigrateLegacyNodePolicy(t *testing.T) {
 			" quota_limit_bytes INTEGER NOT NULL DEFAULT 0," +
 			" quota_reset_baseline INTEGER NOT NULL DEFAULT 0," +
 			" ip_limit_enabled INTEGER NOT NULL DEFAULT 0," +
-			" ip_limit_max INTEGER NOT NULL DEFAULT 0)",
-		"INSERT INTO node_policy(node_id,quota_enabled,quota_limit_bytes,ip_limit_enabled,ip_limit_max)" +
-			" VALUES('7',1,1073741824,1,3)",
+			" ip_limit_max INTEGER NOT NULL DEFAULT 0," +
+			" rate_limit_enabled INTEGER NOT NULL DEFAULT 0," +
+			" rate_limit_mbps INTEGER NOT NULL DEFAULT 0)",
+		"INSERT INTO node_policy(node_id,quota_enabled,quota_limit_bytes,quota_reset_baseline,ip_limit_enabled,ip_limit_max,rate_limit_enabled,rate_limit_mbps) VALUES('7',1,1073741824,100,1,3,1,50)",
 	} {
 		if _, err := db.Exec(q); err != nil {
 			t.Fatal(err)
 		}
 	}
-	db.Close()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
 
-	db2, err := Open(path) // 重新打开触发迁移
+	db2, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db2.Close()
-
 	cols, err := tableColumns(db2, "node_policy")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cols["rate_limit_enabled"] || !cols["rate_limit_mbps"] {
-		t.Fatalf("迁移未补 rate_limit_* 列: %v", cols)
+	for _, col := range []string{"paused", "ip_limit_enabled", "ip_limit_max", "rate_limit_enabled", "rate_limit_mbps"} {
+		if !cols[col] {
+			t.Errorf("迁移后缺少保留列 %s: %v", col, cols)
+		}
 	}
-	// 既有行保留，新列默认 0
-	var qe, rle, rmbps int
-	if err := db2.QueryRow(
-		"SELECT quota_enabled,rate_limit_enabled,rate_limit_mbps FROM node_policy WHERE node_id='7'").
-		Scan(&qe, &rle, &rmbps); err != nil {
+	for _, col := range []string{"quota_enabled", "quota_limit_bytes", "quota_reset_baseline"} {
+		if cols[col] {
+			t.Errorf("配额列未移除 %s: %v", col, cols)
+		}
+	}
+	var ipOn, ipMax, rateOn, mbps, paused int
+	if err := db2.QueryRow("SELECT paused,ip_limit_enabled,ip_limit_max,rate_limit_enabled,rate_limit_mbps FROM node_policy WHERE node_id='7'").
+		Scan(&paused, &ipOn, &ipMax, &rateOn, &mbps); err != nil {
 		t.Fatal(err)
 	}
-	if qe != 1 || rle != 0 || rmbps != 0 {
-		t.Errorf("迁移后旧数据应保留、新列默认 0, got qe=%d rle=%d mbps=%d", qe, rle, rmbps)
+	if paused != 0 || ipOn != 1 || ipMax != 3 || rateOn != 1 || mbps != 50 {
+		t.Errorf("迁移后必须保留暂停默认与 IP/限速策略: paused=%d ip=%d/%d rate=%d/%d", paused, ipOn, ipMax, rateOn, mbps)
 	}
 }
 
@@ -192,5 +203,52 @@ func TestTransactionAtomicity(t *testing.T) {
 	_ = db.QueryRow("SELECT COUNT(*) FROM totals").Scan(&n)
 	if n != 0 {
 		t.Errorf("回滚后应为空, got %d", n)
+	}
+}
+
+func TestMigratePreRateNodePolicyAddsNewFieldsAndDropsQuota(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pre_rate_np.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		"DROP TABLE node_policy",
+		"CREATE TABLE node_policy (node_id TEXT PRIMARY KEY, quota_enabled INTEGER NOT NULL DEFAULT 0, quota_limit_bytes INTEGER NOT NULL DEFAULT 0, quota_reset_baseline INTEGER NOT NULL DEFAULT 0, ip_limit_enabled INTEGER NOT NULL DEFAULT 0, ip_limit_max INTEGER NOT NULL DEFAULT 0)",
+		"INSERT INTO node_policy(node_id,quota_enabled,quota_limit_bytes,quota_reset_baseline,ip_limit_enabled,ip_limit_max) VALUES('9',1,2000,100,1,4)",
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db2.Close()
+	cols, err := tableColumns(db2, "node_policy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, col := range []string{"paused", "rate_limit_enabled", "rate_limit_mbps", "ip_limit_enabled", "ip_limit_max"} {
+		if !cols[col] {
+			t.Errorf("pre-rate migration missing %s: %v", col, cols)
+		}
+	}
+	for _, col := range []string{"quota_enabled", "quota_limit_bytes", "quota_reset_baseline"} {
+		if cols[col] {
+			t.Errorf("pre-rate migration kept removed quota column %s", col)
+		}
+	}
+	var paused, ipOn, ipMax, rateOn, mbps int
+	if err := db2.QueryRow("SELECT paused,ip_limit_enabled,ip_limit_max,rate_limit_enabled,rate_limit_mbps FROM node_policy WHERE node_id='9'").
+		Scan(&paused, &ipOn, &ipMax, &rateOn, &mbps); err != nil {
+		t.Fatal(err)
+	}
+	if paused != 0 || ipOn != 1 || ipMax != 4 || rateOn != 0 || mbps != 0 {
+		t.Errorf("pre-rate migration values incorrect: paused=%d ip=%d/%d rate=%d/%d", paused, ipOn, ipMax, rateOn, mbps)
 	}
 }

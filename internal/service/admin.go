@@ -115,12 +115,6 @@ func Reset(scope string) error {
 			}
 		}
 	}
-	// 同事务清零配额基线：used = lifetime(totals) - baseline 且 clamp 到 0，
-	// totals 被删后 lifetime 归零，若基线仍停在旧高水位，配额要重新跑满
-	// 该水位才恢复生效——期间限额完全失效。
-	if err := policy.ClearBaselineTx(tx, scope); err != nil {
-		return err
-	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
@@ -263,7 +257,7 @@ func Clear() int {
 	}
 	if firewall.Which("nft") {
 		// 逐表删除，只针对 SBX 自己的表：
-		//   sbx_traffic — 流量计数；sbx_policy — Quota/IP Limit enforcement。
+		//   sbx_traffic — 流量计数；sbx_policy — 节点暂停/IP Limit/Rate Limit。
 		// 表本就不存在 = 成功；其它失败（权限/语法）必须如实报错。
 		for _, table := range []string{firewall.NFTTable, policy.PolicyTable} {
 			rc, _, errMsg := firewall.RunCmd(context.Background(),

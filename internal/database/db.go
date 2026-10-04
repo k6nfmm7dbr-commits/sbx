@@ -15,7 +15,7 @@ import (
 	"modernc.org/sqlite"
 )
 
-// Schema 与旧 panel.py 的 SCHEMA 完全一致（逐条执行，等价 executescript）。
+// Schema 按 SQL 语句维护统计库表；流量表与旧 panel.py 兼容，node_policy 存放 SBX 当前策略状态。
 const Schema = `
 CREATE TABLE IF NOT EXISTS meta (
     k TEXT PRIMARY KEY,
@@ -66,9 +66,7 @@ CREATE TABLE IF NOT EXISTS samples (
 CREATE INDEX IF NOT EXISTS idx_samples_ts ON samples(ts);
 CREATE TABLE IF NOT EXISTS node_policy (
     node_id                TEXT PRIMARY KEY,
-    quota_enabled          INTEGER NOT NULL DEFAULT 0,
-    quota_limit_bytes      INTEGER NOT NULL DEFAULT 0,
-    quota_reset_baseline   INTEGER NOT NULL DEFAULT 0,
+    paused                 INTEGER NOT NULL DEFAULT 0,
     ip_limit_enabled       INTEGER NOT NULL DEFAULT 0,
     ip_limit_max           INTEGER NOT NULL DEFAULT 0,
     rate_limit_enabled     INTEGER NOT NULL DEFAULT 0,
@@ -180,20 +178,48 @@ func (d *DB) migrate() error {
 	if _, err := tx.Exec("UPDATE samples SET valid=0 WHERE duration_ms<=0"); err != nil {
 		return err
 	}
-	// 无损迁移旧库：v3.0.10 之前的 node_policy 没有 rate_limit_* 两列。
-	// CREATE TABLE IF NOT EXISTS 不会给既有表补列，必须显式 ALTER ADD，
-	// 否则升级后策略读写（8 列 SELECT/INSERT）会因「no such column」失败。
+	// node_policy 收敛为「节点暂停 / IP limit / rate limit」。旧版 quota 字段不再读取。
+	// 先补齐当前保留字段，再重建表丢弃 quota_*，兼容所有已发布的旧 schema；
+	// 迁移在上方单事务里执行，失败时旧表及其配额数据仍完整回滚。
 	npCols, err := tableColumns(tx, "node_policy")
 	if err != nil {
 		return err
 	}
-	if _, ok := npCols["rate_limit_enabled"]; !ok {
-		if _, err := tx.Exec("ALTER TABLE node_policy ADD COLUMN rate_limit_enabled INTEGER NOT NULL DEFAULT 0"); err != nil {
-			return err
+	for _, col := range []struct{ name, ddl string }{
+		{"paused", "ALTER TABLE node_policy ADD COLUMN paused INTEGER NOT NULL DEFAULT 0"},
+		{"ip_limit_enabled", "ALTER TABLE node_policy ADD COLUMN ip_limit_enabled INTEGER NOT NULL DEFAULT 0"},
+		{"ip_limit_max", "ALTER TABLE node_policy ADD COLUMN ip_limit_max INTEGER NOT NULL DEFAULT 0"},
+		{"rate_limit_enabled", "ALTER TABLE node_policy ADD COLUMN rate_limit_enabled INTEGER NOT NULL DEFAULT 0"},
+		{"rate_limit_mbps", "ALTER TABLE node_policy ADD COLUMN rate_limit_mbps INTEGER NOT NULL DEFAULT 0"},
+	} {
+		if _, ok := npCols[col.name]; !ok {
+			if _, err := tx.Exec(col.ddl); err != nil {
+				return err
+			}
+			npCols[col.name] = true
 		}
 	}
-	if _, ok := npCols["rate_limit_mbps"]; !ok {
-		if _, err := tx.Exec("ALTER TABLE node_policy ADD COLUMN rate_limit_mbps INTEGER NOT NULL DEFAULT 0"); err != nil {
+	if npCols["quota_enabled"] || npCols["quota_limit_bytes"] || npCols["quota_reset_baseline"] {
+		if _, err := tx.Exec(`CREATE TABLE node_policy_clean (
+			node_id TEXT PRIMARY KEY,
+			paused INTEGER NOT NULL DEFAULT 0,
+			ip_limit_enabled INTEGER NOT NULL DEFAULT 0,
+			ip_limit_max INTEGER NOT NULL DEFAULT 0,
+			rate_limit_enabled INTEGER NOT NULL DEFAULT 0,
+			rate_limit_mbps INTEGER NOT NULL DEFAULT 0
+		)`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO node_policy_clean
+			(node_id,paused,ip_limit_enabled,ip_limit_max,rate_limit_enabled,rate_limit_mbps)
+			SELECT node_id,paused,ip_limit_enabled,ip_limit_max,rate_limit_enabled,rate_limit_mbps
+			FROM node_policy`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec("DROP TABLE node_policy"); err != nil {
+			return err
+		}
+		if _, err := tx.Exec("ALTER TABLE node_policy_clean RENAME TO node_policy"); err != nil {
 			return err
 		}
 	}

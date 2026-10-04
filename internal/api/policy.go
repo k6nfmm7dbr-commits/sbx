@@ -10,13 +10,7 @@ import (
 	"github.com/k6nfmm7dbr-commits/sbx/internal/policy"
 )
 
-// 策略 API 路由（仅 Web 面板管理，不进 sbx CLI）。
-// 路径形态：
-//
-//	GET  /api/nodes/<id>/policy
-//	PUT  /api/nodes/<id>/policy
-//	POST /api/nodes/<id>/quota/reset
-//	GET  /api/nodes/<id>/active-ips
+// 策略 API 路由（仅 Web 面板管理）：GET/PUT policy、GET active-ips、GET ip-state。
 func (s *Server) handlePolicyAPI(w http.ResponseWriter, r *http.Request, idStr string, sub string) {
 	if s.policy == nil {
 		s.sendJSON(w, r, http.StatusServiceUnavailable, map[string]string{"error": "policy 未初始化"})
@@ -34,8 +28,6 @@ func (s *Server) handlePolicyAPI(w http.ResponseWriter, r *http.Request, idStr s
 		s.getPolicy(w, r, nodeID)
 	case sub == "policy" && r.Method == http.MethodPut:
 		s.putPolicy(w, r, nodeID)
-	case sub == "quota/reset" && r.Method == http.MethodPost:
-		s.resetQuota(w, r, nodeID)
 	case sub == "active-ips" && r.Method == http.MethodGet:
 		s.activeIPs(w, r, nodeID)
 	case sub == "ip-state" && r.Method == http.MethodGet:
@@ -82,8 +74,7 @@ func (s *Server) getPolicy(w http.ResponseWriter, r *http.Request, nodeID string
 
 // putPolicyRequest 是 PUT /api/nodes/:id/policy 的请求体。
 type putPolicyRequest struct {
-	QuotaEnabled     bool  `json:"quota_enabled"`
-	QuotaLimitBytes  int64 `json:"quota_limit_bytes"`
+	Paused           *bool `json:"paused"` // pointer: 旧客户端未传时保留当前暂停状态
 	IPLimitEnabled   bool  `json:"ip_limit_enabled"`
 	IPLimitMax       int   `json:"ip_limit_max"`
 	RateLimitEnabled bool  `json:"rate_limit_enabled"`
@@ -113,12 +104,7 @@ func (s *Server) putPolicy(w http.ResponseWriter, r *http.Request, nodeID string
 		s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
-	// 参数校验：enabled 时 limit 必须 > 0；max_ips 必须 >= 1。
-	if req.QuotaEnabled && req.QuotaLimitBytes <= 0 {
-		s.sendJSON(w, r, http.StatusBadRequest,
-			map[string]string{"error": "quota_limit_bytes 必须 > 0"})
-		return
-	}
+	// 参数校验：启用 IP limit 时 max 必须 >= 1；限速需在合理上限内。
 	if req.IPLimitEnabled && req.IPLimitMax < 1 {
 		s.sendJSON(w, r, http.StatusBadRequest,
 			map[string]string{"error": "ip_limit_max 必须 >= 1"})
@@ -135,9 +121,9 @@ func (s *Server) putPolicy(w http.ResponseWriter, r *http.Request, nodeID string
 		s.failInternalNode(w, r, codePolicyLoad, nodeID, err)
 		return
 	}
-	// 保留 reset 基线：Quota 的「已用」语义依赖它，PUT 不能顺带重置。
-	cur.QuotaEnabled = req.QuotaEnabled
-	cur.QuotaLimitBytes = req.QuotaLimitBytes
+	if req.Paused != nil {
+		cur.Paused = *req.Paused
+	}
 	cur.IPLimitEnabled = req.IPLimitEnabled
 	cur.IPLimitMax = req.IPLimitMax
 	cur.RateLimitEnabled = req.RateLimitEnabled
@@ -151,19 +137,6 @@ func (s *Server) putPolicy(w http.ResponseWriter, r *http.Request, nodeID string
 	if err := s.policy.Reconcile(r.Context()); err != nil {
 		s.failInternalMsg(w, r, codePolicyApply, nodeID,
 			"策略已保存但应用失败", err)
-		return
-	}
-	s.invalidateCache()
-	states, _ := s.policy.Snapshot()
-	s.sendJSON(w, r, http.StatusOK, states[nodeID])
-}
-
-func (s *Server) resetQuota(w http.ResponseWriter, r *http.Request, nodeID string) {
-	if !s.requireNode(w, r, nodeID) {
-		return
-	}
-	if _, err := s.policy.ResetQuota(r.Context(), nodeID); err != nil {
-		s.failInternalNode(w, r, codeQuotaReset, nodeID, err)
 		return
 	}
 	s.invalidateCache()
@@ -191,10 +164,7 @@ func (s *Server) ipState(w http.ResponseWriter, r *http.Request, nodeID string) 
 
 func policyStateDefault() policy.State {
 	return policy.State{
-		QuotaEnabled:  false,
-		QuotaLimit:    0,
-		QuotaUsed:     0,
-		QuotaState:    "unlimited",
+		Paused:        false,
 		IPLimitOn:     false,
 		IPLimitMax:    0,
 		ActiveIPs:     0,

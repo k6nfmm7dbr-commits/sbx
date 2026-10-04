@@ -4,10 +4,10 @@
 
 SBX 用一条命令在你的服务器上搭好 sing-box 代理节点,并附带一个实时 Web 面板,把每个节点的流量、在线 IP、连接数看得清清楚楚。后端是一个 **Go 静态单二进制**(`sbx-core`),前端经 `go:embed` 内嵌,**服务器上无需 Python、无需任何运行时**。
 
-netfilter 后端是 **nftables-only**:流量统计、流量配额、在线 IP 上限全部由 nftables(表 `sbx_traffic` / `sbx_policy`)在内核里完成。不支持 iptables,也没有后端自动选择或回退——nftables 不可用时 SBX 会**明确失败并中止**,绝不静默降级或"假装成功"。
+netfilter 后端是 **nftables-only**:流量统计、节点暂停、在线 IP 上限和节点限速全部由 nftables(表 `sbx_traffic` / `sbx_policy`)在内核里完成。不支持 iptables,也没有后端自动选择或回退——nftables 不可用时 SBX 会**明确失败并中止**,绝不静默降级或"假装成功"。
 
 <p>
-  <img alt="version" src="https://img.shields.io/badge/version-v3.0.20-blue">
+  <img alt="version" src="https://img.shields.io/badge/version-v3.0.21-blue">
   <img alt="go" src="https://img.shields.io/badge/Go-1.27.1%2B-00ADD8">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
   <img alt="backend" src="https://img.shields.io/badge/netfilter-nftables--only-orange">
@@ -30,7 +30,7 @@ netfilter 后端是 **nftables-only**:流量统计、流量配额、在线 IP �
 - [协议与节点](#协议与节点)
 - [Web 面板](#web-面板)
 - [流量统计原理](#流量统计原理)
-- [节点策略:配额与 IP 上限](#节点策略配额与-ip-上限)
+- [节点策略:暂停、IP 上限与限速](#节点策略暂停ip-上限与限速)
 - [命令参考](#命令参考)
 - [配置与文件布局](#配置与文件布局)
 - [安全性](#安全性)
@@ -46,7 +46,7 @@ netfilter 后端是 **nftables-only**:流量统计、流量配额、在线 IP �
 市面上的一键脚本大多把"能连上"当作终点,而流量统计要么靠客户端自报、要么靠周期性估算,既不准也容易被绕过。SBX 的设计取向不同:
 
 - **统计来自内核,不是估算。** 每个节点的收发字节由 nftables named counter 直接计数,单调差分累加,不丢计、不重复、不产生假峰值。
-- **限制由内核执行,不是提示。** 流量配额达限、在线 IP 超上限,都是内核 drop,不是前端弹个框就算数。
+- **限制由内核执行,不是提示。** 暂停节点会由 nft 双向阻断该节点端口;在线 IP 超上限只挡新 IP,节点限速由 nft policer 执行。
 - **失败就是失败。** nftables 缺失、规则应用失败、conntrack 不可用,SBX 都会如实报错并在面板呈现(`policy_error`),而不是"警告一下然后当作成功"。
 - **一个静态二进制,零运行时依赖。** 交叉编译到 7 种架构,`CGO_ENABLED=0`,连 SQLite 都是纯 Go 实现(`modernc.org/sqlite`)。
 
@@ -60,9 +60,10 @@ netfilter 后端是 **nftables-only**:流量统计、流量配额、在线 IP �
 |---|---|
 | **5 种协议** | VLESS Reality、Shadowsocks 2022、Trojan、AnyTLS、Snell v5/v6,菜单化创建,自动生成分享链接 |
 | **内核级流量统计** | nftables named counter,非估算;单调差分累加,规则重建自动衔接,不丢计不重复 |
-| **流量配额(Quota)** | 每节点独立额度(GiB/TiB),达限内核双向 drop 该节点端口,提额自动恢复 |
-| **在线 IP 上限(IP Limit)** | 按服务端可见的公网源 IP 统计,达限只挡新 IP、不踢已在线;基于 conntrack 判活 |
-| **实时 Web 面板** | 三页签(首页 / 每日 / 节点),令牌登录,SSE 实时推送在线 IP,`/api/live` 高频刷新速率 |
+| **节点暂停** | 单节点启用 / 暂停,只屏蔽该节点端口,不删配置、不重启 sing-box |
+| **在线 IP 上限(IP Limit)** | 按服务端可见的公网源 IP 统计,达限只挡新 IP;基于 conntrack 判活 |
+| **节点限速(Rate Limit)** | 每节点独立 Mbps,上传/下载方向分别限速 |
+| **实时 Web 面板** | 首页 / 每日 / 节点,令牌登录,SSE 实时推送在线 IP,`/api/live` 高频刷新速率 |
 | **在线升级** | 保留节点与流量历史,二进制原子替换,失败自动回滚,SHA256 校验 + 内容比对幂等 |
 | **零运行时依赖** | Go 静态单二进制,前端内嵌,服务器无 Python;7 架构交叉编译 |
 | **安全默认** | 令牌走 HttpOnly Cookie,登录失败节流,内部错误不外泄,能力收敛到最小 capability |
@@ -171,7 +172,7 @@ sudo apt-get update
 
 ## 管理菜单
 
-安装后直接运行 `sbx` 进入交互式菜单,常用操作都在这里(策略配额/IP 上限在 Web 面板里设,不进 CLI 菜单):
+安装后直接运行 `sbx` 进入交互式菜单,常用操作都在这里(节点暂停、IP 上限与限速在 Web 面板里设置,不进 CLI 菜单):
 
 ```
 添加节点        1) VLESS + Reality  2) Shadowsocks 2022  3) Trojan  4) AnyTLS  5) Snell
@@ -202,9 +203,9 @@ sudo apt-get update
 
 | 页签 | 内容 |
 |---|---|
-| **首页** | 节点卡片 + 顶部 KPI 汇总。卡片为整齐的 2×2 统计区：「累计 / 今日」流量（同格以 / 分隔）｜「流量配额」（未启用显示弱化的"不限"；启用显示"已用 / 上限"并用进度条呈现用量，≥90% 变黄、达限变红）｜「限速」｜「TCP / UDP」连接数；下方为在线 IP 条与状态徽标 |
+| **首页** | 节点卡片 + 顶部 KPI 汇总。卡片展示累计/今日流量、限速、TCP/UDP；在线 IP 行和状态徽标；暂停节点明确显示“已暂停” |
 | **每日** | 全节点流量趋势(近 180 天)与单节点详情 |
-| **节点** | 节点管理抽屉——流量配额、IP 上限、限速、重置已用流量、查看在线 IP |
+| **节点** | 节点管理抽屉——启用/暂停、IP 上限、限速、查看在线 IP |
 
 实时性由两条通道保证:
 
@@ -222,8 +223,7 @@ sudo apt-get update
 | `/api/daily?days=N&scope=` | GET | 每日流量表(默认 30,钳制 `[1,365]`) |
 | `/api/nodes` | GET | 脱敏节点列表 |
 | `/api/export` | GET | CSV 导出全量流量 |
-| `/api/nodes/<id>/policy` | PUT | 设置节点配额 / IP 上限 |
-| `/api/nodes/<id>/quota/reset` | POST | 重置节点已用流量 |
+| `/api/nodes/<id>/policy` | GET / PUT | 读取或设置暂停状态、IP 上限和限速 |
 | `/api/nodes/<id>/active-ips` | GET | 查看节点当前在线 IP |
 
 ---
@@ -243,34 +243,34 @@ sudo apt-get update
 
 ---
 
-## 节点策略:配额与 IP 上限
+## 节点策略:暂停、IP 上限与限速
 
-在 Web 面板 → 节点卡片 → 管理里,为每个节点**独立**设置。两种策略默认都是"不限",旧节点升级后行为不变。
-
-### 流量配额(Quota)
-
-- 基于内核 byte counter 累计(GiB/TiB),达限只阻断目标节点端口(nft 双向 drop),不影响其它节点。
-- 提高额度自动恢复;"重置已用流量"只清零额度使用量,**不删除**历史累计。
-- 达限节点在面板显示"已暂停接入",状态实时联动。
+在 Web 面板 → 节点卡片 → 管理里为每个节点分别设置。暂停不会删除 sing-box 配置，也不会重启 sing-box；通过独立 nft 策略表同时屏蔽该节点端口的入站与出站流量，暂停状态写入 SQLite，服务重启后仍保持暂停。点击启用即可恢复原节点。
 
 ### 同时在线 IP 上限(IP Limit)
 
 - 按服务端可见的**公网源 IP** 统计(NAT 下多设备算一个出口 IP),支持 TCP/UDP、IPv4/IPv6。
 - 达限只阻止**新 IP**,不随机踢已在线 IP;UDP slot 超时自动释放。
 - 只发 SYN 未完成握手的 IP 拿到的是**临时名额**,真实客户端优先级更高,不会被扫描流量挤掉。
-- **基于 conntrack 判活**:移动端异常断开(无 FIN)的连接,字节增量停止后按空闲窗口释放。内核未开 `nf_conntrack_acct`(Debian/Ubuntu 默认)时自动降级为"ESTABLISHED 即在线";安装器会尝试开启并持久化;conntrack 完全不可用时回退 `/proc` ESTABLISHED。
+- **基于 conntrack 判活**:移动端异常断开(无 FIN)的连接,字节增量停止后按空闲窗口释放。内核未开 `nf_conntrack_acct`(Debian/Ubuntu 默认)时自动降级为“ESTABLISHED 即在线”;安装器会尝试开启并持久化;conntrack 完全不可用时回退 `/proc` ESTABLISHED。
 - 服务器自身发起的出站连接不计入客户端(即使目的端口与节点监听端口相同)。
-- **内核执行**:nft allow set 只放行已获 slot 的 IP;新 IP 的 SYN 放行、established 数据拦截,避免"第二个 IP 永远连不上"的死锁。
+- **内核执行**:nft allow set 只放行已获 slot 的 IP;新 IP 的 SYN 放行、established 数据拦截,避免“第二个 IP 永远连不上”的死锁。
+
+### 节点限速(Rate Limit)
+
+- 每节点独立设置 Mbps,上传、下载方向分别使用 nft policer。
+- policer 通过丢弃超额包实现,不是 tc/qdisc 的排队整形;TCP 会通过拥塞控制回退。
+- 暂停节点时暂停规则优先拦截全部双向流量;解除暂停后原 IP 上限与限速配置继续生效。
 
 ### 边界与保证
 
 - 策略规则写入 `/etc/sbx/policy.nft`(独立表 `sbx_policy`),与计数规则 `/etc/sbx/nft.conf`(表 `sbx_traffic`)**完全分离,互不覆盖**。
 - 判活以 conntrack 为主数据源。内核只在存在引用 `ct` 的规则时才建 conntrack 条目,因此计数表里有一条 `sbx_ct` 链(`policy accept`,唯一动作是 `ct state new counter`)专门用于**激活跟踪**——它不做任何放行/拦截决策。
 - 规则生成是**确定性**的:同一份配置反复保存产生字节一致的 `policy.nft`(端口升序),不会因 map 遍历顺序而无意义重写。
-- enforcement 节流:达限翻转、受限节点集合变化、节点改端口会**立即**生效;仅在线 IP 集合(allow set)的增删在 3 秒窗口内合并应用,避免被扫描流量诱发高频整表重写。
-- enforcement 生命周期:面板单独停止时策略**冻结在最后一轮状态**(fail-closed,不放开);仅"重建/清除计数规则"(`sbx --clear-firewall` / `sbx-core clear`)或**卸载**时,`sbx_policy` 表才与计数表一并从内核清除。
-- `nodes.json` 损坏或不可读时,策略端点返回 **503** 并说明"配置文件不可用,策略维持上一轮状态",而不是误报 404;此期间 enforcement **不会 fail-open**。
-- `sbx-core reset [scope]` 清空统计时会**同事务**清零对应节点的配额基线,避免"统计归零后配额长期失效"。
+- 暂停/恢复、IP 受限节点集合变化、节点改端口会**立即**应用;仅在线 IP allow set 的增删在 3 秒窗口内合并,避免扫描流量诱发高频整表重写。
+- enforcement 生命周期:面板单独停止时策略**冻结在最后一轮状态**(fail-closed,不放开);仅“重建/清除计数规则”(`sbx --clear-firewall` / `sbx-core clear`)或**卸载**时,`sbx_policy` 表才与计数表一并从内核清除。
+- `nodes.json` 损坏或不可读时,策略端点返回 **503** 并说明“配置文件不可用,策略维持上一轮状态”,而不是误报 404;此期间 enforcement **不会 fail-open**。
+- `sbx-core reset [scope]` 只清统计数据,保留节点暂停、IP 上限与限速设置。
 
 ---
 
@@ -307,7 +307,7 @@ sbx-core node list|links|add|edit|remove|sync   # 节点管理
 /etc/sbx/panel.json            面板配置(端口 / token / 时区 等)
 /etc/sbx/nodes.json            节点数据(含凭据,0600)
 /etc/sbx/state.json            ID 游标 / 分享地址
-/etc/sbx/policy.nft            策略规则(配额阻断 / IP allow set,表 sbx_policy)
+/etc/sbx/policy.nft            策略规则(节点暂停 / IP allow set / 限速,表 sbx_policy)
 /etc/sbx/traffic.db            SQLite 流量库(WAL)
 /etc/sbx/nft.conf              计数规则(nftables,表 sbx_traffic)
 /etc/sing-box/config.json      sing-box 配置
@@ -417,7 +417,7 @@ CI 门禁(`main` 推送全绿才发布):`gofmt` / `go vet` / `go test` / `go tes
 ## 当前版本
 
 ```text
-v3.0.20
+v3.0.21
 ```
 
 源码在 `main` 分支,二进制从 `dist` 分支分发(rolling latest)。

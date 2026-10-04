@@ -25,8 +25,8 @@ func benchmarkRateScenario(b *testing.B) (*Service, []nodes.Node, map[string]int
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	s := &Service{
 		appDir: b.TempDir(), policyConf: filepath.Join(b.TempDir(), "policy.nft"),
-		now:          func() time.Time { return base },
-		appliedQuota: map[string]bool{}, appliedIPLimit: map[string]map[string]bool{},
+		now:           func() time.Time { return base },
+		appliedPaused: map[string]bool{}, appliedIPLimit: map[string]map[string]bool{},
 		appliedRate: map[string]int{"25": 100}, tableProbe: func() bool { return true },
 		lastProbeAt: base, lastProbeOK: true, nftApply: func(context.Context, string) error { return nil },
 	}

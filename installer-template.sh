@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 APP_NAME="SBX"
-APP_VERSION="3.0.20"
+APP_VERSION="3.0.21"
 RAW_URL="${SBX_RAW_URL:-https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh}"
 
 # SBX_ROOT 仅用于测试/沙箱安装（把整套目录挪到前缀下），正常安装留空
@@ -299,7 +299,7 @@ install_deps() {
       apk) nft_hint="apk add nftables" ;;
       *)   nft_hint="请用本发行版的包管理器安装 nftables" ;;
     esac
-    err "未找到 nft 命令：SBX 依赖 nftables（流量统计 / 配额 / IP 限制均由其实现）"
+    err "未找到 nft 命令：SBX 依赖 nftables（流量统计 / 节点暂停 / IP 限制 / 限速均由其实现）"
     err "SBX 只支持 nftables 这一种防火墙后端，不存在其它后端降级。请先安装后重试："
     err "  $nft_hint"
     err "  安装后确认可用：nft list tables"
@@ -876,7 +876,7 @@ fw_clear() {
   svc_do stop sbx-panel >/dev/null 2>&1 || true
   "$CORE_BIN" clear >/dev/null 2>&1 || true
   # 兜底：直删计数表 + 策略 enforcement 表（sbx_policy），
-  # 保证卸载后内核里不残留 quota/IP 限制的 drop 规则（残留到重启会误拦其它服务）。
+  # 保证卸载后内核里不残留暂停 / IP 限制 / 限速规则（残留到重启会误拦其它服务）。
   #
   # 安全边界（不可放宽）：逐表 `nft delete table` 只作用于 SBX 自己创建的两张表。
   # 绝不 `nft flush ruleset`、绝不动用户已有的其它表/链/默认 policy。

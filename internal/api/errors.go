@@ -26,7 +26,6 @@ const (
 	codePolicyLoad    = "policy_load_failed"
 	codePolicySave    = "policy_save_failed"
 	codePolicyApply   = "policy_apply_failed"
-	codeQuotaReset    = "quota_reset_failed"
 
 	// 503 类
 	codeNodesFileUnavailable = "nodes_file_unavailable"

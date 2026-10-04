@@ -203,6 +203,19 @@ button { -webkit-tap-highlight-color: transparent; }
 .node-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .node-title { min-width: 0; }
 .node-name { overflow: hidden; color: var(--text); font-size: 16px; font-weight: 700; letter-spacing: .005em; text-overflow: ellipsis; white-space: nowrap; }
+.node-paused-tag {
+  display: inline-flex;
+  vertical-align: 2px;
+  margin-left: 6px;
+  padding: 2px 6px;
+  border: 1px solid #d8dfe9;
+  border-radius: 6px;
+  color: #667286;
+  background: #eef1f5;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: .02em;
+}
 .node-meta-line { display: flex; align-items: center; gap: 8px; margin-top: 5px; }
 .chip { padding: 2px 7px; border: 1px solid var(--line-2); border-radius: 6px; color: var(--text-2); background: var(--surface-2); font-size: 10.5px; font-weight: 650; text-transform: lowercase; }
 .port { color: var(--text-3); font-size: 11.5px; }
@@ -218,6 +231,7 @@ button { -webkit-tap-highlight-color: transparent; }
   border-radius: 10px;
   background: var(--surface-2);
 }
+.node-stat:last-child:nth-child(odd) { grid-column: 1 / -1; }
 .node-stat > span { display: block; color: var(--text-3); font-size: 10.5px; }
 .node-stat b { display: block; overflow: hidden; margin-top: 3px; color: var(--text); font-size: 12.5px; font-weight: 630; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
 .node-stat b.muted { color: var(--text-3); font-weight: 560; }
@@ -248,6 +262,12 @@ button { -webkit-tap-highlight-color: transparent; }
 .status-pill { display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); font-size: 11.5px; font-weight: 600; }
 .status-pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .status-pill.ok { color: var(--up); }
+.status-pill.paused { color: var(--text-2); }
+.node-card.paused { background: #fafbfc; }
+.node-card.paused .node-name,
+.node-card.paused .node-rate b,
+.node-card.paused .node-stat b { color: var(--text-3); }
+.node-card.paused .chip { opacity: .72; }
 .status-pill.warn { color: var(--warn); }
 .status-pill.danger { color: var(--bad); }
 .node-actions { display: flex; gap: 7px; }

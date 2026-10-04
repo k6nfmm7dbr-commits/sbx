@@ -717,3 +717,25 @@ CSV 流式导出、nodes/config JSON 读取、策略 no-op enforcement 与 recon
 - shellcheck 0.10 本地对 baseline/远程脚本检查时返回已有 `SC2034` / `SC2319` 警告；
   安装器大文件检查在 iSH 超时。本轮没有修改 shell 逻辑（仅同步版本常量），不能把本地
   shellcheck 结果计作通过；GitHub CI 的 shellcheck 结果仍是发布门禁。
+
+
+## 22. v3.0.21：删除配额、增加持久节点暂停
+
+用户明确要求移除全部流量配额并新增节点暂停/启用。
+
+- 移除配额状态、额度/基线字段、每轮 lifetime totals 扫描、自愈修正、重置 API、前端控件、
+  卡片数字、配额 nft set/drop 及 quota 专项测试/基准。流量 `daily/totals/samples` 统计保留。
+- SQLite migration 在原迁移单事务内为旧 `node_policy` 补 `paused` 与保留策略列，然后在同一
+  transaction 中重建表并只复制 `node_id/paused/ip_limit_enabled/ip_limit_max/rate_limit_enabled/rate_limit_mbps`。
+  旧 quota 数据因用户选择“彻底移除”而丢弃；迁移失败整体回滚。增加旧 schema 保留策略字段、
+  去除 quota 列和新库 schema 回归测试。
+- pause 状态落盘 `node_policy.paused`；面板 PUT 未提供 `paused` 时保留旧状态，避免旧客户端覆盖。
+  pause 通过自有 `inet sbx_policy` 的 `paused_ports` set，在 priority 200 input dport / output sport
+  同时 drop TCP 与 UDP；规则早于 traffic priority 300，因而暂停期间不累计这些连接的流量。
+  不触碰 sing-box config、不重启服务，恢复立即去掉 drop，原 IP/限速配置保留。
+- 增加启动自愈：进程重启时若 SQLite 已无有效策略但旧 `sbx_policy` 表仍在（例如停面板期间删除节点），
+  首轮探测到表后写入空策略目标，清掉可能残留的旧端口 pause/IP/rate 规则。
+- `/api/nodes/:id/policy` GET/PUT 仍为策略接口；POST `/quota/reset` 和相关 error code 删除。
+  summary/live 暴露 paused；NodeIP/SSE 与流量统计契约保留。
+- E2E 策略流程从 quota block 改为 pause→nft 双向规则→流量不可达→resume 恢复，并以 paused
+  静态规则测试外部删表自愈；IP allow-set、限速、clear 自有表安全测试继续保留。

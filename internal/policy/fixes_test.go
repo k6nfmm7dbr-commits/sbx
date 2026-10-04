@@ -205,8 +205,8 @@ func TestAcctEnabledStillReleasesDeadFlow(t *testing.T) {
 
 // ---- nodes.json 损坏必须 fail-closed ------------------------------------
 
-// 旧实现用宽松 LoadPanelNodes：损坏时得到 nil，等价「零节点」→ 策略表被清空，
-// 所有配额/IP 阻断解除，而 sing-box 仍在服务（fail-open）。
+// 旧实现用宽松 LoadPanelNodes：损坏时得到 nil，等价「零节点」→ 暂停/IP 阻断解除，
+// 而 sing-box 仍在服务（fail-open）。
 func TestBrokenNodesFileKeepsEnforcement(t *testing.T) {
 	s := newTestService(t)
 	seedNode(t, s, 1, "vless", 443)
@@ -222,18 +222,17 @@ func TestBrokenNodesFileKeepsEnforcement(t *testing.T) {
 		return nil
 	})
 
-	seedTotals(t, s, "1", 10240, 0)
-	if err := s.UpsertConfig(ctx, Config{NodeID: "1", QuotaEnabled: true, QuotaLimitBytes: 1024}); err != nil {
+	if err := s.UpsertConfig(ctx, Config{NodeID: "1", Paused: true}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.reconcile(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if st, _ := s.Snapshot(); st["1"].QuotaState != "exceeded" {
-		t.Fatalf("应为 exceeded, got %q", st["1"].QuotaState)
+	if st, _ := s.Snapshot(); !st["1"].Paused {
+		t.Fatal("暂停节点状态未发布")
 	}
-	if len(scripts) == 0 || !strings.Contains(scripts[len(scripts)-1], "quota_ports") {
-		t.Fatalf("应生成 quota 阻断规则, got %v", scripts)
+	if len(scripts) == 0 || !strings.Contains(scripts[len(scripts)-1], "paused_ports") {
+		t.Fatalf("应生成暂停阻断规则, got %v", scripts)
 	}
 	before := len(scripts)
 
@@ -253,8 +252,8 @@ func TestBrokenNodesFileKeepsEnforcement(t *testing.T) {
 		t.Errorf("nodes.json 损坏后不得重写策略脚本, 新增了 %d 次", len(scripts)-before)
 	}
 	// 状态也不能被清空
-	if st, _ := s.Snapshot(); st["1"].QuotaState != "exceeded" {
-		t.Errorf("nodes.json 损坏后状态被清空: %+v", st)
+	if st, _ := s.Snapshot(); !st["1"].Paused {
+		t.Errorf("nodes.json 损坏后暂停状态被清空: %+v", st)
 	}
 }
 
@@ -262,7 +261,7 @@ func TestBrokenNodesFileKeepsEnforcement(t *testing.T) {
 
 // nftables-only（v3.0.9）：不存在「后端不支持 enforcement」这种稳态，
 // 唯一的 enforcement 故障来源是 nft 应用失败（权限/内核/瞬时错误）。
-// 此时 states 必须照常发布（否则面板全显示「不限」，用户看不到真实用量），
+// 此时 states 必须照常发布（否则面板无法显示真实暂停/IP/限速状态），
 // 错误经 lastErr → /api/summary 的 policy_error 如实呈现。
 func TestNFTApplyFailureStillPublishesState(t *testing.T) {
 	s := newTestService(t)
@@ -275,8 +274,7 @@ func TestNFTApplyFailureStillPublishesState(t *testing.T) {
 		return fmt.Errorf("nft 策略规则应用失败: Operation not permitted")
 	})
 
-	seedTotals(t, s, "1", 10<<20, 0)
-	if err := s.UpsertConfig(ctx, Config{NodeID: "1", QuotaEnabled: true, QuotaLimitBytes: 1 << 20}); err != nil {
+	if err := s.UpsertConfig(ctx, Config{NodeID: "1", Paused: true}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -287,8 +285,8 @@ func TestNFTApplyFailureStillPublishesState(t *testing.T) {
 	if !ready {
 		t.Fatal("状态必须照常发布(ready=true)，否则面板全显示「不限」")
 	}
-	if states["1"].QuotaState != "exceeded" {
-		t.Errorf("用量状态应如实呈现, got %q", states["1"].QuotaState)
+	if !states["1"].Paused {
+		t.Errorf("暂停状态应如实发布, got %+v", states["1"])
 	}
 	if !strings.Contains(s.LastError(), "nft") {
 		t.Errorf("lastErr 应明确指出 nft 应用失败, got %q", s.LastError())
@@ -298,6 +296,7 @@ func TestNFTApplyFailureStillPublishesState(t *testing.T) {
 // 无需阻断时不执行 nft、也不报错（不打扰未使用策略的用户）。
 func TestNothingToEnforceSkipsNFT(t *testing.T) {
 	s := newTestService(t)
+	s.SetTableProbe(func() bool { return false }) // 当前内核无遗留策略表
 	seedNode(t, s, 1, "vless", 443)
 	ctx := context.Background()
 	s.SetConntrack(func(string) connection.ConntrackResult { return connection.ConntrackResult{Available: false} })
@@ -315,45 +314,6 @@ func TestNothingToEnforceSkipsNFT(t *testing.T) {
 	}
 }
 
-// ---- 配额基线自愈 -------------------------------------------------------
-
-// `sbx-core reset node:1` 删掉 totals 后 lifetime 归零，若基线仍停在旧高水位，
-// used 长期被 clamp 到 0，配额要重新跑满旧水位才生效。
-func TestBaselineHigherThanLifetimeIsCorrected(t *testing.T) {
-	s := newTestService(t)
-	seedNode(t, s, 1, "vless", 443)
-	ctx := context.Background()
-	s.SetConntrack(func(string) connection.ConntrackResult { return connection.ConntrackResult{Available: false} })
-	s.SetRemoteIPs(procResult(nil, nil, false))
-	s.SetLocalAddrs(func() (map[string]bool, error) { return map[string]bool{}, nil })
-
-	// 基线 100GiB（用户点过归零），但 totals 被 reset 清空后只剩 5GiB
-	if err := s.UpsertConfig(ctx, Config{
-		NodeID: "1", QuotaEnabled: true, QuotaLimitBytes: 1 << 30,
-		QuotaResetBaseline: 100 << 30,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	seedTotals(t, s, "1", 5<<30, 0)
-
-	if err := s.reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	st, _ := s.Snapshot()
-	if st["1"].QuotaState != "exceeded" {
-		t.Errorf("基线高于 lifetime 应被校正后判超额: used=%d limit=%d state=%q",
-			st["1"].QuotaUsed, st["1"].QuotaLimit, st["1"].QuotaState)
-	}
-	// 基线应已落盘为校正值（归零：totals 里现有量全部计入已用）
-	cfg, err := s.GetConfig(ctx, "1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.QuotaResetBaseline != 0 {
-		t.Errorf("基线未被持久化归零, got %d", cfg.QuotaResetBaseline)
-	}
-}
-
 // ---- 孤儿策略配置清理 ---------------------------------------------------
 
 func TestOrphanPolicyConfigPurged(t *testing.T) {
@@ -365,7 +325,7 @@ func TestOrphanPolicyConfigPurged(t *testing.T) {
 	s.SetLocalAddrs(func() (map[string]bool, error) { return map[string]bool{}, nil })
 
 	// 节点 7 早已被 nodes CLI 删除，但策略行残留
-	if err := s.UpsertConfig(ctx, Config{NodeID: "7", QuotaEnabled: true, QuotaLimitBytes: 1024}); err != nil {
+	if err := s.UpsertConfig(ctx, Config{NodeID: "7", Paused: true}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.reconcile(ctx); err != nil {

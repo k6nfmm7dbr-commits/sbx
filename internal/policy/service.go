@@ -1,13 +1,10 @@
-// Package policy 实现节点级策略：独立流量配额（Quota）与同时在线公网 IP 上限
-// （IP Limit）。两者都只在 Web 面板管理（不进 sbx CLI 菜单）。
+// Package policy 实现节点级策略：节点暂停、同时在线公网 IP 上限与限速。
+// 所有策略由 Web 面板管理（不进 sbx CLI 菜单）。
 //
-// 数据流：
-//
-//	Quota:  内核 counter → Collector → SQLite totals（lifetime）→ 减 reset 基线 → used
-//	IPLimit: /proc/net 连接状态 → IP Tracker → active IP slot 集合 → nft set 执行 allow/drop
-//
-// 达限由 nftables 在内核执行，只针对目标节点；绝不停 sing-box、不删节点、不改凭据。
-//
+// 数据流：IPLimit = conntrack /proc 活动 → IP slot 集合 → nft allow/drop；
+// RateLimit = 每节点 Mbps → nft policer；Paused = 持久暂停状态 → nft ingress/egress drop。
+// 统计由独立 traffic collector 继续采集。暂停只拦该节点的端口，不停 sing-box，
+// 不删节点配置；恢复时使用原配置和策略。
 // IP Limit 的 slot 语义（关键）：
 //   - 每节点维护 Slots[nodeID] = ip -> admission 状态（已建立或 provisional）；
 //   - 面板在线 IP 数只统计非 provisional slot，不等于当前 socket 数；
@@ -22,7 +19,6 @@ import (
 	"database/sql"
 	"log/slog"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -32,10 +28,7 @@ import (
 
 // State 是单个节点的策略状态快照（面向 API / UI）。
 type State struct {
-	QuotaEnabled bool   `json:"quota_enabled"`
-	QuotaLimit   int64  `json:"quota_limit_bytes"`
-	QuotaUsed    int64  `json:"quota_used_bytes"`
-	QuotaState   string `json:"quota_state"` // unlimited / ok / exceeded
+	Paused       bool   `json:"paused"`
 	IPLimitOn    bool   `json:"ip_limit_enabled"`
 	IPLimitMax   int    `json:"ip_limit_max"`
 	ActiveIPs    int    `json:"active_ip_count"`
@@ -45,16 +38,14 @@ type State struct {
 	RateLimitMbps int  `json:"rate_limit_mbps"`
 }
 
-// Config 是持久化的策略配置（node_policy 表一行）。
+// Config 是持久化的节点运行/策略配置（node_policy 表一行）。
 type Config struct {
-	NodeID             string
-	QuotaEnabled       bool
-	QuotaLimitBytes    int64
-	QuotaResetBaseline int64
-	IPLimitEnabled     bool
-	IPLimitMax         int
-	RateLimitEnabled   bool
-	RateLimitMbps      int
+	NodeID           string
+	Paused           bool
+	IPLimitEnabled   bool
+	IPLimitMax       int
+	RateLimitEnabled bool
+	RateLimitMbps    int
 }
 
 // Service 是策略核心：读配置、算 used、追踪 IP slot、生成并应用 nft 规则。
@@ -107,7 +98,7 @@ type Service struct {
 	ipStates map[string]*NodeIPState
 
 	// 已应用的 enforcement 快照（避免每轮 reconcile 无谓重写 nft）。
-	appliedQuota   map[string]bool
+	appliedPaused  map[string]bool
 	appliedIPLimit map[string]map[string]bool // nodeID -> ip set
 	appliedRate    map[string]int             // nodeID -> mbps（限速）
 
@@ -135,8 +126,6 @@ type Service struct {
 	flows     map[flowKey]flowState
 	flowEpoch uint64 // buildActivity 每轮递增，代替每轮分配 currentFlowKeys map
 
-	// acctDisabled 记录「conntrack 存在流但全部 bytes=0」——即内核
-	// net.netfilter.nf_conntrack_acct=0（Debian/Ubuntu 默认）。
 	// 仅用于打一次提示日志；判活降级是**逐流**判断 f.Bytes==0（见 buildActivity），
 	// 因为运行中开启 sysctl 只对新流生效，混合状态下全局开关会误踢老流。
 	// runMu 保护。
@@ -163,7 +152,7 @@ type Service struct {
 	// 策略 nft 应用节流：仅 allow set 内容变化（slot 授予/释放）时，
 	// 距上次应用不足 enforceMinInterval 则合并到后续轮次，
 	// 避免扫描者用 SYN churn 诱发每秒一次整表 nft -f 重写。
-	// quota 状态翻转 / 受限节点集合变化 / 节点端口形态变化仍立即应用。
+	// 暂停状态翻转 / 受限节点集合变化 / 节点端口形态变化仍立即应用。
 	enforceMinInterval time.Duration
 	lastEnforceAt      time.Time // runMu 保护（reconcile 私有）
 	// appliedShape 是上次应用时「节点 id→端口」形态的规范化摘要，
@@ -175,6 +164,9 @@ type Service struct {
 	tableProbe  func() bool
 	lastProbeAt time.Time
 	lastProbeOK bool
+	// enforcementInitialized 记录本进程是否已和内核策略表同步过一次（runMu 保护）。
+	// 启动时若持久 nft 表存在而数据库已没有任何策略，需生成空表清除旧暂停端口。
+	enforcementInitialized bool
 
 	// nftApply 执行 nft 脚本（测试可替换为 no-op，规避 CI 无 nft 权限）。
 	nftApply func(ctx context.Context, scriptPath string) error
@@ -199,7 +191,7 @@ func New(db *sql.DB, appDir, policyConf string) *Service {
 		activeIPs:          map[string][]string{},
 		activeTCP:          map[string]int{},
 		ipStates:           map[string]*NodeIPState{},
-		appliedQuota:       map[string]bool{},
+		appliedPaused:      map[string]bool{},
 		appliedIPLimit:     map[string]map[string]bool{},
 		appliedRate:        map[string]int{},
 		now:                time.Now,
@@ -254,10 +246,10 @@ const rejectedTTL = 60 * time.Second
 const provisionalTTL = 10 * time.Second
 
 // enforceMinInterval 是「仅 allow set 内容变化」时两次 nft 整表应用的最小间隔。
-// quota 翻转 / 受限节点集合变化 / 端口形态变化不受此限（立即应用）。
+// 节点状态翻转 / 受限节点集合变化 / 端口形态变化不受此限（立即应用）。
 const enforceMinInterval = 3 * time.Second
 
-// SetEnforceMinInterval 覆盖应用节流间隔（测试用；0 = 不节流）。
+// SetEnforceMinInterval 覆盖仅 allowSet 内容变化时的节流间隔（测试用；0 = 不节流）。
 func (s *Service) SetEnforceMinInterval(d time.Duration) { s.enforceMinInterval = d }
 
 // SetIPIdle 覆盖判活/grace 窗口（测试用）。
@@ -521,8 +513,7 @@ func (s *Service) IPStateSnapshot() map[string]NodeIPSnapshot {
 // loadConfigs 读全部策略配置。
 func (s *Service) loadConfigs(ctx context.Context) (map[string]Config, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT node_id,quota_enabled,quota_limit_bytes,quota_reset_baseline,"+
-			"ip_limit_enabled,ip_limit_max,rate_limit_enabled,rate_limit_mbps FROM node_policy")
+		"SELECT node_id,paused,ip_limit_enabled,ip_limit_max,rate_limit_enabled,rate_limit_mbps FROM node_policy")
 	if err != nil {
 		return nil, err
 	}
@@ -530,12 +521,11 @@ func (s *Service) loadConfigs(ctx context.Context) (map[string]Config, error) {
 	out := map[string]Config{}
 	for rows.Next() {
 		var c Config
-		var qe, ile, rle int
-		if err := rows.Scan(&c.NodeID, &qe, &c.QuotaLimitBytes, &c.QuotaResetBaseline,
-			&ile, &c.IPLimitMax, &rle, &c.RateLimitMbps); err != nil {
+		var paused, ile, rle int
+		if err := rows.Scan(&c.NodeID, &paused, &ile, &c.IPLimitMax, &rle, &c.RateLimitMbps); err != nil {
 			return nil, err
 		}
-		c.QuotaEnabled = qe != 0
+		c.Paused = paused != 0
 		c.IPLimitEnabled = ile != 0
 		c.RateLimitEnabled = rle != 0
 		out[c.NodeID] = c
@@ -543,76 +533,30 @@ func (s *Service) loadConfigs(ctx context.Context) (map[string]Config, error) {
 	return out, rows.Err()
 }
 
-// lifetimeBytes 读某节点历史累计流量（rx+tx，来自 totals 权威统计）。
-func (s *Service) lifetimeBytes(ctx context.Context, nodeID string) (int64, error) {
-	var rx, tx sql.NullInt64
-	err := s.db.QueryRowContext(ctx,
-		"SELECT rx,tx FROM totals WHERE scope=?", "node:"+nodeID).Scan(&rx, &tx)
-	if err == sql.ErrNoRows {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	return rx.Int64 + tx.Int64, nil
-}
-
-// lifetimeBytesAll 一次性读出所有节点的 lifetime（rx+tx）。
-// 旧实现在 reconcile 里对每个节点各发一条 SELECT（N 次查询 / 秒，
-// MaxOpenConns=1 下与采集写入争用同一连接），这里合并为单条查询。
-func (s *Service) lifetimeBytesAll(ctx context.Context) (map[string]int64, error) {
-	rows, err := s.db.QueryContext(ctx,
-		"SELECT scope,rx,tx FROM totals WHERE scope LIKE 'node:%'")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := map[string]int64{}
-	for rows.Next() {
-		var scope string
-		var rx, tx sql.NullInt64
-		if err := rows.Scan(&scope, &rx, &tx); err != nil {
-			return nil, err
-		}
-		out[strings.TrimPrefix(scope, "node:")] = rx.Int64 + tx.Int64
-	}
-	return out, rows.Err()
-}
-
-// setResetBaseline 只更新单个节点的配额基线（不触碰其它字段）。
-// 用于「统计被 reset 后基线高于 lifetime」的自愈校正。
-func (s *Service) setResetBaseline(ctx context.Context, nodeID string, baseline int64) error {
-	_, err := s.db.ExecContext(ctx,
-		"UPDATE node_policy SET quota_reset_baseline=? WHERE node_id=?", baseline, nodeID)
-	return err
-}
-
-// GetConfig 读单个节点策略配置（不存在时返回默认「全不限」）。
+// GetConfig 读单个节点策略配置（不存在时返回未暂停、无限制）。
 func (s *Service) GetConfig(ctx context.Context, nodeID string) (Config, error) {
 	var c Config
-	var qe, ile, rle int
+	var paused, ile, rle int
 	err := s.db.QueryRowContext(ctx,
-		"SELECT node_id,quota_enabled,quota_limit_bytes,quota_reset_baseline,"+
-			"ip_limit_enabled,ip_limit_max,rate_limit_enabled,rate_limit_mbps FROM node_policy WHERE node_id=?",
-		nodeID).Scan(&c.NodeID, &qe, &c.QuotaLimitBytes, &c.QuotaResetBaseline,
-		&ile, &c.IPLimitMax, &rle, &c.RateLimitMbps)
+		"SELECT node_id,paused,ip_limit_enabled,ip_limit_max,rate_limit_enabled,rate_limit_mbps FROM node_policy WHERE node_id=?",
+		nodeID).Scan(&c.NodeID, &paused, &ile, &c.IPLimitMax, &rle, &c.RateLimitMbps)
 	if err == sql.ErrNoRows {
 		return Config{NodeID: nodeID}, nil
 	}
 	if err != nil {
 		return Config{}, err
 	}
-	c.QuotaEnabled = qe != 0
+	c.Paused = paused != 0
 	c.IPLimitEnabled = ile != 0
 	c.RateLimitEnabled = rle != 0
 	return c, nil
 }
 
-// UpsertConfig 写回（或更新）节点策略配置。
+// UpsertConfig 写回（或更新）节点暂停、IP limit 与 rate limit。
 func (s *Service) UpsertConfig(ctx context.Context, c Config) error {
-	qe, ile, rle := 0, 0, 0
-	if c.QuotaEnabled {
-		qe = 1
+	paused, ile, rle := 0, 0, 0
+	if c.Paused {
+		paused = 1
 	}
 	if c.IPLimitEnabled {
 		ile = 1
@@ -621,59 +565,12 @@ func (s *Service) UpsertConfig(ctx context.Context, c Config) error {
 		rle = 1
 	}
 	_, err := s.db.ExecContext(ctx,
-		"INSERT INTO node_policy(node_id,quota_enabled,quota_limit_bytes,"+
-			"quota_reset_baseline,ip_limit_enabled,ip_limit_max,rate_limit_enabled,rate_limit_mbps) "+
-			"VALUES(?,?,?,?,?,?,?,?) "+
-			"ON CONFLICT(node_id) DO UPDATE SET quota_enabled=excluded.quota_enabled,"+
-			"quota_limit_bytes=excluded.quota_limit_bytes,"+
-			"quota_reset_baseline=excluded.quota_reset_baseline,"+
-			"ip_limit_enabled=excluded.ip_limit_enabled,"+
-			"ip_limit_max=excluded.ip_limit_max,"+
-			"rate_limit_enabled=excluded.rate_limit_enabled,"+
-			"rate_limit_mbps=excluded.rate_limit_mbps",
-		c.NodeID, qe, c.QuotaLimitBytes, c.QuotaResetBaseline, ile, c.IPLimitMax, rle, c.RateLimitMbps)
-	return err
-}
-
-// ResetQuota 把该节点 quota 基线重置到当前 lifetime，使 used 归零，
-// 但不删除历史累计流量。返回新的 reset 基线值。
-func (s *Service) ResetQuota(ctx context.Context, nodeID string) (int64, error) {
-	life, err := s.lifetimeBytes(ctx, nodeID)
-	if err != nil {
-		return 0, err
-	}
-	c, err := s.GetConfig(ctx, nodeID)
-	if err != nil {
-		return 0, err
-	}
-	c.QuotaResetBaseline = life
-	if err := s.UpsertConfig(ctx, c); err != nil {
-		return 0, err
-	}
-	// 立即重算，避免 API 返回旧 used 值。
-	if err := s.reconcile(ctx); err != nil {
-		return 0, err
-	}
-	return life, nil
-}
-
-// ClearBaselineTx 在给定事务内把节点配额基线清零。供 `sbx-core reset <scope>`
-// 在清空 daily/totals/samples 的**同一事务**中调用。
-//
-// 为什么必需：used = lifetime(totals) - quota_reset_baseline 并 clamp 到 0。
-// reset 删掉 totals 行后 lifetime 归零，若基线仍停在旧高水位（例如用户点过
-// 「归零本期用量」后 baseline=100GiB），配额要重新跑满 100GiB 才恢复生效——
-// 期间限额完全失效。
-func ClearBaselineTx(tx *sql.Tx, scope string) error {
-	if scope == "" {
-		_, err := tx.Exec("UPDATE node_policy SET quota_reset_baseline=0")
-		return err
-	}
-	if !strings.HasPrefix(scope, "node:") {
-		return nil // system 等非节点 scope 与策略基线无关
-	}
-	_, err := tx.Exec("UPDATE node_policy SET quota_reset_baseline=0 WHERE node_id=?",
-		strings.TrimPrefix(scope, "node:"))
+		"INSERT INTO node_policy(node_id,paused,ip_limit_enabled,ip_limit_max,rate_limit_enabled,rate_limit_mbps) "+
+			"VALUES(?,?,?,?,?,?) "+
+			"ON CONFLICT(node_id) DO UPDATE SET paused=excluded.paused,"+
+			"ip_limit_enabled=excluded.ip_limit_enabled,ip_limit_max=excluded.ip_limit_max,"+
+			"rate_limit_enabled=excluded.rate_limit_enabled,rate_limit_mbps=excluded.rate_limit_mbps",
+		c.NodeID, paused, ile, c.IPLimitMax, rle, c.RateLimitMbps)
 	return err
 }
 
@@ -692,7 +589,7 @@ func (s *Service) DeleteNode(ctx context.Context, nodeID string) error {
 			delete(s.flows, k)
 		}
 	}
-	delete(s.appliedQuota, nodeID)
+	delete(s.appliedPaused, nodeID)
 	delete(s.appliedIPLimit, nodeID)
 	delete(s.appliedRate, nodeID)
 	s.mu.Lock()

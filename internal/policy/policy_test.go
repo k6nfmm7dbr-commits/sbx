@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/k6nfmm7dbr-commits/sbx/internal/database"
@@ -23,8 +24,8 @@ func newTestService(t *testing.T) *Service {
 	s := New(db.DB, dir, filepath.Join(dir, "policy.nft"))
 	// 单元测试不依赖真实 nft（CI runner 无 netlink 权限）；仅验证脚本生成与状态机。
 	s.nftApply = func(ctx context.Context, scriptPath string) error { return nil }
-	// 存在性探测默认恒真：单测环境无 nft；自愈行为由专门测试注入假探针覆盖。
-	s.tableProbe = func() bool { return true }
+	// 默认视为没有遗留策略表；自愈与重启清理测试显式注入存在性探针。
+	s.tableProbe = func() bool { return false }
 	// 默认关闭应用节流：既有测试用真实时钟，多次 reconcile 间隔极短，
 	// 节流会让「第二次应用」被合并而失败；节流行为由专门测试用假时钟覆盖。
 	s.enforceMinInterval = 0
@@ -42,104 +43,49 @@ func seedNode(t *testing.T, s *Service, id int64, typ string, port int64) {
 	}
 }
 
-// seedTotals 写入节点累计流量。
-func seedTotals(t *testing.T, s *Service, nodeID string, rx, tx int64) {
-	t.Helper()
-	_, err := s.db.Exec(
-		"INSERT INTO totals(scope,rx,tx,rx_pkts,tx_pkts) VALUES(?,?,?,0,0) "+
-			"ON CONFLICT(scope) DO UPDATE SET rx=excluded.rx, tx=excluded.tx",
-		"node:"+nodeID, rx, tx)
+func TestPausedStateAndPersistence(t *testing.T) {
+	s := newTestService(t)
+	seedNode(t, s, 1, "vless", 443)
+	ctx := context.Background()
+	if err := s.UpsertConfig(ctx, Config{NodeID: "1", Paused: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := s.Snapshot()
+	if !st["1"].Paused {
+		t.Fatalf("paused state not published: %+v", st["1"])
+	}
+	cfg, err := s.GetConfig(ctx, "1")
+	if err != nil || !cfg.Paused {
+		t.Fatalf("paused state not persisted: cfg=%+v err=%v", cfg, err)
+	}
+	var script string
+	if b, err := os.ReadFile(s.PolicyConfPath()); err == nil {
+		script = string(b)
+	}
+	if !strings.Contains(script, "paused_ports") || !strings.Contains(script, "tcp dport @paused_ports drop") || !strings.Contains(script, "tcp sport @paused_ports drop") {
+		t.Fatalf("paused node must be blocked in both directions: %s", script)
+	}
+
+	cfg.Paused = false
+	if err := s.UpsertConfig(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st, _ = s.Snapshot()
+	if st["1"].Paused {
+		t.Fatalf("resume state not published: %+v", st["1"])
+	}
+	b, err := os.ReadFile(s.PolicyConfPath())
 	if err != nil {
 		t.Fatal(err)
 	}
-}
-
-func TestQuotaStates(t *testing.T) {
-	s := newTestService(t)
-	seedNode(t, s, 1, "vless", 443)
-	seedTotals(t, s, "1", 600, 400) // lifetime = 1000
-
-	ctx := context.Background()
-
-	// 未启用 → unlimited
-	if err := s.UpsertConfig(ctx, Config{NodeID: "1", QuotaEnabled: false}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	st, _ := s.Snapshot()
-	if st["1"].QuotaState != "unlimited" {
-		t.Fatalf("未启用应为 unlimited, got %s", st["1"].QuotaState)
-	}
-
-	// 未达限：limit=2000, used=1000 → ok
-	if err := s.UpsertConfig(ctx, Config{NodeID: "1", QuotaEnabled: true, QuotaLimitBytes: 2000}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	st, _ = s.Snapshot()
-	if st["1"].QuotaState != "ok" || st["1"].QuotaUsed != 1000 {
-		t.Fatalf("未达限应为 ok, used=1000, got state=%s used=%d", st["1"].QuotaState, st["1"].QuotaUsed)
-	}
-
-	// 刚好达限：limit=1000 → exceeded
-	if err := s.UpsertConfig(ctx, Config{NodeID: "1", QuotaEnabled: true, QuotaLimitBytes: 1000}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	st, _ = s.Snapshot()
-	if st["1"].QuotaState != "exceeded" {
-		t.Fatalf("刚好达限应为 exceeded, got %s", st["1"].QuotaState)
-	}
-
-	// 提高额度恢复：limit=5000 → ok
-	if err := s.UpsertConfig(ctx, Config{NodeID: "1", QuotaEnabled: true, QuotaLimitBytes: 5000}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	st, _ = s.Snapshot()
-	if st["1"].QuotaState != "ok" {
-		t.Fatalf("提高额度应恢复 ok, got %s", st["1"].QuotaState)
-	}
-}
-
-func TestQuotaResetKeepsHistory(t *testing.T) {
-	s := newTestService(t)
-	seedNode(t, s, 1, "vless", 443)
-	seedTotals(t, s, "1", 600, 400) // lifetime=1000
-	ctx := context.Background()
-
-	if err := s.UpsertConfig(ctx, Config{NodeID: "1", QuotaEnabled: true, QuotaLimitBytes: 800}); err != nil {
-		t.Fatal(err)
-	}
-	_ = s.reconcile(ctx)
-	st, _ := s.Snapshot()
-	if st["1"].QuotaState != "exceeded" {
-		t.Fatalf("应 exceeded, got %s", st["1"].QuotaState)
-	}
-
-	// reset：used 归零，但 totals 不变
-	if _, err := s.ResetQuota(ctx, "1"); err != nil {
-		t.Fatal(err)
-	}
-	st, _ = s.Snapshot()
-	if st["1"].QuotaUsed != 0 || st["1"].QuotaState != "ok" {
-		t.Fatalf("reset 后 used=0 ok, got used=%d state=%s", st["1"].QuotaUsed, st["1"].QuotaState)
-	}
-	// 历史累计仍在
-	var rx, tx int64
-	if err := s.db.QueryRow("SELECT rx,tx FROM totals WHERE scope='node:1'").Scan(&rx, &tx); err != nil {
-		t.Fatal(err)
-	}
-	if rx != 600 || tx != 400 {
-		t.Fatalf("reset 不应删历史, got rx=%d tx=%d", rx, tx)
+	if strings.Contains(string(b), "paused_ports") {
+		t.Fatalf("resumed node still has pause rules: %s", b)
 	}
 }
 
@@ -152,27 +98,8 @@ func TestMigrationDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.QuotaEnabled || c.IPLimitEnabled {
-		t.Fatalf("旧节点升级后应默认全不限, got quota=%v ip=%v", c.QuotaEnabled, c.IPLimitEnabled)
-	}
-}
-
-// TestQuotaExceededReconcile 锁定 quota limit < used 时 reconcile 正常（不 crash，状态 exceeded）。
-func TestQuotaExceededReconcile(t *testing.T) {
-	s := newTestService(t)
-	seedNode(t, s, 1, "vless", 443)
-	seedTotals(t, s, "1", 600, 400) // lifetime = 1000
-	ctx := context.Background()
-	// limit=100 < used=1000 → exceeded
-	if err := s.UpsertConfig(ctx, Config{NodeID: "1", QuotaEnabled: true, QuotaLimitBytes: 100}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.reconcile(ctx); err != nil {
-		t.Fatalf("quota 达限 reconcile 不应失败: %v", err)
-	}
-	st, _ := s.Snapshot()
-	if st["1"].QuotaState != "exceeded" {
-		t.Fatalf("limit<used 应 exceeded, got %s", st["1"].QuotaState)
+	if c.Paused || c.IPLimitEnabled || c.RateLimitEnabled {
+		t.Fatalf("新策略默认必须是未暂停且不限流: %+v", c)
 	}
 }
 
@@ -182,16 +109,17 @@ func TestGenPolicyNFT(t *testing.T) {
 	if script == "" {
 		t.Fatal("脚本不应为空")
 	}
-	// quota 达限应生成端口集合
-	if !containsStr(script, "quota_ports") || !containsStr(script, "443") {
-		t.Errorf("quota 脚本缺端口: %s", script)
+	if !containsStr(script, "paused_ports") || !containsStr(script, "tcp dport @paused_ports drop") || !containsStr(script, "tcp sport @paused_ports drop") {
+		t.Errorf("暂停脚本必须双向阻断节点端口: %s", script)
+	}
+	if containsStr(script, "quota_ports") {
+		t.Errorf("脚本不应再包含配额规则: %s", script)
 	}
 	// IP limit allow set
 	script2 := genPolicyNFT(nil, map[string]map[string]bool{"1": {"1.1.1.1": true}}, nil, list)
 	if !containsStr(script2, "ip_allow_1_v4") || !containsStr(script2, "1.1.1.1") {
 		t.Errorf("IP limit 脚本缺 allow set: %s", script2)
 	}
-	// 关键：IP limit 必须只 drop「已建立」连接并放行 SYN，否则第二个 IP 拿不到 slot。
 	if !containsStr(script2, "ct state established") {
 		t.Errorf("IP limit 脚本缺 ct state established: %s", script2)
 	}
@@ -269,4 +197,32 @@ func indexStr(h, n string) int {
 		}
 	}
 	return -1
+}
+
+func TestStartupClearsStalePolicyTableWhenNoPolicyRemains(t *testing.T) {
+	s := newTestService(t)
+	seedNode(t, s, 1, "vless", 443)
+	s.SetTableProbe(func() bool { return true }) // 持久 nft 表残留于前一进程
+	var applied string
+	s.SetNFTApply(func(_ context.Context, path string) error {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		applied = string(b)
+		return nil
+	})
+	list, err := nodes.LoadPanelNodesStrict(s.nodesPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.applyEnforcement(context.Background(), map[string]bool{}, map[string]map[string]bool{}, map[string]int{}, list); err != nil {
+		t.Fatal(err)
+	}
+	if applied == "" || !strings.Contains(applied, "delete table inet sbx_policy") {
+		t.Fatalf("startup should replace stale strategy table with empty target: %s", applied)
+	}
+	if strings.Contains(applied, "paused_ports") || strings.Contains(applied, "ip_allow_") || strings.Contains(applied, "limit rate over") {
+		t.Fatalf("empty current policy must not preserve stale node rules: %s", applied)
+	}
 }

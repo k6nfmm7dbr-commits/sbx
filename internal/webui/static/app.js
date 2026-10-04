@@ -98,16 +98,11 @@ function renderSummary(s) {
 
 /* ---------- 节点卡片 ---------- */
 function portText(n) { return n.port != null ? n.port : '—'; }
-/* 流量配额：未启用 → 弱化「不限」；启用 → 显示已用/上限 */
-function quotaCell(n) {
-  if (!n.quota_enabled) return '<b class="muted">不限</b>';
-  return '<b>' + fmtBytes(n.quota_used_bytes) + ' / ' + fmtBytes(n.quota_limit_bytes) + '</b>';
-}
 function rateText(n) {
   return n.rate_limit_enabled && n.rate_limit_mbps > 0 ? (n.rate_limit_mbps + ' Mbps') : '不限';
 }
 function nodeStatus(n) {
-  if (n.quota_state === 'exceeded') return '<span class="status-pill danger">流量已用尽</span>';
+  if (n.paused) return '<span class="status-pill paused">已暂停</span>';
   if (n.ip_limit_state === 'exceeded') return '<span class="status-pill warn">IP 已达上限</span>';
   return '<span class="status-pill ok">正常</span>';
 }
@@ -118,10 +113,10 @@ function renderNodeCards(s) {
     var total = (n.total && (n.total.rx + n.total.tx)) || 0;
     var today = (n.today && (n.today.rx + n.today.tx)) || 0;
     var ipVal = (n.active_ip_count || 0) + (n.ip_limit_enabled ? ' / ' + n.ip_limit_max : '');
-    return '<div class="node-card">' +
+    return '<div class="node-card' + (n.paused ? ' paused' : '') + '">' +
       '<div class="node-top">' +
         '<div class="node-title">' +
-          '<div class="node-name">' + esc(n.name) + '</div>' +
+          '<div class="node-name">' + esc(n.name) + (n.paused ? ' <span class="node-paused-tag">暂停</span>' : '') + '</div>' +
           '<div class="node-meta-line"><span class="chip">' + esc(n.type || '—') + '</span>' +
             '<span class="port">端口 ' + esc(portText(n)) + '</span></div>' +
         '</div>' +
@@ -133,7 +128,6 @@ function renderNodeCards(s) {
       '<div class="node-stats">' +
         '<div class="node-stat"><span>累计 / 今日</span><b>' + fmtBytes(total) +
           '<span class="sep">/</span>' + fmtBytes(today) + '</b></div>' +
-        '<div class="node-stat"><span>流量配额</span>' + quotaCell(n) + '</div>' +
         '<div class="node-stat"><span>限速</span><b>' + esc(rateText(n)) + '</b></div>' +
         '<div class="node-stat"><span>TCP / UDP</span><b>' +
           '<i data-node-live="' + esc(n.id) + '" data-kind="conns">—</i><span class="sep">/</span>' +
@@ -181,14 +175,19 @@ function renderLive(v) {
 
   var byId = {};
   (v.nodes || []).forEach(function (n) { byId[n.id] = n; });
+  var pausedById = {};
+  if (state.summary && state.summary.nodes) {
+    state.summary.nodes.forEach(function (n) { if (n.paused) pausedById[String(n.id)] = true; });
+  }
   document.querySelectorAll('[data-node-live]').forEach(function (el) {
     var id = el.getAttribute('data-node-live'), n = byId[id];
     if (!n) return;
     var kind = el.getAttribute('data-kind');
+    var paused = !!n.paused || !!pausedById[String(id)];
     if (kind === 'conns') el.textContent = (typeof n.conns_tcp === 'number') ? n.conns_tcp : '—';
     else if (kind === 'conns_udp') el.textContent = (typeof n.conns_udp === 'number') ? n.conns_udp : '—';
-    else if (kind === 'rate-up') el.textContent = live ? '↑ ' + fmtRate(n.rate.rx) : '—';
-    else if (kind === 'rate-down') el.textContent = live ? '↓ ' + fmtRate(n.rate.tx) : '—';
+    else if (kind === 'rate-up') el.textContent = live && !paused ? '↑ ' + fmtRate(n.rate.rx) : '—';
+    else if (kind === 'rate-down') el.textContent = live && !paused ? '↓ ' + fmtRate(n.rate.tx) : '—';
   });
   // 在线 IP 数（高频刷新：TCP 断开后立即回落）
   document.querySelectorAll('[data-node-ips]').forEach(function (el) {
@@ -269,7 +268,7 @@ document.addEventListener('visibilitychange', function () {
   if (!document.hidden) { loadLive(); loadSummary(); }
 });
 
-/* ==================== 节点策略管理（Quota / IP Limit） ==================== */
+/* ==================== 节点策略管理（暂停 / IP Limit / Rate Limit） ==================== */
 var policyState = { nodeId: null, summaryNode: null };
 
 /* ---------- SSE 实时在线 IP ---------- */
@@ -346,21 +345,10 @@ function showPolicy(nodeId) {
   policyState.nodeId = String(nodeId);
   policyState.summaryNode = n;
   document.getElementById('drawer-node-name').textContent = n.name;
-  document.getElementById('pol-quota-used').textContent = fmtBytes(n.quota_used_bytes || 0);
+  document.getElementById('pol-node-enabled').checked = !n.paused;
   document.getElementById('pol-ip-active').textContent = (n.active_ip_count || 0);
-  document.getElementById('pol-quota-enable').checked = !!n.quota_enabled;
   document.getElementById('pol-ip-enable').checked = !!n.ip_limit_enabled;
-  document.getElementById('pol-quota-box').classList.toggle('hidden', !n.quota_enabled);
   document.getElementById('pol-ip-box').classList.toggle('hidden', !n.ip_limit_enabled);
-  if (n.quota_enabled && n.quota_limit_bytes > 0) {
-    var g = n.quota_limit_bytes / (1024 * 1024 * 1024);
-    var unit = 'GiB';
-    if (g >= 1024 && g % 1024 === 0) { g = g / 1024; unit = 'TiB'; }
-    document.getElementById('pol-quota-val').value = g;
-    document.getElementById('pol-quota-unit').value = unit;
-  } else {
-    document.getElementById('pol-quota-val').value = '';
-  }
   document.getElementById('pol-ip-max').value = n.ip_limit_max > 0 ? n.ip_limit_max : '';
   document.getElementById('pol-rate-enable').checked = !!n.rate_limit_enabled;
   document.getElementById('pol-rate-box').classList.toggle('hidden', !n.rate_limit_enabled);
@@ -383,31 +371,19 @@ function showPolError(msg) {
   el.textContent = msg; el.classList.remove('hidden');
 }
 
-function unitToBytes(val, unit) {
-  var n = Number(val);
-  if (!(n > 0)) return 0;
-  var mult = unit === 'TiB' ? 1024 * 1024 * 1024 * 1024 : 1024 * 1024 * 1024;
-  return Math.round(n * mult);
-}
-
 function savePolicy() {
-  var quotaOn = document.getElementById('pol-quota-enable').checked;
   var ipOn = document.getElementById('pol-ip-enable').checked;
   var rateOn = document.getElementById('pol-rate-enable').checked;
-  var quotaVal = document.getElementById('pol-quota-val').value;
-  var quotaUnit = document.getElementById('pol-quota-unit').value;
   var ipMax = document.getElementById('pol-ip-max').value;
   var rateMbps = document.getElementById('pol-rate-mbps').value;
 
   var body = {
-    quota_enabled: quotaOn,
-    quota_limit_bytes: quotaOn ? unitToBytes(quotaVal, quotaUnit) : 0,
+    paused: !document.getElementById('pol-node-enabled').checked,
     ip_limit_enabled: ipOn,
     ip_limit_max: ipOn ? Number(ipMax) : 0,
     rate_limit_enabled: rateOn,
     rate_limit_mbps: rateOn ? Number(rateMbps) : 0
   };
-  if (quotaOn && body.quota_limit_bytes <= 0) { showPolError('流量额度必须大于 0'); return; }
   if (ipOn && !(body.ip_limit_max >= 1)) { showPolError('最大 IP 数必须 ≥ 1'); return; }
   if (rateOn && !(body.rate_limit_mbps >= 1)) { showPolError('限速值必须 ≥ 1 Mbps'); return; }
 
@@ -428,26 +404,6 @@ function savePolicy() {
     btn.disabled = false; btn.textContent = '保存修改';
     if (e.message !== '未登录') showPolError(e.message);
   });
-}
-
-function resetQuota() {
-  if (!window.confirm('确认重置该节点当前额度使用量？\n历史累计流量不会删除。')) return;
-  var btn = document.getElementById('pol-quota-reset');
-  btn.disabled = true;
-  fetch('/api/nodes/' + policyState.nodeId + '/quota/reset', { method: 'POST' })
-    .then(function (r) {
-      if (r.status === 401) { location.replace('/login'); throw new Error('未登录'); }
-      return r.json().then(function (d) { if (!r.ok) throw new Error(d.error || ('请求失败 ' + r.status)); return d; });
-    })
-    .then(function (d) {
-      btn.disabled = false;
-      document.getElementById('pol-quota-used').textContent = fmtBytes(d.quota_used_bytes || 0);
-      toast('已重置'); loadSummary();
-    })
-    .catch(function (e) {
-      btn.disabled = false;
-      if (e.message !== '未登录') showPolError(e.message);
-    });
 }
 
 function showActiveIPs(nodeId) {
@@ -484,11 +440,7 @@ document.getElementById('drawer-close').addEventListener('click', function () { 
 document.getElementById('drawer-mask').addEventListener('click', function () { closeDrawer('policy-drawer'); closeDrawer('ips-drawer'); });
 document.getElementById('pol-cancel').addEventListener('click', function () { closeDrawer('policy-drawer'); });
 document.getElementById('pol-save').addEventListener('click', savePolicy);
-document.getElementById('pol-quota-reset').addEventListener('click', resetQuota);
 document.getElementById('ips-close').addEventListener('click', function () { closeDrawer('ips-drawer'); });
-document.getElementById('pol-quota-enable').addEventListener('change', function (e) {
-  document.getElementById('pol-quota-box').classList.toggle('hidden', !e.target.checked);
-});
 document.getElementById('pol-ip-enable').addEventListener('change', function (e) {
   document.getElementById('pol-ip-box').classList.toggle('hidden', !e.target.checked);
 });

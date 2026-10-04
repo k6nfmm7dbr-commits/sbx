@@ -19,12 +19,13 @@ import (
 const PolicyTable = "sbx_policy"
 
 // policyPriority 是策略 drop 链的优先级：必须早于计数链（300），
-// 这样被 quota/ip-limit 拒绝的包不会进入计数（不制造「有效代理流量」额度）。
+// 这样被 pause/IP limit 拒绝的包不会进入计数。
 const policyPriority = 200
 
 // genPolicyNFT 生成策略 enforcement 的 nft 脚本。
-// quotaPorts: 达 quota 限节点的端口集合；ipLimits: nodeID -> 允许的 IP 集合（allow set）；
+// pausedPorts: 已暂停节点端口；ipLimits: nodeID -> 允许的 IP 集合；
 // rateLimitPorts: 端口 -> 限速值（Mbps，每方向独立），仅含 mbps>0 的端口。
+// 暂停对 input dport 和 output sport 都 drop，优先级早于流量计数链，覆盖已建立连接。
 // IP limit 用 allow set：达限后只放行已获 slot 的 IP，其余 drop（不随机踢旧 IP）。
 //
 // 限速用 nftables `limit rate over ... drop`（policer，丢弃超额包）实现，不引入
@@ -33,7 +34,7 @@ const policyPriority = 200
 // （shaping，排队延迟）**；对 TCP 仍能有效限流（丢包触发拥塞控制回退），
 // 但不如 tc HTB 平滑、会有少量重传开销。Mbps 按 10^6 bit/s 计：
 // 每秒字节数 = mbps × 125000。
-func genPolicyNFT(quotaPorts map[int64]bool, ipLimits map[string]map[string]bool, rateLimitPorts map[int64]int, list []nodes.Node) string {
+func genPolicyNFT(pausedPorts map[int64]bool, ipLimits map[string]map[string]bool, rateLimitPorts map[int64]int, list []nodes.Node) string {
 	var b strings.Builder
 	b.WriteString("#!/usr/sbin/nft -f\n")
 	b.WriteString("# 由 sbx 策略层自动生成，请勿手工编辑\n")
@@ -74,20 +75,18 @@ func genPolicyNFT(quotaPorts map[int64]bool, ipLimits map[string]map[string]bool
 	}
 	sortInt64(orderedRatePorts)
 
-	hasAny := len(quotaPorts) > 0 || len(ipLimits) > 0 || len(orderedRatePorts) > 0
+	hasAny := len(pausedPorts) > 0 || len(ipLimits) > 0 || len(orderedRatePorts) > 0
 	if hasAny {
-		// quota 达限端口集合
-		if len(quotaPorts) > 0 {
-			ports := make([]int64, 0, len(quotaPorts))
-			for p := range quotaPorts {
+		if len(pausedPorts) > 0 {
+			ports := make([]int64, 0, len(pausedPorts))
+			for p := range pausedPorts {
 				ports = append(ports, p)
 			}
 			sortInt64(ports)
-			fmt.Fprintf(&b, "    set quota_ports {\n        type inet_service\n        flags interval\n        elements = { %s }\n    }\n",
+			fmt.Fprintf(&b, "    set paused_ports {\n        type inet_service\n        flags interval\n        elements = { %s }\n    }\n",
 				joinPorts(ports))
 		}
-		// IP limit 达限节点：每个节点固定创建 v4/v6 两个 allow set（允许空集），
-		// 规则统一引用它们，避免「set 不存在」导致 nft 脚本失败。
+		// IP limit 节点固定创建 v4/v6 两个 allow set（空集也合法），保证规则引用始终有效。
 		for _, id := range orderedIPLimitIDs {
 			ips := ipLimits[id]
 			v4 := []string{}
@@ -104,11 +103,12 @@ func genPolicyNFT(quotaPorts map[int64]bool, ipLimits map[string]map[string]bool
 		}
 	}
 
-	// input 链：早于计数链，只 drop 达限流量
+	// input 链：暂停规则先于 IP allow 和 rate policing，并早于计数链，
+	// 因此暂停节点的 TCP/UDP 包（含既有连接）全被丢弃且不计入其流量。
 	fmt.Fprintf(&b, "    chain policy_in {\n        type filter hook input priority %d; policy accept;\n", policyPriority)
-	if len(quotaPorts) > 0 {
-		b.WriteString("        tcp dport @quota_ports drop\n")
-		b.WriteString("        udp dport @quota_ports drop\n")
+	if len(pausedPorts) > 0 {
+		b.WriteString("        tcp dport @paused_ports drop\n")
+		b.WriteString("        udp dport @paused_ports drop\n")
 	}
 	for _, p := range orderedPorts {
 		id := portToID[p]
@@ -134,11 +134,11 @@ func genPolicyNFT(quotaPorts map[int64]bool, ipLimits map[string]map[string]bool
 	}
 	b.WriteString("    }\n")
 
-	// output 链：quota 达限时也需要阻断出站（否则下载方向仍能放行）；限速同理。
+	// output 链：暂停节点的回包也必须阻断；限速同样包含下载方向。
 	fmt.Fprintf(&b, "    chain policy_out {\n        type filter hook output priority %d; policy accept;\n", policyPriority)
-	if len(quotaPorts) > 0 {
-		b.WriteString("        tcp sport @quota_ports drop\n")
-		b.WriteString("        udp sport @quota_ports drop\n")
+	if len(pausedPorts) > 0 {
+		b.WriteString("        tcp sport @paused_ports drop\n")
+		b.WriteString("        udp sport @paused_ports drop\n")
 	}
 	// 限速（出站方向 = 客户端下载）：与入站独立各自限到 mbps。
 	for _, p := range orderedRatePorts {
@@ -175,7 +175,7 @@ func writeIPSet(b *strings.Builder, name, typ string, elements []string) {
 	b.WriteString("    }\n")
 }
 
-// applyEnforcement 生成策略 nft 脚本并应用。无任何达限节点时清空策略表。
+// applyEnforcement 生成策略 nft 脚本并应用。暂停节点、IP limit 和 rate limit 共用独立策略表。
 //
 // 返回错误不阻断 reconcile 的状态发布（见 reconcile 注释）：调用方把它记进
 // lastErr 并继续发布状态，这样 nft 应用暂时失败时面板仍显示真实用量，
@@ -184,67 +184,68 @@ func writeIPSet(b *strings.Builder, name, typ string, elements []string) {
 // 后端：nftables-only。策略 enforcement 用 allow set + ct state 规则实现，
 // 与流量统计共用同一套 nftables 基础设施（表分离：sbx_policy / sbx_traffic）。
 //
-// 应用节流（v3.0.7）：
-//   - 立即应用：quota 达限集合变化 / IP 受限节点集合变化 / 节点端口形态变化
-//     （这些改变「谁被限」，延迟意味着该拦的没拦或误拦）；
+// 应用节流：
+//   - 立即应用：节点暂停翻转 / IP 受限节点集合变化 / 节点端口形态变化；
 //   - 节流合并：仅 allow set 的 IP 内容变化（slot 授予/释放/provisional 超时）。
 //     此类变化在名额未满的受限节点上可被扫描者用 SYN churn 诱发成
 //     「每秒一次整表 nft -f 重写」；合并到 enforceMinInterval 窗口后，
 //     最坏情况是已被拒的 IP 多等一个窗口才重试、新 grant 的 IP 多等一个窗口
 //     才完全生效（其 SYN 本就靠 provisional 放行），语义可接受。
 //     合并不是丢弃：applied 与目标持续不一致，间隔一到下一轮立即应用，收敛。
-func (s *Service) applyEnforcement(ctx context.Context, quotaBlocked map[string]bool,
+func (s *Service) applyEnforcement(ctx context.Context, pausedNodes map[string]bool,
 	ipBlocked map[string]map[string]bool, rateLimited map[string]int, list []nodes.Node) error {
 
-	needEnforce := len(quotaBlocked) > 0 || len(ipBlocked) > 0 || len(rateLimited) > 0
+	needEnforce := len(pausedNodes) > 0 || len(ipBlocked) > 0 || len(rateLimited) > 0
 
 	// 与上次应用状态比较，无变化则跳过（幂等，避免每次 reconcile 重写 nft）。
-	quotaChanged := !sameQuota(s.appliedQuota, quotaBlocked)
+	pausedChanged := !sameNodeSet(s.appliedPaused, pausedNodes)
 	ipKeysChanged := !sameIPLimitKeys(s.appliedIPLimit, ipBlocked)
 	ipContentChanged := !sameIPLimits(s.appliedIPLimit, ipBlocked)
 	rateChanged := !sameRate(s.appliedRate, rateLimited)
 	// 节点端口变化即使 applied nodeID 集合不变也必须重写 nft，否则旧端口仍有死规则。
 	// nodesShape 只在节点文件 slice 身份变化时重新计算，避免每轮重复解析端口/拼接。
 	shape := s.cachedNodesShape(list)
-	// 只有「当前有需要 enforcement 的规则」或「上次应用过非空规则」时，
-	// 端口漂移才有意义；两边都为空时端口怎么变都不需要重写。
 	shapeChanged := shape != s.appliedShape &&
-		(needEnforce || len(s.appliedQuota) > 0 || len(s.appliedIPLimit) > 0 || len(s.appliedRate) > 0)
-	if !quotaChanged && !ipContentChanged && !rateChanged && !shapeChanged {
-		// 无变化时仍要防「外部把策略表删了」：clear-firewall / 手工 nft delete
-		// 之后内存里的 applied 快照与目标一致，不重写就会永远失去 enforcement。
-		// 存在性探测有节流（probeInterval），平时零开销。
-		if !needEnforce || s.policyTablePresent() {
+		(needEnforce || len(s.appliedPaused) > 0 || len(s.appliedIPLimit) > 0 || len(s.appliedRate) > 0)
+	if !pausedChanged && !ipContentChanged && !rateChanged && !shapeChanged {
+		if !needEnforce {
+			// 新进程首次 reconcile 时检查残留策略表：此前暂停后进程停止、节点在
+			// 停止期间被删除，SQLite 已无 paused 行但内核表仍可能保留旧 dport drop。
+			// 若表存在，继续生成空策略表并应用；若不存在则无需创建。
+			if s.enforcementInitialized || !s.policyTablePresent() {
+				s.enforcementInitialized = true
+				return nil
+			}
+			slog.Warn("启动时发现残留策略表, 正在清除已无对应配置的规则")
+		} else if s.policyTablePresent() {
 			return nil
+		} else {
+			slog.Warn("检测到策略表被外部移除, 正在重建 enforcement")
 		}
-		slog.Warn("检测到策略表被外部移除, 正在重建 enforcement")
 	}
 
-	// 仅 IP 内容变化时走节流窗口；其余（谁被限变了/端口变了/限速变了）立即应用。
+	// 仅 IP allow-set 内容变化可节流。暂停/恢复必须立即生效。
 	now := s.now()
-	if ipContentChanged && !quotaChanged && !ipKeysChanged && !rateChanged && !shapeChanged &&
+	if ipContentChanged && !pausedChanged && !ipKeysChanged && !rateChanged && !shapeChanged &&
 		s.enforceMinInterval > 0 && !s.lastEnforceAt.IsZero() &&
 		now.Sub(s.lastEnforceAt) < s.enforceMinInterval {
-		return nil // 合并到后续轮次：目标态持续不一致，间隔一到下一轮即应用
+		return nil
 	}
 
-	// 端口映射只在确定本轮确实要应用时才展开。原来这些循环位于无变化判断
-	// 之前：持久限速节点每秒都会重复遍历 nodeList、ParsePorts 并构造 map，
-	// 即使最终直接 return。现在一次遍历节点列表，同时构造 quota/rate port map，
-	// no-op reconcile 完全跳过这部分 CPU 与分配。
-	quotaPorts := make(map[int64]bool, len(quotaBlocked))
+	// 端口映射只在确定本轮确实要应用时才展开，并合并为一次节点列表遍历。
+	pausedPorts := make(map[int64]bool, len(pausedNodes))
 	ratePorts := make(map[int64]int, len(rateLimited))
 	for _, n := range list {
 		id := nodes.IDString(n)
-		_, quota := quotaBlocked[id]
+		_, paused := pausedNodes[id]
 		mbps, rate := rateLimited[id]
-		if !quota && (!rate || mbps <= 0) {
+		if !paused && (!rate || mbps <= 0) {
 			continue
 		}
 		for _, r := range nodes.ParsePorts(n) {
 			for p := r[0]; p <= r[1]; p++ {
-				if quota {
-					quotaPorts[p] = true
+				if paused {
+					pausedPorts[p] = true
 				}
 				if rate && mbps > 0 {
 					ratePorts[p] = mbps
@@ -252,7 +253,7 @@ func (s *Service) applyEnforcement(ctx context.Context, quotaBlocked map[string]
 			}
 		}
 	}
-	script := genPolicyNFT(quotaPorts, ipBlocked, ratePorts, list)
+	script := genPolicyNFT(pausedPorts, ipBlocked, ratePorts, list)
 	if err := os.MkdirAll(s.appDir, 0o755); err != nil {
 		return err
 	}
@@ -279,12 +280,13 @@ func (s *Service) applyEnforcement(ctx context.Context, quotaBlocked map[string]
 		return err
 	}
 	// 只有真正应用成功才记账，否则下一轮会因「无变化」而跳过重试。
-	s.appliedQuota = quotaBlocked
+	s.appliedPaused = pausedNodes
 	s.appliedIPLimit = ipBlocked
 	s.appliedRate = rateLimited
 	s.appliedShape = shape
 	s.lastEnforceAt = now
 	s.lastProbeOK = true // 刚应用成功，表必然存在
+	s.enforcementInitialized = true
 	return nil
 }
 
@@ -369,7 +371,7 @@ func (s *Service) policyTablePresent() bool {
 // SetTableProbe 注入策略表存在性探测函数（测试用）。
 func (s *Service) SetTableProbe(fn func() bool) { s.tableProbe = fn }
 
-func sameQuota(a map[string]bool, b map[string]bool) bool {
+func sameNodeSet(a, b map[string]bool) bool {
 	if len(a) != len(b) {
 		return false
 	}

@@ -23,18 +23,17 @@ var procSource = connection.NodeRemoteIPsSplit
 
 // reconcile 执行一轮策略同步：
 //  1. 读节点列表（严格）与策略配置；
-//  2. 算每个节点的 quota used（单条 totals 查询）；
-//  3. 读 conntrack（主）与 /proc（回退）采集客户端 IP 活动；
-//  4. 更新 Slot Manager（observed → active → granted/rejected），严格 admission；
-//  5. 用 granted 集合生成 nft allow set（Rejected 绝不进入）；
-//  6. 在 mu 下发布不可变快照（states / ipSnaps / activeIPs）。
+//  2. 读 conntrack（主）与 /proc（回退）采集客户端 IP 活动；
+//  3. 更新 Slot Manager（observed → active → granted/rejected），严格 admission；
+//  4. 用 paused 状态、限速和 granted 集合生成 nft enforcement；
+//  5. 在 mu 下发布不可变快照（states / ipSnaps / activeIPs）。
 //
 // 并发安全（v3.0.6）：
 //   - runMu 串行化所有 reconcile 调用，并且是 ipStates / flows 的唯一守卫；
 //   - 读侧只看第 6 步发布的不可变快照，绝不遍历 ipStates。
 //
 // fail-closed：nodes.json 损坏时**保持上一轮 enforcement 不动**并返回错误，
-// 绝不以「零节点」重写策略表（那会解除所有配额/IP 阻断，而 sing-box 仍在服务）。
+// 绝不以「零节点」重写策略表（那会解除所有暂停/IP 阻断，而 sing-box 仍在服务）。
 func (s *Service) reconcile(ctx context.Context) error {
 	s.runMu.Lock()
 	defer s.runMu.Unlock()
@@ -107,17 +106,11 @@ func (s *Service) reconcile(ctx context.Context) error {
 	s.refreshSelfIPs(now)
 	active, candidates := s.buildActivity(nodeList, cr, procSplit, now)
 
-	// 单条查询取全部节点 lifetime（旧实现每节点一次 SELECT）。
-	lifetimes, err := s.lifetimeBytesAll(ctx)
-	if err != nil {
-		return err
-	}
-
 	newStates := map[string]State{}
 	newSnaps := map[string]NodeIPSnapshot{}
 	newActiveIPs := map[string][]string{}
 	newActiveTCP := map[string]int{}
-	quotaBlocked := map[string]bool{}
+	pausedNodes := map[string]bool{}
 	ipBlocked := map[string]map[string]bool{}
 	rateLimited := map[string]int{} // nodeID -> mbps
 
@@ -125,33 +118,8 @@ func (s *Service) reconcile(ctx context.Context) error {
 		id := nodes.IDString(n)
 		cfg := cfgs[id]
 
-		life := lifetimes[id]
-		// 自愈（defense-in-depth，主修复在 service.Reset 的同事务清零）：
-		// totals 只会单调增长（commitTick 全是 rx=rx+delta），因此
-		// baseline > lifetime 只可能是统计被清空过。此时历史已丢，唯一诚实的
-		// 口径是「把 totals 里现有的量全算作已用」→ 基线归零。
-		//
-		// 不能校正为 lifetime：那会把 reset 之后已经跑掉的流量一并抹掉，
-		// 配额继续失效；归零则偏向「多算用量、配额更早生效」，方向正确。
-		if cfg.QuotaResetBaseline > life {
-			slog.Info("配额基线高于累计流量(统计被重置?), 已将基线归零",
-				"node", id, "baseline", cfg.QuotaResetBaseline, "lifetime", life)
-			if err := s.setResetBaseline(ctx, id, 0); err != nil {
-				return err
-			}
-			cfg.QuotaResetBaseline = 0
-			cfgs[id] = cfg
-		}
-		used := life - cfg.QuotaResetBaseline
-		if used < 0 {
-			used = 0
-		}
-
 		st := State{
-			QuotaEnabled: cfg.QuotaEnabled,
-			QuotaLimit:   cfg.QuotaLimitBytes,
-			QuotaUsed:    used,
-			QuotaState:   "unlimited",
+			Paused:       cfg.Paused,
 			IPLimitOn:    cfg.IPLimitEnabled,
 			IPLimitMax:   cfg.IPLimitMax,
 			IPLimitState: "unlimited",
@@ -163,15 +131,11 @@ func (s *Service) reconcile(ctx context.Context) error {
 				return 0
 			}(),
 		}
-		if cfg.QuotaEnabled {
-			st.QuotaState = "ok"
-			if cfg.QuotaLimitBytes > 0 && used >= cfg.QuotaLimitBytes {
-				st.QuotaState = "exceeded"
-				quotaBlocked[id] = true
-			}
+		if cfg.Paused {
+			pausedNodes[id] = true
 		}
-		// 限速：启用且 mbps>0 才写入 enforcement 目标。限速与 quota/ip-limit
-		// 相互独立，达 quota 的节点会被整段 drop，此时限速规则形同虚设但无害。
+		// 限速与在线 IP 限制独立；暂停节点的 drop 会优先于这些规则，但配置仍保留，
+		// 恢复节点后即时继续生效。
 		if cfg.RateLimitEnabled && cfg.RateLimitMbps > 0 {
 			rateLimited[id] = cfg.RateLimitMbps
 		}
@@ -237,7 +201,7 @@ func (s *Service) reconcile(ctx context.Context) error {
 	// enforceErr 不阻断状态发布：nft 应用暂时失败（权限/瞬时错误）时面板
 	// 必须照常显示真实用量，并把错误如实呈现（policy_error），
 	// 而不是让 states 永远为空、UI 全显示「不限」。
-	enforceErr := s.applyEnforcement(ctx, quotaBlocked, ipBlocked, rateLimited, nodeList)
+	enforceErr := s.applyEnforcement(ctx, pausedNodes, ipBlocked, rateLimited, nodeList)
 
 	s.mu.Lock()
 	s.states = newStates

@@ -61,16 +61,14 @@ func Serve() int {
 	// 让用户从日志一眼看到原因，而不是只看到「采集异常」。
 	if !firewall.NftAvailable(context.Background()) {
 		slog.Error("nftables 不可用（nft 命令缺失或无权限/内核不支持）: " +
-			"流量统计与配额/IP 限制将无法工作。SBX 只支持 nftables，不提供其它后端降级。" +
+			"流量统计、节点暂停、IP 限制与限速将无法工作。SBX 只支持 nftables，不提供其它后端降级。" +
 			"请安装 nftables 后执行 sbx --apply-firewall")
 	}
 
-	// 策略服务（Quota / IP Limit）：与采集器并行运行，复用同一 SQLite。
+	// 策略服务（节点暂停 / IP Limit / Rate Limit）：与采集器并行运行，复用同一 SQLite。
 	//
-	// 脚本路径必须与计数规则 cfg.NftConf 分离：旧版把 cfg.NftConf 传进来，
-	// 一旦任何节点启用策略，policy 脚本就覆盖 /etc/sbx/nft.conf 的
-	// sbx_traffic 计数表定义；更糟的是 firewall.Nft.Repair 自愈时重放的
-	// 也是这个文件，导致计数器永远建不回来（统计与配额一起停摆）。
+	// 脚本路径必须与计数规则 cfg.NftConf 分离：策略表单独用于暂停、IP 限制与限速，
+	// 不得覆盖 /etc/sbx/nft.conf 中的 sbx_traffic 计数表定义。
 	policySvc := policy.New(db.DB, config.AppDir(), policy.DefaultPolicyConf(config.AppDir()))
 	// 节点文件路径必须与 panel.json 的 nodes_file 一致，否则自定义路径下
 	// 策略层会读回默认 appDir/nodes.json，与面板读的不是同一个文件。

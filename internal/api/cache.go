@@ -25,7 +25,7 @@ import (
 //     TTL 只用于回收不再被访问的条目，防止 map 无界增长。
 //  2. 单飞（single-flight）：同一 key 的并发请求只执行一次加载，其余等待复用，
 //     避免"缓存击穿"把 N 个并发请求放大成 N 次全表扫描。
-//  3. 全部经互斥锁保护，支持整体失效（策略保存/配额重置后立即失效）。
+//  3. 全部经互斥锁保护，支持整体失效（策略保存后立即失效）。
 type ttlCache struct {
 	ttl time.Duration
 
@@ -121,7 +121,7 @@ func (c *ttlCache) load(key string, fn func() (any, error)) (any, error) {
 	return val, err
 }
 
-// invalidate 清空全部缓存（策略保存、配额重置等写操作后调用）。
+// invalidate 清空全部缓存（策略保存后调用）。
 func (c *ttlCache) invalidate() {
 	c.mu.Lock()
 	c.items = map[string]cacheEntry{}
@@ -217,7 +217,7 @@ func (s *Server) serveCachedJSON(w http.ResponseWriter, r *http.Request, code, k
 	s.send(w, r, http.StatusOK, "application/json; charset=utf-8", b)
 }
 
-// invalidateCache 清空接口缓存（策略保存、配额重置等写操作后调用）。
+// invalidateCache 清空接口缓存（策略保存后调用）。
 // 注意：策略版本号变化已能让缓存 key 自动失效，这里是显式的双保险。
 func (s *Server) invalidateCache() {
 	// 与 cacheFor 共用 sync.Once，避免 cacheInst 在惰性初始化时被并发无锁读写。

@@ -13,7 +13,7 @@ import (
 
 // benchService 构造一个含 N 节点、每节点 M 个活跃客户端 IP 的策略服务，
 // conntrack 注入为内存数据（不读 /proc），用于测 reconcile 每秒的真实工作量。
-func benchService(tb testing.TB, nNodes, ipsPerNode int, withPolicy bool) *Service {
+func benchService(tb testing.TB, nNodes, ipsPerNode int) *Service {
 	tb.Helper()
 	dir := tb.TempDir()
 	s := newBenchServiceDB(tb, dir)
@@ -32,18 +32,11 @@ func benchService(tb testing.TB, nNodes, ipsPerNode int, withPolicy bool) *Servi
 	}
 
 	// 写 node_policy（开启 IP 限制，让 admission 真正跑）
-	if withPolicy {
-		ctx := context.Background()
-		for i := 1; i <= nNodes; i++ {
-			cfg := Config{NodeID: fmt.Sprint(i), IPLimitEnabled: true, IPLimitMax: ipsPerNode + 5}
-			if err := s.UpsertConfig(ctx, cfg); err != nil {
-				tb.Fatal(err)
-			}
-			// totals 行（lifetimeBytesAll 要扫）
-			if _, err := s.db.Exec("INSERT INTO totals(scope,rx,tx,rx_pkts,tx_pkts) VALUES(?,?,?,?,?)",
-				"node:"+fmt.Sprint(i), int64(i)*1e9, int64(i)*2e9, 1000, 2000); err != nil {
-				tb.Fatal(err)
-			}
+	ctx := context.Background()
+	for i := 1; i <= nNodes; i++ {
+		cfg := Config{NodeID: fmt.Sprint(i), IPLimitEnabled: true, IPLimitMax: ipsPerNode + 5}
+		if err := s.UpsertConfig(ctx, cfg); err != nil {
+			tb.Fatal(err)
 		}
 	}
 
@@ -80,7 +73,7 @@ func newBenchServiceDB(tb testing.TB, dir string) *Service {
 func BenchmarkReconcile(b *testing.B) {
 	for _, c := range []struct{ nodes, ips int }{{5, 5}, {50, 10}, {50, 50}} {
 		b.Run(fmt.Sprintf("nodes=%d/ips=%d", c.nodes, c.ips), func(b *testing.B) {
-			s := benchService(b, c.nodes, c.ips, true)
+			s := benchService(b, c.nodes, c.ips)
 			ctx := context.Background()
 			// 预热两轮（建立 flow 基线 + slot）
 			s.SetClock(func() time.Time { return time.Now() })
@@ -99,25 +92,12 @@ func BenchmarkReconcile(b *testing.B) {
 
 // BenchmarkLoadConfigs 单独测 loadConfigs 的 SQL 成本。
 func BenchmarkLoadConfigs(b *testing.B) {
-	s := benchService(b, 50, 10, true)
+	s := benchService(b, 50, 10)
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if _, err := s.loadConfigs(ctx); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-// BenchmarkLifetimeBytesAll 单独测 totals 查询成本。
-func BenchmarkLifetimeBytesAll(b *testing.B) {
-	s := benchService(b, 50, 10, true)
-	ctx := context.Background()
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if _, err := s.lifetimeBytesAll(ctx); err != nil {
 			b.Fatal(err)
 		}
 	}

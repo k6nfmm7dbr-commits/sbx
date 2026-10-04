@@ -74,12 +74,15 @@ func TestPolicyEndpoints(t *testing.T) {
 	if err := json.Unmarshal([]byte(body(t, resp)), &st); err != nil {
 		t.Fatal(err)
 	}
-	if st["quota_enabled"] != false || st["quota_state"] != "unlimited" {
-		t.Fatalf("默认应全不限: %+v", st)
+	if st["paused"] != false || st["ip_limit_state"] != "unlimited" {
+		t.Fatalf("默认应未暂停且不限 IP: %+v", st)
+	}
+	if _, exists := st["quota_enabled"]; exists {
+		t.Fatalf("配额字段不应再暴露: %+v", st)
 	}
 
-	// PUT 设置 quota + 限速
-	putBody := `{"quota_enabled":true,"quota_limit_bytes":1073741824,"ip_limit_enabled":true,"ip_limit_max":2,"rate_limit_enabled":true,"rate_limit_mbps":50}`
+	// PUT 暂停节点并配置 IP limit / rate limit。
+	putBody := `{"paused":true,"ip_limit_enabled":true,"ip_limit_max":2,"rate_limit_enabled":true,"rate_limit_mbps":50}`
 	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/nodes/1/policy", strings.NewReader(putBody))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+testToken)
@@ -90,22 +93,38 @@ func TestPolicyEndpoints(t *testing.T) {
 	defer rr.Body.Close()
 	buf := make([]byte, 1<<16)
 	n, _ := rr.Body.Read(buf)
-	if rr.StatusCode != 200 || !strings.Contains(string(buf[:n]), `"quota_enabled":true`) {
-		t.Fatalf("PUT policy 应 200 且生效: %d %s", rr.StatusCode, buf[:n])
+	if rr.StatusCode != 200 || !strings.Contains(string(buf[:n]), `"paused":true`) {
+		t.Fatalf("PUT policy 应暂停节点: %d %s", rr.StatusCode, buf[:n])
 	}
 	if !strings.Contains(string(buf[:n]), `"rate_limit_enabled":true`) || !strings.Contains(string(buf[:n]), `"rate_limit_mbps":50`) {
 		t.Fatalf("PUT policy 限速应生效: %s", buf[:n])
 	}
 
-	// 参数校验：quota enabled 但 limit=0 → 400
-	bad := `{"quota_enabled":true,"quota_limit_bytes":0}`
-	req2, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/nodes/1/policy", strings.NewReader(bad))
+	// 向后兼容：旧客户端省略 paused 时保留当前暂停值，不能误启用节点。
+	legacyBody := `{"ip_limit_enabled":true,"ip_limit_max":2,"rate_limit_enabled":true,"rate_limit_mbps":50}`
+	legacyReq, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/nodes/1/policy", strings.NewReader(legacyBody))
+	legacyReq.Header.Set("Content-Type", "application/json")
+	legacyReq.Header.Set("Authorization", "Bearer "+testToken)
+	legacyResp, err := http.DefaultClient.Do(legacyReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyBodyBytes := make([]byte, 1<<16)
+	legacyN, _ := legacyResp.Body.Read(legacyBodyBytes)
+	legacyResp.Body.Close()
+	if legacyResp.StatusCode != 200 || !strings.Contains(string(legacyBodyBytes[:legacyN]), `"paused":true`) {
+		t.Fatalf("省略 paused 的旧客户端必须保留暂停状态: %d %s", legacyResp.StatusCode, legacyBodyBytes[:legacyN])
+	}
+
+	// 暂停字段错误类型应被严格拒绝。
+	badPaused := `{"paused":"yes"}`
+	req2, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/nodes/1/policy", strings.NewReader(badPaused))
 	req2.Header.Set("Content-Type", "application/json")
 	req2.Header.Set("Authorization", "Bearer "+testToken)
 	rr2, _ := http.DefaultClient.Do(req2)
 	rr2.Body.Close()
 	if rr2.StatusCode != 400 {
-		t.Fatalf("quota limit=0 应 400, got %d", rr2.StatusCode)
+		t.Fatalf("paused 类型错误应 400, got %d", rr2.StatusCode)
 	}
 
 	// 参数校验：限速 enabled 但 mbps=0 → 400

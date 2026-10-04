@@ -42,7 +42,7 @@ ck "安装脚本退出码 0" $?
 grep -q "安装完成" /tmp/e2e-install.log; ck "输出含「安装完成」" $?
 [[ -x "$CORE" ]]; ck "sbx-core 已安装" $?
 [[ -x "$ROOT/usr/local/bin/sing-box" ]]; ck "sing-box 已安装" $?
-"$CORE" version | grep -q "v3.0.20"; ck "core 版本 3.0.20 ($("$CORE" version))" $?
+"$CORE" version | grep -q "v3.0.21"; ck "core 版本 3.0.21 ($("$CORE" version))" $?
 jq -e '.token and (.port|type)=="number" and .port>=1 and .port<=65535' "$PANEL_CONF" >/dev/null 2>&1
 ck "panel.json 合法(token+port)" $?
 # nftables-only（v3.0.9）：新装配置不得含废弃后端键，必须含 nft_conf
@@ -170,30 +170,31 @@ grep -qE "今日|累计|rx|tx|RX|TX" /tmp/e2e-show.txt; ck "sbx-core show 输出
 # show 的维度字样：概览段（总览）+ 节点段（节点流量/合计）
 grep -qE "总览" /tmp/e2e-show.txt && grep -qE "节点流量|合计" /tmp/e2e-show.txt; ck "show 含总览/节点维度" $?
 
-# ---------------------------------------------------------------- 8. 策略层（v3.0.8 修复点）
-section "8. 策略 enforcement（配额阻断 / 表清理 / 外部删除自愈）"
+# 8. 策略层（节点暂停 / IP 限制 / 限速）
+section "8. 节点策略 enforcement（暂停 / IP 限制 / 表清理 / 外部删除自愈）"
 policy_put() { # policy_put <json>
   curl -fsS -m 10 -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
     -d "$1" "http://127.0.0.1:$PORT/api/nodes/1/policy"; }
 
-# 8.1 配额达限 → 生成 sbx_policy 表并 drop 该节点端口
-policy_put '{"quota_enabled":true,"quota_limit_bytes":1000,"ip_limit_enabled":false,"ip_limit_max":0}' \
-  | jq -e '.quota_state=="exceeded"' >/dev/null 2>&1
-ck "配额达限 → quota_state=exceeded" $?
+# 8.1 暂停节点 → 生成双向 drop 规则并阻断该节点流量
+policy_put '{"paused":true,"ip_limit_enabled":false,"ip_limit_max":0,"rate_limit_enabled":false,"rate_limit_mbps":0}' \
+  | jq -e '.paused==true' >/dev/null 2>&1
+ck "暂停节点 → paused=true" $?
 sleep 1
-nft list table inet sbx_policy 2>/dev/null | grep -q 'tcp dport @quota_ports drop'; ck "sbx_policy 生成 quota drop 规则" $?
+nft list table inet sbx_policy 2>/dev/null | grep -q 'tcp dport @paused_ports drop'; ck "sbx_policy 生成暂停 ingress 规则" $?
+nft list table inet sbx_policy 2>/dev/null | grep -q 'tcp sport @paused_ports drop'; ck "sbx_policy 生成暂停 egress 规则" $?
 curl -fsS -m 8 --socks5-hostname 10.66.0.2:10801 http://10.66.0.1:8000/e2e-1mb.bin -o /dev/null 2>/dev/null
-[[ $? -ne 0 ]]; ck "达限后经节点访问被阻断" $?
+[[ $? -ne 0 ]]; ck "暂停后经节点访问被阻断" $?
 
-# 8.2 保存策略必须 200（不因 enforcement 细节返回 500）
+# 8.2 保存策略必须 200，恢复节点后服务可继续使用
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 10 -X PUT -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"quota_enabled":false,"quota_limit_bytes":0,"ip_limit_enabled":false,"ip_limit_max":0}' \
+  -d '{"paused":false,"ip_limit_enabled":false,"ip_limit_max":0,"rate_limit_enabled":false,"rate_limit_mbps":0}' \
   "http://127.0.0.1:$PORT/api/nodes/1/policy")
-[[ "$CODE" == "200" ]]; ck "解除配额 → 200（实得 $CODE）" $?
+[[ "$CODE" == "200" ]]; ck "恢复节点 → 200（实得 $CODE）" $?
 sleep 1
 curl -fsS -m 20 --socks5-hostname 10.66.0.2:10801 http://10.66.0.1:8000/e2e-1mb.bin -o /dev/null
-ck "解除后经节点访问恢复" $?
+ck "恢复后经节点访问可用" $?
 
 # 8.3 请求体加固：超限 / 尾随数据必须 400
 head -c 2200000 /dev/zero | tr '\0' 'A' > /tmp/e2e-big.txt
@@ -203,13 +204,13 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 20 -X PUT -H "Authorization: Be
   "http://127.0.0.1:$PORT/api/nodes/1/policy")
 [[ "$CODE" == "400" ]]; ck "超大 body → 400（实得 $CODE）" $?
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 10 -X PUT -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' -d '{"quota_enabled":false} GARBAGE' \
+  -H 'Content-Type: application/json' -d '{"paused":false} GARBAGE' \
   "http://127.0.0.1:$PORT/api/nodes/1/policy")
 [[ "$CODE" == "400" ]]; ck "尾随数据 → 400（实得 $CODE）" $?
 rm -f /tmp/e2e-big.txt /tmp/e2e-big.json
 
 # 8.4 IP 限制：allow set 授予在线 IP
-policy_put '{"quota_enabled":false,"quota_limit_bytes":0,"ip_limit_enabled":true,"ip_limit_max":1}' \
+policy_put '{"paused":false,"ip_limit_enabled":true,"ip_limit_max":1,"rate_limit_enabled":false,"rate_limit_mbps":0}' \
   | jq -e '.ip_limit_enabled==true and .ip_limit_max==1' >/dev/null 2>&1
 ck "启用 IP 限制(max=1)" $?
 sleep 1
@@ -247,13 +248,12 @@ fi
 ck "allow set 已写入客户端 IP（含节流窗口收敛）" $SETW
 
 # 8.5 外部删除策略表 → 自愈重建
-# 用「配额达限」而非 IP 限制做这个断言：quota 阻断集合是稳态的，
-# 不会像 allow set 那样因 slot 授予/释放而自行触发重写——只有存在性探测
-# 能把表带回来，断言才真正测到自愈逻辑（探测有 10s 节流，给 ~14s）。
+# 用「暂停状态」做稳态 enforcement：它不会因 allow set 的动态内容而触发重写，
+# 因此只有策略表存在性探测能把表带回来（探测有 10s 节流，给 ~14s）。
 pkill -f 'curl.*socks5-hostname' 2>/dev/null
-policy_put '{"quota_enabled":true,"quota_limit_bytes":1000,"ip_limit_enabled":false,"ip_limit_max":0}' >/dev/null 2>&1
+policy_put '{"paused":true,"ip_limit_enabled":false,"ip_limit_max":0,"rate_limit_enabled":false,"rate_limit_mbps":0}' >/dev/null 2>&1
 sleep 2
-nft list table inet sbx_policy 2>/dev/null | grep -q 'quota_ports'; ck "自愈前置：quota 表已就位" $?
+nft list table inet sbx_policy 2>/dev/null | grep -q 'paused_ports'; ck "自愈前置：暂停规则已就位" $?
 nft delete table inet sbx_policy >/dev/null 2>&1
 ! nft list table inet sbx_policy >/dev/null 2>&1; ck "手工删除 sbx_policy 成功" $?
 REBUILT=1
@@ -264,8 +264,8 @@ done
 ck "策略表被外部删除后自动重建" $REBUILT
 grep -q "策略表被外部移除" /tmp/e2e-panel.log; ck "日志明确记录重建原因" $?
 
-# 8.6 clear 清除计数表与策略表，且退出码 0（表本就不存在不得报错）
-policy_put '{"quota_enabled":false,"quota_limit_bytes":0,"ip_limit_enabled":false,"ip_limit_max":0}' >/dev/null 2>&1
+# 8.6 恢复节点后 clear 清除计数表与策略表
+policy_put '{"paused":false,"ip_limit_enabled":false,"ip_limit_max":0,"rate_limit_enabled":false,"rate_limit_mbps":0}' >/dev/null 2>&1
 kill -TERM "$CORE_PID" 2>/dev/null; wait "$CORE_PID" 2>/dev/null
 # 防误伤前置：放一张「用户自己的」nft 表，clear 之后它必须完好无损
 nft add table inet e2e_user_guard 2>/dev/null

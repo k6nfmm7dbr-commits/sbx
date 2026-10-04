@@ -146,6 +146,7 @@ func TestSubscribeFanoutWakesAll(t *testing.T) {
 func TestExternalTableDeletionTriggersRebuild(t *testing.T) {
 	s := newTestService(t)
 	seedNode(t, s, 1, "vless", 443)
+	s.SetTableProbe(func() bool { return true }) // 初次应用后表存在，下一轮应走 no-op
 	if err := s.UpsertConfig(context.Background(), Config{NodeID: "1", IPLimitEnabled: true, IPLimitMax: 1}); err != nil {
 		t.Fatal(err)
 	}

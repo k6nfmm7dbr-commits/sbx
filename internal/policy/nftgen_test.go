@@ -27,11 +27,11 @@ func TestGenPolicyNFTIsDeterministic(t *testing.T) {
 		"4": {"4.4.4.4": true},
 		"5": {"5.5.5.5": true},
 	}
-	quota := map[int64]bool{8443: true, 443: true}
+	paused := map[int64]bool{8443: true, 443: true}
 
-	first := genPolicyNFT(quota, ipLimits, nil, list)
+	first := genPolicyNFT(paused, ipLimits, nil, list)
 	for i := 0; i < 200; i++ {
-		if got := genPolicyNFT(quota, ipLimits, nil, list); got != first {
+		if got := genPolicyNFT(paused, ipLimits, nil, list); got != first {
 			t.Fatalf("第 %d 次生成与首次不一致(map 迭代顺序泄漏到输出)\n--- want ---\n%s\n--- got ---\n%s",
 				i, first, got)
 		}

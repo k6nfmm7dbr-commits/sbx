@@ -94,17 +94,12 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request, route string)
 		s.handleExport(w, r)
 
 	default:
-		// 策略子路由：/api/nodes/<id>/{policy|quota/reset|active-ips}
+		// 策略子路由：/api/nodes/<id>/{policy|active-ips|ip-state}
 		if handled := s.tryPolicyRoute(w, r, route); handled {
 			return
 		}
 		s.sendJSON(w, r, http.StatusNotFound, map[string]string{"error": "not found"})
 	}
-}
-
-// isPolicyPostRoute 判断路由是否是需要 POST 的策略子路由（quota/reset）。
-func isPolicyPostRoute(route string) bool {
-	return strings.HasSuffix(route, "/quota/reset")
 }
 
 // attachPolicyToSummary 把策略状态合并进 summary 的节点列表（供前端卡片展示）。
@@ -113,7 +108,7 @@ func (s *Server) attachPolicyToSummary(sum *traffic.Summary) {
 		return
 	}
 	// enforcement 错误（如 nft 应用失败）必须透出给面板，
-	// 否则用户会误以为配额/IP 限制已在生效。
+	// 策略 API 校验 nodes.json 不可用时必须正确报告文件问题，而非误报节点不存在。
 	sum.PolicyError = s.policy.LastError()
 	states, _ := s.policy.Snapshot()
 	for i := range sum.Nodes {
@@ -122,13 +117,7 @@ func (s *Server) attachPolicyToSummary(sum *traffic.Summary) {
 		if !ok {
 			continue
 		}
-		sum.Nodes[i].QuotaEnabled = st.QuotaEnabled
-		sum.Nodes[i].QuotaLimit = st.QuotaLimit
-		sum.Nodes[i].QuotaUsed = st.QuotaUsed
-		// 未启用时 state 留空（配合 omitempty 不输出），启用时才有 ok/exceeded。
-		if st.QuotaEnabled {
-			sum.Nodes[i].QuotaState = st.QuotaState
-		}
+		sum.Nodes[i].Paused = st.Paused
 		sum.Nodes[i].IPLimitOn = st.IPLimitOn
 		sum.Nodes[i].IPLimitMax = st.IPLimitMax
 		sum.Nodes[i].ActiveIPs = st.ActiveIPs
@@ -172,6 +161,7 @@ func (s *Server) attachPolicyToLive(live *traffic.Live) {
 	for i := range live.Nodes {
 		id := strconv.FormatInt(toI64(live.Nodes[i].ID), 10)
 		if st, ok := states[id]; ok {
+			live.Nodes[i].Paused = st.Paused
 			live.Nodes[i].ActiveIPs = st.ActiveIPs
 			live.Nodes[i].IPLimitOn = st.IPLimitOn
 			live.Nodes[i].IPLimitMax = st.IPLimitMax
@@ -184,14 +174,14 @@ func (s *Server) tryPolicyRoute(w http.ResponseWriter, r *http.Request, route st
 		return false
 	}
 	rest := route[len(prefix):]
-	// rest 形如 "<id>/policy" 或 "<id>/quota/reset" 或 "<id>/active-ips"
+	// rest 形如 "<id>/policy"、"<id>/active-ips" 或 "<id>/ip-state"
 	slash := strings.IndexByte(rest, '/')
 	if slash < 0 {
 		return false
 	}
 	idStr := rest[:slash]
 	sub := rest[slash+1:]
-	if sub != "policy" && sub != "quota/reset" && sub != "active-ips" && sub != "ip-state" {
+	if sub != "policy" && sub != "active-ips" && sub != "ip-state" {
 		return false
 	}
 	s.handlePolicyAPI(w, r, idStr, sub)
