@@ -223,11 +223,6 @@ button { -webkit-tap-highlight-color: transparent; }
 .node-stat b.muted { color: var(--text-3); font-weight: 560; }
 .node-stat b i { font-style: normal; }
 .node-stat .sep { margin: 0 4px; color: var(--text-3); font-weight: 500; }
-/* 配额用量进度条：随 quotaCell 输出，位于数值下方 */
-.quota-bar { height: 3px; margin-top: 5px; border-radius: 2px; overflow: hidden; background: var(--line-2); }
-.quota-bar i { display: block; height: 100%; border-radius: 2px; background: var(--accent); transition: width .5s ease; }
-.quota-bar.warn i { background: var(--warn); }
-.quota-bar.danger i { background: var(--bad); }
 
 .ip-strip {
   display: flex;

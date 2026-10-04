@@ -98,13 +98,10 @@ function renderSummary(s) {
 
 /* ---------- 节点卡片 ---------- */
 function portText(n) { return n.port != null ? n.port : '—'; }
-/* 流量配额：未启用 → 弱化「不限」；启用 → 已用/上限 + 用量进度条（≥90% 变黄、达限变红） */
+/* 流量配额：未启用 → 弱化「不限」；启用 → 显示已用/上限 */
 function quotaCell(n) {
   if (!n.quota_enabled) return '<b class="muted">不限</b>';
-  var pct = n.quota_limit_bytes > 0 ? Math.min(100, Math.round(n.quota_used_bytes * 100 / n.quota_limit_bytes)) : 0;
-  var cls = pct >= 100 ? ' danger' : (pct >= 90 ? ' warn' : '');
-  return '<b>' + fmtBytes(n.quota_used_bytes) + ' / ' + fmtBytes(n.quota_limit_bytes) + '</b>' +
-    '<div class="quota-bar' + cls + '"><i style="width:' + pct + '%"></i></div>';
+  return '<b>' + fmtBytes(n.quota_used_bytes) + ' / ' + fmtBytes(n.quota_limit_bytes) + '</b>';
 }
 function rateText(n) {
   return n.rate_limit_enabled && n.rate_limit_mbps > 0 ? (n.rate_limit_mbps + ' Mbps') : '不限';
