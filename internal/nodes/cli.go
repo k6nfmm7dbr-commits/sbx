@@ -584,10 +584,8 @@ func (c *CLI) cmdLinks(args []string) int {
 		list = filtered
 	}
 	host := p.flags["host"]
-	host6Given := false
 	host6Val := ""
 	if v, ok := p.flags["host6"]; ok {
-		host6Given = true
 		host6Val = v
 	} else {
 		host6Val = c.Store.ShareHost6()
@@ -617,7 +615,6 @@ func (c *CLI) cmdLinks(args []string) int {
 		}
 		fmt.Fprintln(c.Stdout, "")
 	}
-	_ = host6Given
 	return exitOK
 }
 

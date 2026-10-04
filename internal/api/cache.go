@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,9 +29,10 @@ import (
 type ttlCache struct {
 	ttl time.Duration
 
-	mu       sync.Mutex
-	items    map[string]cacheEntry
-	inflight map[string]*cacheCall
+	mu        sync.Mutex
+	items     map[string]cacheEntry
+	inflight  map[string]*cacheCall
+	cleanupAt time.Time // 下次需要整表回收过期条目的时刻，避免每个 miss 都 O(n) 扫描
 }
 
 type cacheEntry struct {
@@ -56,9 +58,8 @@ func newTTLCache(ttl time.Duration) *ttlCache {
 // load 返回 key 对应的缓存值；未命中时调用 fn 加载并缓存。
 // 同一 key 的并发调用只会执行一次 fn。
 func (c *ttlCache) load(key string, fn func() (any, error)) (any, error) {
-	now := time.Now()
-
 	c.mu.Lock()
+	now := time.Now()
 	if e, ok := c.items[key]; ok && now.Before(e.exp) {
 		c.mu.Unlock()
 		return e.val, nil
@@ -74,20 +75,43 @@ func (c *ttlCache) load(key string, fn func() (any, error)) (any, error) {
 	c.inflight[key] = call
 	c.mu.Unlock()
 
-	val, err := fn()
+	var val any
+	var err error
+	var panicValue any
+	func() {
+		// Loader 在 HTTP 请求路径中执行。若 panic 直接逃出，外层 middleware
+		// 虽会恢复当前请求，但该 key 的 inflight call 会永远留在 map 中，
+		// 所有后续同 key 请求都卡在 WaitGroup。先捕获并完成单飞清理，再重抛
+		// 让现有 HTTP panic middleware 记录并处理。
+		defer func() { panicValue = recover() }()
+		val, err = fn()
+	}()
+	if panicValue != nil {
+		c.mu.Lock()
+		call.err = fmt.Errorf("cache loader panic: %v", panicValue)
+		delete(c.inflight, key)
+		c.mu.Unlock()
+		call.wg.Done()
+		panic(panicValue)
+	}
 
+	completedAt := time.Now()
 	c.mu.Lock()
 	call.val, call.err = val, err
 	delete(c.inflight, key)
 	if err == nil {
-		c.items[key] = cacheEntry{val: val, exp: time.Now().Add(c.ttl)}
+		c.items[key] = cacheEntry{val: val, exp: completedAt.Add(c.ttl)}
 	}
-	// 顺手回收过期条目，避免 map 随 key 变化无界增长
-	// （key 含数据版本，采样每 2 秒就换一次 key）。
-	for k, e := range c.items {
-		if time.Now().After(e.exp) {
-			delete(c.items, k)
+	// 过期项在每个 miss 上整表扫描会令 N 个不同查询 key 产生 O(N²) 比较。
+	// 以 TTL 为间隔批量回收，额外驻留最多约一个 TTL；单 key 命中仍在上面
+	// 立即按 exp 校验，不会因延后回收而返回过期值。
+	if !completedAt.Before(c.cleanupAt) {
+		for k, e := range c.items {
+			if !completedAt.Before(e.exp) {
+				delete(c.items, k)
+			}
 		}
+		c.cleanupAt = completedAt.Add(c.ttl)
 	}
 	c.mu.Unlock()
 
@@ -99,6 +123,7 @@ func (c *ttlCache) load(key string, fn func() (any, error)) (any, error) {
 func (c *ttlCache) invalidate() {
 	c.mu.Lock()
 	c.items = map[string]cacheEntry{}
+	c.cleanupAt = time.Time{}
 	c.mu.Unlock()
 }
 
@@ -116,6 +141,11 @@ const cacheTTL = 2 * time.Second
 
 // dataVersion 返回当前数据版本串：采集器最后一次成功采样时间 + 策略快照版本。
 // 任一数据源更新，版本即变化，缓存 key 随之改变。
+//
+// 高频路径优化：dataVersion 每个缓存请求都会调用，原始实现每次都做
+// FormatInt + FormatUint + 字符串拼接 + 短串驻留——多标签页场景下每秒
+// 数百次构建相同字符串。这里把已生成的版本串本身再缓存：版本数值
+// 未变即复用旧串；版本变化才重新拼接。读锁覆盖稳态命中，写锁仅在版本切换时获取。
 func (s *Server) dataVersion() string {
 	var lastOK int64
 	if s.src != nil {
@@ -125,16 +155,39 @@ func (s *Server) dataVersion() string {
 	if s.policy != nil {
 		polVer = s.policy.Version()
 	}
-	return strconv.FormatInt(lastOK, 10) + "." + strconv.FormatUint(polVer, 10)
+	s.verMu.RLock()
+	if s.verKey == lastOK && s.verPol == polVer && s.verStr != "" {
+		str := s.verStr
+		s.verMu.RUnlock()
+		return str
+	}
+	s.verMu.RUnlock()
+	str := strconv.FormatInt(lastOK, 10) + "." + strconv.FormatUint(polVer, 10)
+	s.verMu.Lock()
+	s.verKey = lastOK
+	s.verPol = polVer
+	s.verStr = str
+	s.verMu.Unlock()
+	return str
 }
 
 // cacheKey 组装带数据版本的缓存键。
 func (s *Server) cacheKey(kind string, parts ...string) string {
-	key := kind + "|" + s.dataVersion()
+	version := s.dataVersion()
+	size := len(kind) + len(version) + 1
 	for _, p := range parts {
-		key += "|" + p
+		size += 1 + len(p)
 	}
-	return key
+	var b strings.Builder
+	b.Grow(size)
+	b.WriteString(kind)
+	b.WriteByte('|')
+	b.WriteString(version)
+	for _, p := range parts {
+		b.WriteByte('|')
+		b.WriteString(p)
+	}
+	return b.String()
 }
 
 // serveCachedJSON 用缓存承载「构建 → 序列化」的完整结果。
@@ -165,9 +218,9 @@ func (s *Server) serveCachedJSON(w http.ResponseWriter, r *http.Request, code, k
 // invalidateCache 清空接口缓存（策略保存、配额重置等写操作后调用）。
 // 注意：策略版本号变化已能让缓存 key 自动失效，这里是显式的双保险。
 func (s *Server) invalidateCache() {
-	if s.cacheInst != nil {
-		s.cacheInst.invalidate()
-	}
+	// 与 cacheFor 共用 sync.Once，避免 cacheInst 在惰性初始化时被并发无锁读写。
+	// 策略写操作很少，必要时提前创建一个空缓存的成本可以忽略。
+	s.cacheFor().invalidate()
 }
 
 // 编译期断言：policy 版本号接口必须存在（防止重构时被误删导致缓存永不失效）。

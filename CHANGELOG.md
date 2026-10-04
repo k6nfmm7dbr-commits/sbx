@@ -6,6 +6,49 @@
 
 本文件记录**用户可见**与**运维相关**的变更。逐条实现细节见 git log。
 
+## v3.0.18 — 第三轮审计：缓存 no-op 路径、修复缓存并发故障
+
+在 v3.0.17 基础上重新审查 CLI、collector 定时循环、nft v4/v6 生成、缓存惰性初始化、
+API 流式导出、节点/配置 JSON 解码与 reconcile no-op 路径。保留 v4/v6 空 allow-set
+语义、双 nft 表隔离及外部删表探测，不做会改变 enforcement 行为的简化。
+
+- **消除 nft no-op 热路径重复工作**：节点端口形态摘要 `nodesShape` 按严格 loader
+  返回的不可变 slice 身份缓存；quota/rate 的 `node→port` 展开延迟到确定需要写 nft
+  之后，且合并为一次节点列表遍历。无状态变化时不再解析端口或创建端口 map。
+- **未启用 IP limit 时跳过 allowSet 构造**：仍完整维护 slot / online IP / observed 状态，
+  但不再为每个节点每轮生成一张随后丢弃的 nft allow map；对外的 `Reconcile` 原返回契约不变。
+- **修复 API cache 惰性初始化的数据竞争**：`invalidateCache` 原先无锁读取 `cacheInst`，
+  与并发 `cacheFor` 初始化存在 race 窗口；现在与读取路径统一经 `sync.Once`。
+- **修复 singleflight panic 卡死**：缓存 loader panic 时先删除 inflight、通知等待者，
+  再重抛由 HTTP recover middleware 处理；同 key 后续请求可重试。新增并发回归测试。
+- **降低 TTL 清理成本**：cache miss 不再每次扫描全部 entry；按 TTL 间隔批量清理，
+  命中的单项仍即时检查过期。过期未访问 key 最多多驻留约一个 TTL，map 不会无界增长。
+- **降低 API 缓存键分配**：缓存 `dataVersion` 字符串，并用 `strings.Builder` 一次分配
+  组装 key；真机微基准分别由 102ns/23B/2 allocs→12.5ns/0B/0 allocs，及
+  130ns/64B/3 allocs→80ns/32B/1 alloc。
+- **减少 JSON 输入复制**：配置与节点 `DecodeJSON` 直接用 `bytes.Reader`，去除整文件
+  `[]byte→string` 复制。
+- **导出稳定性**：CSV 使用请求 context 运行 SQLite query，客户端断开可取消读取；记录
+  rows.Scan/rows.Err 中断日志，避免响应头发送后数据库错误静默变成“成功下载”。
+- **瘦身**：删除 CLI links 中无效的 `host6Given` 状态及占位引用；内联仅单调用的
+  `unwrapMsg`，删除已无意义的编译引用占位；修正文档中 IP slot 的过期 TTL 描述。
+
+### 真机数据
+
+Debian 12 / Go 1.27.1 / 2 核测试机：50 节点 × 50 flow，稳态 reconcile
+`nodesShape` **23.5µs/4.86KB/252 allocs → 6.6ns/0B/0 allocs**；nft 端口映射旧
+no-op 工作 **1.14µs/208B/3 allocs**，新 `applyEnforcement` no-op **182ns/0B/0 allocs**。
+未启用 IP limit 但仍维护在线 IP 的 slot 稳态：50 IP **11.3µs/3160B/5 allocs →
+8.2µs/1280B/1 alloc**；250 IP **55.8µs/19.8KB/5 allocs → 43.1µs/6.1KB/1 alloc**。
+最终 reconcile（2000x）：50×10 **0.825ms/264KB/1600 allocs**；50×50
+**3.277ms/0.956MB/1900 allocs**，相对 v3.0.17 同机基准分别少约 252/253 allocs。
+
+60s 端到端：CPU **0.73% 单核**、RSS **24.5MB**；live p50/p90 **1.8/2.1ms**，
+summary **2.2/2.7ms**，daily **7.5ms**。与既有真机结果同量级；RSS 有 Go heap
+高水位波动，不宣称内存驻留下降。
+
+
+
 ## v3.0.17 — 二次审计：减少 reconcile 重复工作与维护面
 
 在 v3.0.16 profile 优化后的代码上再次做全仓 deadcode / vet / race / 真机 A/B

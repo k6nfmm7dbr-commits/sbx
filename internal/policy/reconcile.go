@@ -39,7 +39,7 @@ func (s *Service) reconcile(ctx context.Context) error {
 	s.runMu.Lock()
 	defer s.runMu.Unlock()
 
-	nodeList, err := nodes.LoadPanelNodesStrict(s.nodesPath())
+	nodeList, err := nodes.LoadPanelNodesStrict(s.nodesFile)
 	if err != nil {
 		// 关键：不调用 applyEnforcement，不清空 states —— 上一轮阻断继续有效。
 		return fmt.Errorf("nodes.json 不可用, 已保持上一轮策略 enforcement 不变: %w", err)
@@ -203,7 +203,7 @@ func (s *Service) reconcile(ctx context.Context) error {
 		if cfg.IPLimitEnabled {
 			maxIPs = cfg.IPLimitMax
 		}
-		allowSet, hasRejected := ipState.Reconcile(nodeActive, nodeCandidates, maxIPs, now, s.ipIdle, s.rejectedTTL, s.provisionalTTL)
+		allowSet, hasRejected := ipState.reconcile(nodeActive, nodeCandidates, maxIPs, now, s.ipIdle, s.rejectedTTL, s.provisionalTTL, cfg.IPLimitEnabled)
 
 		// 「在线 IP」= 已建立（非 provisional）的 granted 数量。由下一步 snapshot
 		// 同一遍 Slots 遍历得到，避免再单独扫描一次。

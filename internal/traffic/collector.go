@@ -478,7 +478,7 @@ func (c *Collector) Run(ctx context.Context) {
 		err := c.Tick(ctx)
 		if err != nil {
 			if firewall.IsLookup(err) {
-				c.setError("计数器不存在: " + unwrapMsg(err))
+				c.setError("计数器不存在: " + err.Error())
 				nowSec := time.Now().Unix()
 				c.mu.Lock()
 				due := nowSec-c.repairAt > 30
@@ -509,5 +509,3 @@ func (c *Collector) Run(ctx context.Context) {
 		}
 	}
 }
-
-func unwrapMsg(err error) string { return err.Error() }

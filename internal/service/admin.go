@@ -332,5 +332,3 @@ func joinOrNone(s []string) string {
 	}
 	return out
 }
-
-var _ = config.AppDir // 引用避免误删 import

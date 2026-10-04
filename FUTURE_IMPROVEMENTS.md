@@ -638,3 +638,82 @@ v3.0.15 基线（1.189ms/404KB/3624 与 5.963ms/1.538MB/8141），累计降幅�
   长生命周期关闭/连接重建复杂度高于收益；
 - 大范围 map/slice 池化：会延长对象生命周期、增加并发/清空错误风险，当前
   profile 已将大头降到 buildActivity/runtime map，继续池化需先有真实高连接数数据。
+
+
+## 21. v3.0.18 第三轮全面审计：缓存稳定性与 no-op 热路径
+
+### 21.1 覆盖范围
+
+按本轮要求复查 nodes CLI 参数解析、collector 定时循环、nft 生成的 v4/v6 set、
+`sbx_traffic` / `sbx_policy` 表隔离、lazy cache 初始化、API singleflight/TTL、
+CSV 流式导出、nodes/config JSON 读取、策略 no-op enforcement 与 reconcile 基准。
+
+确认并保留的语义：
+
+- 受限节点的 IPv4/IPv6 allow set 必须同时存在。某一族为空时空 set 表示该族无已授权 IP；
+  删除“空族”set 或相应规则会改变 drop 语义，因此未做过滤简化。
+- 两张 nft 表仍分别属于流量计数与策略 enforcement；生成器只 delete/create 自有表，
+  不 flush ruleset。外部删策略表探测仍保留（10s 探测节流），不能因 no-op 优化而取消。
+- Collector 的 deadline 循环在长暂停后重新对齐当前时钟；使用一次性 timer 并在取消时 Stop，
+  不需要换成 ticker 或保留后台定时 goroutine。
+- `parseArgs` 重复 flag 延续 last-value-wins 行为，不改 CLI 兼容性；`host6Given` 只被赋值后
+  空引用，移除不改变显式空 host6 与默认 host6 的分支行为。
+
+### 21.2 稳定性修复
+
+1. **Server cache lazy-init race**：旧 `invalidateCache()` 在未经过 `cacheOnce` 的情况下读取
+   `cacheInst`，与并发 `cacheFor()` 初始化构成真正的未同步读写。现在失效路径统一调用
+   `cacheFor().invalidate()`；策略写操作很少，首次可能多建一个空 cache，换取正确同步。
+   新增多 goroutine 初始化/失效 race 测试。
+2. **singleflight loader panic**：panic 若直接逸出，外层 HTTP recover 虽能结束 leader request，
+   但旧 inflight entry 和 WaitGroup 永不完成，所有同 key 请求将永久阻塞。现在先删除 inflight、
+   把 panic 错误通知等待者并 Done，再重抛给现有 HTTP recover。新增 waiter 解阻与后续重试测试。
+3. **cache TTL sweep**：每个 miss 都扫描全部缓存项；许多 query key 在短窗口出现时会产生 O(N²)
+   的清理比较。改为每 TTL 批量 sweep，过期项单 key 命中仍立即判 miss；未访问过期项额外驻留
+   不超过约一个 TTL。新增过期 key 回收测试。
+4. **CSV 导出**：SQLite query 接入 `r.Context()`；扫描/迭代错误在响应已开始后无法重写状态码，
+   现在记录结构化 warning；客户端取消时不误报数据库故障。
+
+### 21.3 性能与代码瘦身
+
+- `nodesShape` 基于严格加载器共享的不可变 nodes slice 身份缓存；与 `activityPortIndex` 使用
+  独立身份标记，避免一个缓存提前更新 slice 标记、导致另一个缓存误判命中的错误。
+- `applyEnforcement` 的 quota/rate 端口展开从 no-op 比较前移到真正要生成/应用 nft 之后；
+  并一次遍历 nodes 同时构造两类映射。保持策略 map 比较、shape 检测、外部删表自愈和节流顺序。
+- 未启用 IP limit 时，`NodeIPState` 仍维护 IP slots/Observed 供 UI 使用，但 production 路径不再
+  构造未消费的 nft allowSet map；公开 `Reconcile` 仍保持原有返回契约。
+- `/api` cache version 字符串重用，`cacheKey` 用预留容量的 Builder 一次构建。
+- `nodes.DecodeJSON` 与 `config.decodeConfig` 从 `strings.NewReader(string(data))` 改为
+  `bytes.NewReader(data)`，移除整文件 byte→string 复制。
+- 移除无效 `host6Given`、`unwrapMsg` 一次性包装和陈旧的编译占位；保留被测试直接调用的
+  `grantedCount` / `activeGrantedCount` 等测试契约函数。
+- service.go 顶部 IP slot 说明从旧 120s 描述修正为当前 60s flow idle grace / 10s provisional TTL。
+
+真机（Debian 12 / Go 1.27.1 / AMD EPYC 7K62）微基准，固定节点/输入：
+
+| 路径 | 原工作 | 新工作 |
+|---|---:|---:|
+| 50 节点 nodesShape | 23.5µs / 4.86KB / 252 allocs | 6.6ns / 0B / 0 allocs（稳态 cache hit）|
+| 限速 no-op 端口展开 | 1.14µs / 208B / 3 allocs | applyEnforcement no-op 182ns / 0B / 0 allocs |
+| dataVersion | 102ns / 23B / 2 allocs | 12.5ns / 0B / 0 allocs |
+| cache key（daily+days+scope）| 130ns / 64B / 3 allocs | 80ns / 32B / 1 alloc |
+| Slot 稳态 50 IP（在线展示、IP limit 关闭）| 11.3µs / 3160B / 5 allocs | 8.2µs / 1280B / 1 alloc |
+| Slot 稳态 250 IP（在线展示、IP limit 关闭）| 55.8µs / 19.8KB / 5 allocs | 43.1µs / 6.1KB / 1 alloc |
+
+50 节点×flow 的 reconcile（benchtime=2000x）：v3.0.17 为 50×10 **0.851ms /
+269KB / 1852 allocs**、50×50 **3.408ms / 0.961MB / 2153 allocs**；本版为
+50×10 **0.825ms / 264KB / 1600 allocs**、50×50 **3.277ms / 0.956MB / 1900 allocs**。
+主要稳定收益为每轮少约 252–253 allocs，CPU 时间小幅变化不夸大。
+
+端到端 60s（50 节点×1095 天历史）：CPU **0.73% 单核**、RSS **24.5MB**；
+`/api/live` p50/p90 1.8/2.1ms，summary 2.2/2.7ms，daily 7.5ms。RSS 与 Go heap 高水位
+受进程预热影响，30s 初测 28.7MB、60s 24.5MB；不声称 RSS 降低。
+
+### 21.4 验证
+
+- 真机 `go vet ./...`、`go test -count=1 ./...`、`CGO_ENABLED=1 go test -race -count=1 ./...` 全通过；
+- baseline 61/0；安装器 checksum/commit/installer/dist/hardening 各流程断言全部通过；
+- shell 模板已与 sbx.sh 同步；CSV 响应、CLI nodes、nodes/config strict JSON、策略 v4/v6 与表语义回归通过。
+- shellcheck 0.10 本地对 baseline/远程脚本检查时返回已有 `SC2034` / `SC2319` 警告；
+  安装器大文件检查在 iSH 超时。本轮没有修改 shell 逻辑（仅同步版本常量），不能把本地
+  shellcheck 结果计作通过；GitHub CI 的 shellcheck 结果仍是发布门禁。

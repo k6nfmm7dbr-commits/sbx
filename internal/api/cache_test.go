@@ -1,7 +1,9 @@
 package api
 
 import (
+	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -178,5 +180,123 @@ func TestSummaryEndpointServedFromCache(t *testing.T) {
 	_, _, d2 := getBody(t, ts.URL+"/api/daily?days=7")
 	if d1 != d2 {
 		t.Errorf("daily 两次响应不一致")
+	}
+}
+
+// loader panic 也必须释放 singleflight 等待者并清除 inflight，避免单个异常
+// 请求导致同 key 后续请求永久阻塞。
+func TestCacheLoaderPanicReleasesWaiters(t *testing.T) {
+	c := newTTLCache(time.Minute)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	leaderDone := make(chan struct{})
+	go func() {
+		defer close(leaderDone)
+		defer func() { _ = recover() }()
+		_, _ = c.load("panic", func() (any, error) {
+			close(started)
+			<-release
+			panic("test loader panic")
+		})
+	}()
+	<-started
+	waiterDone := make(chan error, 1)
+	go func() {
+		_, err := c.load("panic", func() (any, error) {
+			return nil, errors.New("waiter incorrectly ran loader")
+		})
+		waiterDone <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+	select {
+	case <-leaderDone:
+	case <-time.After(time.Second):
+		t.Fatal("leader panic did not return")
+	}
+	select {
+	case err := <-waiterDone:
+		if err == nil || !strings.Contains(err.Error(), "cache loader panic") {
+			t.Fatalf("waiter should receive loader panic error, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("singleflight waiter blocked forever after loader panic")
+	}
+	// inflight 已清理；后续同 key 请求可以重新执行 loader。
+	if got, err := c.load("panic", func() (any, error) { return "recovered", nil }); err != nil || got != "recovered" {
+		t.Fatalf("retry after panic failed: got=%v err=%v", got, err)
+	}
+}
+
+var benchmarkVersionSink string
+
+func BenchmarkDataVersionCached(b *testing.B) {
+	s := &Server{}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		benchmarkVersionSink = s.dataVersion()
+	}
+}
+
+func BenchmarkDataVersionFormat(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		lastOK, polVer := int64(i), uint64(i)
+		benchmarkVersionSink = strconv.FormatInt(lastOK, 10) + "." + strconv.FormatUint(polVer, 10)
+	}
+}
+
+func BenchmarkCacheKeyBuilder(b *testing.B) {
+	s := &Server{}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		benchmarkVersionSink = s.cacheKey("daily", "365", "node:123456")
+	}
+}
+
+func BenchmarkCacheKeyConcat(b *testing.B) {
+	s := &Server{}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		key := "daily|" + s.dataVersion()
+		key += "|365"
+		key += "|node:123456"
+		benchmarkVersionSink = key
+	}
+}
+
+func TestCacheExpiredKeysAreReclaimedOnScheduledSweep(t *testing.T) {
+	c := newTTLCache(25 * time.Millisecond)
+	if _, err := c.load("old", func() (any, error) { return "old", nil }); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(40 * time.Millisecond)
+	if _, err := c.load("new", func() (any, error) { return "new", nil }); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.size(); got != 1 {
+		t.Fatalf("scheduled sweep should reclaim expired key, size=%d", got)
+	}
+}
+
+func TestConcurrentCacheInitializationAndInvalidation(t *testing.T) {
+	s := &Server{}
+	var wg sync.WaitGroup
+	for i := 0; i < 24; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				if i%2 == 0 {
+					s.cacheFor()
+				} else {
+					s.invalidateCache()
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	if s.cacheFor() == nil {
+		t.Fatal("cache was not initialized")
 	}
 }

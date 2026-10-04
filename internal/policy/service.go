@@ -9,11 +9,12 @@
 // 达限由 nftables 在内核执行，只针对目标节点；绝不停 sing-box、不删节点、不改凭据。
 //
 // IP Limit 的 slot 语义（关键）：
-//   - 每节点维护 slots[nodeID] = ip -> lastSeen；
-//   - active = len(slots)（已获 slot 的 IP 数，非当前 /proc 里的连接数）；
-//   - 新 IP 出现且 len(slots) < max 才授予 slot；否则被拒（nft drop）；
-//   - slot IP 离线超过 TTL（默认 120s）释放，之后新 IP 才能补位；
-//   - 降低 max 不立即踢在线 IP，只在自然离线后收紧（符合产品要求）。
+//   - 每节点维护 Slots[nodeID] = ip -> admission 状态（已建立或 provisional）；
+//   - 面板在线 IP 数只统计非 provisional slot，不等于当前 socket 数；
+//   - 新 IP 出现且容量允许才授予 slot；否则拒绝（nft drop）；
+//   - 半开/字节静默 flow 在 60s idle grace 内保留；flow 消失或 idle 超时后释放；
+//   - 仅 SYN 候选的 provisional slot 默认 10s 未建立即释放；
+//   - 降低 max 不立即踢在线 IP，只在自然释放后收紧（符合产品要求）。
 package policy
 
 import (
@@ -124,6 +125,11 @@ type Service struct {
 	// 不可变 slice；原子替换得到新 slice 时指针变化，自动失效。
 	activityNodes    []nodes.Node
 	activityPortNode map[int]string
+
+	// 节点 ID→端口形态摘要缓存（nodesShape）；身份标记独立于 activityNodes，
+	// 两个缓存不能互相覆盖失效判断。仅 reconcile/runMu 路径访问。
+	shapeNodes []nodes.Node
+	shapeCache string
 
 	// flow tracker：conntrack flow 状态，runMu 保护。
 	flows     map[flowKey]flowState

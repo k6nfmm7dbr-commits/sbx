@@ -198,44 +198,14 @@ func (s *Service) applyEnforcement(ctx context.Context, quotaBlocked map[string]
 
 	needEnforce := len(quotaBlocked) > 0 || len(ipBlocked) > 0 || len(rateLimited) > 0
 
-	quotaPorts := map[int64]bool{}
-	for id := range quotaBlocked {
-		for _, n := range list {
-			if nodes.IDString(n) == id {
-				for _, r := range nodes.ParsePorts(n) {
-					for p := r[0]; p <= r[1]; p++ {
-						quotaPorts[p] = true
-					}
-				}
-			}
-		}
-	}
-	// 限速端口映射：nodeID -> mbps 展开为 port -> mbps。
-	ratePorts := map[int64]int{}
-	for id, mbps := range rateLimited {
-		if mbps <= 0 {
-			continue
-		}
-		for _, n := range list {
-			if nodes.IDString(n) == id {
-				for _, r := range nodes.ParsePorts(n) {
-					for p := r[0]; p <= r[1]; p++ {
-						ratePorts[p] = mbps
-					}
-				}
-			}
-		}
-	}
-
 	// 与上次应用状态比较，无变化则跳过（幂等，避免每次 reconcile 重写 nft）。
 	quotaChanged := !sameQuota(s.appliedQuota, quotaBlocked)
 	ipKeysChanged := !sameIPLimitKeys(s.appliedIPLimit, ipBlocked)
 	ipContentChanged := !sameIPLimits(s.appliedIPLimit, ipBlocked)
 	rateChanged := !sameRate(s.appliedRate, rateLimited)
-	// 端口形态比较：节点改端口但 allow set 不变时，appliedQuota/appliedIPLimit
-	// 比较完全看不出来（规则按端口生成，比较键却是节点 id）——必须单独跟踪，
-	// 否则 nft 里会留下指向旧端口的死规则、新端口失去 enforcement。
-	shape := nodesShape(list)
+	// 节点端口变化即使 applied nodeID 集合不变也必须重写 nft，否则旧端口仍有死规则。
+	// nodesShape 只在节点文件 slice 身份变化时重新计算，避免每轮重复解析端口/拼接。
+	shape := s.cachedNodesShape(list)
 	// 只有「当前有需要 enforcement 的规则」或「上次应用过非空规则」时，
 	// 端口漂移才有意义；两边都为空时端口怎么变都不需要重写。
 	shapeChanged := shape != s.appliedShape &&
@@ -258,6 +228,30 @@ func (s *Service) applyEnforcement(ctx context.Context, quotaBlocked map[string]
 		return nil // 合并到后续轮次：目标态持续不一致，间隔一到下一轮即应用
 	}
 
+	// 端口映射只在确定本轮确实要应用时才展开。原来这些循环位于无变化判断
+	// 之前：持久限速节点每秒都会重复遍历 nodeList、ParsePorts 并构造 map，
+	// 即使最终直接 return。现在一次遍历节点列表，同时构造 quota/rate port map，
+	// no-op reconcile 完全跳过这部分 CPU 与分配。
+	quotaPorts := make(map[int64]bool, len(quotaBlocked))
+	ratePorts := make(map[int64]int, len(rateLimited))
+	for _, n := range list {
+		id := nodes.IDString(n)
+		_, quota := quotaBlocked[id]
+		mbps, rate := rateLimited[id]
+		if !quota && (!rate || mbps <= 0) {
+			continue
+		}
+		for _, r := range nodes.ParsePorts(n) {
+			for p := r[0]; p <= r[1]; p++ {
+				if quota {
+					quotaPorts[p] = true
+				}
+				if rate && mbps > 0 {
+					ratePorts[p] = mbps
+				}
+			}
+		}
+	}
 	script := genPolicyNFT(quotaPorts, ipBlocked, ratePorts, list)
 	if err := os.MkdirAll(s.appDir, 0o755); err != nil {
 		return err
@@ -297,6 +291,23 @@ func (s *Service) applyEnforcement(ctx context.Context, quotaBlocked map[string]
 // nodesShape 生成「节点 id→端口集合」的规范化摘要（排序、确定输出），
 // 用于感知节点端口变化——规则文本按端口生成，但 applied 比较的键是节点 id，
 // 不看端口就会在节点改端口后跳过应用，留下指向旧端口的死规则。
+//
+// cachedNodesShape 是它的 memo 化包装：节点文件没变（strict loader 返回同一
+// 个不可变 slice）时直接复用上次结果，避免每轮 reconcile 白付一次字符串拼接
+// 与多次中间分配。
+//
+// 注意：身份标记 shapeNodes 与 activityPortIndex 的 activityNodes 相互独立——
+// 两个缓存各自记账，先算谁都不会把另一个的缓存错标成「仍有效」。
+func (s *Service) cachedNodesShape(list []nodes.Node) string {
+	if len(list) == len(s.shapeNodes) &&
+		(len(list) == 0 || &list[0] == &s.shapeNodes[0]) && s.shapeCache != "" {
+		return s.shapeCache
+	}
+	s.shapeNodes = list
+	s.shapeCache = nodesShape(list)
+	return s.shapeCache
+}
+
 func nodesShape(list []nodes.Node) string {
 	parts := make([]string, 0, len(list))
 	for _, n := range list {

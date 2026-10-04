@@ -48,3 +48,24 @@ func BenchmarkSlotReconcileAdmission(b *testing.B) {
 		})
 	}
 }
+
+func BenchmarkSlotReconcileNoAllowSet(b *testing.B) {
+	for _, count := range []int{50, 250} {
+		b.Run(fmt.Sprintf("ips=%d", count), func(b *testing.B) {
+			st := newIPState()
+			active := make(map[string]IPActivity, count)
+			for i := 0; i < count; i++ {
+				ip := fmt.Sprintf("203.0.113.%d", i%254+1)
+				active[ip] = IPActivity{IP: ip, TCPSessions: 1, Traffic: true}
+			}
+			now := time.Now()
+			st.reconcile(active, nil, 0, now, time.Minute, time.Minute, 10*time.Second, false)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				now = now.Add(time.Second)
+				st.reconcile(active, nil, 0, now, time.Minute, time.Minute, 10*time.Second, false)
+			}
+		})
+	}
+}

@@ -43,7 +43,7 @@ func (s *Store) CertDir() string   { return filepath.Join(s.AppDir, "certs") }
 
 // DecodeJSON 以保留数字字面量的方式解析 JSON。
 func DecodeJSON(data []byte) (any, error) {
-	dec := json.NewDecoder(strings.NewReader(string(data)))
+	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
 	var v any
 	if err := dec.Decode(&v); err != nil {

@@ -4,6 +4,7 @@
 package config
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -150,7 +151,7 @@ func load(path string, strict bool) (*Config, error) {
 // 多个 JSON 值视为损坏）。
 func decodeConfig(data []byte) (map[string]any, error) {
 	var file map[string]any
-	dec := json.NewDecoder(strings.NewReader(string(data)))
+	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
 	if err := dec.Decode(&file); err != nil {
 		return nil, err

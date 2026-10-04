@@ -54,6 +54,13 @@ type Server struct {
 	sseMu    sync.Mutex
 	sseVer   uint64
 	sseCache map[string]string
+
+	// verMu 保护 dataVersion 串缓存：高频 API 请求共用同一版本字符串，
+	// 避免每次重新 FormatInt + FormatUint + 拼接。读多写少，用 RWMutex。
+	verMu  sync.RWMutex
+	verKey int64  // 上次 FormatInt 的 lastOK
+	verPol uint64 // 上次 FormatUint 的 polVer
+	verStr string // 已生成的 "lastOK.polVer" 串
 }
 
 // cacheFor 返回缓存实例（懒初始化，保证零值 Server 可用）。

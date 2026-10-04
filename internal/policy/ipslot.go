@@ -79,6 +79,13 @@ func lastActive(lastSeen, lastTraffic time.Time) time.Time {
 //
 // 返回 allowSet（所有 slot，含 provisional）与是否有新拒绝。
 func (st *NodeIPState) Reconcile(active, candidates map[string]IPActivity, maxIPs int, now time.Time, idle, rejectedTTL, provisionalTTL time.Duration) (allowSet map[string]bool, hasRejected bool) {
+	return st.reconcile(active, candidates, maxIPs, now, idle, rejectedTTL, provisionalTTL, true)
+}
+
+// reconcile 执行 slot 状态更新。production reconcile 在未启用 IP limit 时不需要
+// nft allowSet，因此可传 false 避免每个节点每轮构造一张随后被丢弃的 map；导出
+// Reconcile 包装仍保持原有返回契约（总是返回所有 slots）。
+func (st *NodeIPState) reconcile(active, candidates map[string]IPActivity, maxIPs int, now time.Time, idle, rejectedTTL, provisionalTTL time.Duration, buildAllowSet bool) (allowSet map[string]bool, hasRejected bool) {
 	st.MaxIPs = maxIPs
 
 	type want struct {
@@ -245,9 +252,12 @@ func (st *NodeIPState) Reconcile(active, candidates map[string]IPActivity, maxIP
 	}
 
 	// 6) allow set = 所有 slot（含 provisional，保证候选手握能通过 nft）。
-	allowSet = make(map[string]bool, len(st.Slots))
-	for ip := range st.Slots {
-		allowSet[ip] = true
+	// IP limit 未启用时 production 调用方不消费 allowSet，跳过这张临时 map。
+	if buildAllowSet {
+		allowSet = make(map[string]bool, len(st.Slots))
+		for ip := range st.Slots {
+			allowSet[ip] = true
+		}
 	}
 
 	// 7) Observed GC：无 slot、无拒绝、久未活跃的观察项清理。
@@ -303,10 +313,12 @@ func (st *NodeIPState) touchObserved(ip string, a IPActivity, now time.Time) str
 	return o.IP
 }
 
-// grantedCount 返回持有 slot 的 IP 数（含 provisional）。
+// grantedCount 返回持有 slot 的 IP 数（含 provisional）。仅供测试引用；
+// reconcile 改用 buildNodeSnapshots 的 snap.Granted（一次遍历同时生成）。
 func (st *NodeIPState) grantedCount() int { return len(st.Slots) }
 
-// activeGrantedCount 返回已建立（非 provisional）的 granted IP 数，即「在线 IP」。
+// activeGrantedCount 返回已建立（非 provisional）的 granted IP 数。
+// 仅供测试引用；reconcile 改用 buildNodeSnapshots 的 snap.Granted。
 func (st *NodeIPState) activeGrantedCount() int {
 	n := 0
 	for _, s := range st.Slots {

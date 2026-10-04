@@ -221,3 +221,19 @@ func TestObservedGC(t *testing.T) {
 		t.Fatal("A 超 idle 且不在线应被 GC")
 	}
 }
+
+func TestReconcileCanSkipUnusedAllowSet(t *testing.T) {
+	st := newIPState()
+	active := map[string]IPActivity{"198.51.100.10": act("198.51.100.10", 1, 0, true)}
+	allow, rejected := st.reconcile(active, nil, 0, testNow, hour, ttl, prov, false)
+	if allow != nil || rejected {
+		t.Fatalf("when allow set is unused, expected nil/false; got %#v/%v", allow, rejected)
+	}
+	if len(st.Slots) != 1 || st.Slots["198.51.100.10"] == nil {
+		t.Fatalf("skipping allow set must still reconcile slots: %#v", st.Slots)
+	}
+	allow, rejected = st.Reconcile(active, nil, 0, testNow.Add(time.Second), hour, ttl, prov)
+	if rejected || len(allow) != 1 || !allow["198.51.100.10"] {
+		t.Fatalf("public Reconcile must preserve allow-set contract: %#v/%v", allow, rejected)
+	}
+}

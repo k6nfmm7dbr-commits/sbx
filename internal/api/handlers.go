@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -201,7 +202,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	// daily 表无清理策略、随运行年限增长（50 节点 × 3 年 ≈ 5.5 万行），
 	// 旧实现「全表读进 []exportRow + strings.Builder 拼完再写」在大库上有
 	// 数 MB 到数十 MB 的瞬时内存尖峰；流式后驻留内存与单行等价。
-	rows, err := s.db.Query(
+	rows, err := s.db.QueryContext(r.Context(),
 		"SELECT day,scope,rx,tx,rx_pkts,tx_pkts FROM daily ORDER BY day,scope")
 	if err != nil {
 		s.failInternal(w, r, codeExportFailed, err)
@@ -237,7 +238,9 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		var e exportRow
 		if err := rows.Scan(&e.day, &e.scope, &e.rx, &e.tx, &e.rxPkts, &e.txPkts); err != nil {
 			// 响应头已发出，无法改写状态码：截断输出即"导出不完整"，
-			// CSV 语义上比 500 更诚实（客户端拿到的就是残缺文件）。
+			// CSV 语义上比 500 更诚实（客户端拿到的就是残缺文件）。记录错误
+			// 供运维诊断，避免数据库扫描故障静默表现为成功下载。
+			slog.Warn("CSV 导出扫描中断", "error_code", codeExportFailed, "err", err)
 			return
 		}
 		line = line[:0]
@@ -255,6 +258,12 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		line = append(line, '\n')
 		if !writeLine(line) {
 			return
+		}
+	}
+	if err := rows.Err(); err != nil {
+		// QueryContext 会在请求断开时取消；客户端断开导致的取消无需再记成服务错误。
+		if r.Context().Err() == nil {
+			slog.Warn("CSV 导出查询中断", "error_code", codeExportFailed, "err", err)
 		}
 	}
 }
