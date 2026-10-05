@@ -119,10 +119,10 @@ func TestPanelNodeCRUDAndShareLinks(t *testing.T) {
 		}
 	}
 	code, deleted := doJSON(t, ts, http.MethodDelete, "/api/nodes/1?clear_history=1", "")
-	if code != http.StatusOK || deleted["deleted"] != "1" || deleted["history_cleared"] != true {
+	if code != http.StatusOK || deleted["deleted"] != "1" || deleted["history_cleared"] != true || deleted["cumulative_preserved"] != true {
 		t.Fatalf("delete with history clear failed: %d %#v", code, deleted)
 	}
-	for _, table := range []string{"daily", "totals", "samples"} {
+	for _, table := range []string{"daily", "samples"} {
 		var count int
 		if err := srv.db.QueryRow("SELECT COUNT(*) FROM " + table + " WHERE scope='node:1'").Scan(&count); err != nil {
 			t.Fatal(err)
@@ -130,6 +130,13 @@ func TestPanelNodeCRUDAndShareLinks(t *testing.T) {
 		if count != 0 {
 			t.Errorf("clear_history left %d rows in %s", count, table)
 		}
+	}
+	var totalsCount int
+	if err := srv.db.QueryRow("SELECT COUNT(*) FROM totals WHERE scope='node:1'").Scan(&totalsCount); err != nil {
+		t.Fatal(err)
+	}
+	if totalsCount != 1 {
+		t.Fatalf("cumulative totals must be preserved, count=%d", totalsCount)
 	}
 	b, _ = os.ReadFile(nodesFile)
 	if string(bytes.TrimSpace(b)) != "[]" {
@@ -298,7 +305,7 @@ func TestPanelDeleteReportsCandidateGenerationCause(t *testing.T) {
 	}
 }
 
-func TestPanelDeleteClearsHistoryByDefault(t *testing.T) {
+func TestPanelDeleteClearsDailyAndSamplesButKeepsTotalsByDefault(t *testing.T) {
 	ts, nodesFile, _, _, srv := newNodeCRUDTestServer(t)
 	code, _ := doJSON(t, ts, http.MethodPost, "/api/nodes", `{"type":"shadowsocks","name":"clear-history","port":8389}`)
 	if code != http.StatusOK {
@@ -314,10 +321,10 @@ func TestPanelDeleteClearsHistoryByDefault(t *testing.T) {
 		}
 	}
 	code, result := doJSON(t, ts, http.MethodDelete, "/api/nodes/1", "")
-	if code != http.StatusOK || result["history_cleared"] != true {
-		t.Fatalf("delete default should clear history: %d %#v", code, result)
+	if code != http.StatusOK || result["history_cleared"] != true || result["cumulative_preserved"] != true {
+		t.Fatalf("delete default should clear daily/samples but preserve cumulative: %d %#v", code, result)
 	}
-	for _, table := range []string{"daily", "totals", "samples"} {
+	for _, table := range []string{"daily", "samples"} {
 		var count int
 		if err := srv.db.QueryRow("SELECT COUNT(*) FROM " + table + " WHERE scope='node:1'").Scan(&count); err != nil {
 			t.Fatal(err)
@@ -325,6 +332,13 @@ func TestPanelDeleteClearsHistoryByDefault(t *testing.T) {
 		if count != 0 {
 			t.Errorf("default delete must clear %s history, count=%d", table, count)
 		}
+	}
+	var totalsCount int
+	if err := srv.db.QueryRow("SELECT COUNT(*) FROM totals WHERE scope='node:1'").Scan(&totalsCount); err != nil {
+		t.Fatal(err)
+	}
+	if totalsCount != 1 {
+		t.Fatalf("default delete must preserve cumulative totals, count=%d", totalsCount)
 	}
 	data, err := os.ReadFile(nodesFile)
 	if err != nil {
@@ -346,7 +360,7 @@ func TestPanelDeleteCanExplicitlyKeepHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	code, result := doJSON(t, ts, http.MethodDelete, "/api/nodes/1?clear_history=0", "")
-	if code != http.StatusOK || result["history_cleared"] != false {
+	if code != http.StatusOK || result["history_cleared"] != false || result["cumulative_preserved"] != true {
 		t.Fatalf("explicit clear_history=0 should preserve history: %d %#v", code, result)
 	}
 	var count int

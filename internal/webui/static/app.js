@@ -420,11 +420,11 @@ function showNodeFormError(message) {
 function deleteNodeConfig(id) {
   var n = findManageNode(id);
   if (!n) return;
-  var confirmation = window.prompt('即将删除节点“' + n.name + '”，并清除其累计、每日和采样流量历史，此操作不可恢复。\n请输入“我已确定”以继续删除：');
+  var confirmation = window.prompt('即将删除节点“' + n.name + '”。累计流量会保留；每日与采样流量历史将清除，此操作不可恢复。\n请输入“我已确定”以继续删除：');
   if (confirmation === null) return;
   if (confirmation.trim() !== '我已确定') { toast('验证文字不匹配，已取消删除'); return; }
   nodeRequest('/api/nodes/' + id, 'DELETE').then(function (d) {
-    toast(d.warning || (d.history_cleared ? '节点及全部历史流量已删除' : '节点已删除'));
+    toast(d.warning || (d.history_cleared ? '节点已删除；累计流量保留，每日与采样历史已清理' : '节点已删除；累计流量保留，其他历史未清除'));
     return refreshAfterNodeMutation();
   }).catch(function (e) { if (e.message !== '未登录') toast(e.message); });
 }

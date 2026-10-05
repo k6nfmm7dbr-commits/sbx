@@ -526,27 +526,27 @@ func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	historyCleared := false
 	if clearHistory {
-		if err := s.clearNodeHistory(r.Context(), id); err != nil {
+		if err := s.clearNodeDailyAndSampleHistory(r.Context(), id); err != nil {
 			if warning != "" {
 				warning += "; "
 			}
-			warning += "节点已删除，但历史流量清理失败；历史数据仍保留"
+			warning += "节点已删除，但每日/采样流量历史清理失败；累计流量已保留"
 		} else {
 			historyCleared = true
 		}
 	}
 	s.invalidateCache()
-	s.sendJSON(w, r, http.StatusOK, map[string]any{"deleted": id, "history_cleared": historyCleared, "warning": warning})
+	s.sendJSON(w, r, http.StatusOK, map[string]any{"deleted": id, "history_cleared": historyCleared, "cumulative_preserved": true, "warning": warning})
 }
 
-func (s *Server) clearNodeHistory(ctx context.Context, id string) error {
+func (s *Server) clearNodeDailyAndSampleHistory(ctx context.Context, id string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
 	scope := "node:" + id
-	for _, table := range []string{"daily", "totals", "samples"} {
+	for _, table := range []string{"daily", "samples"} {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE scope=?", scope); err != nil {
 			return err
 		}

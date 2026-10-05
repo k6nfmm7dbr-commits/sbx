@@ -779,3 +779,8 @@ CSV 流式导出、nodes/config JSON 读取、策略 no-op enforcement 与 recon
 
 - 删除节点前必须在文本输入框精确输入 `我已确定`；取消、空值或不匹配均在客户端终止，不发送 DELETE 请求。提示文本包含所选节点及累计/每日/采样历史将被同时清除。
 - 自动化静态断言确保删除流程只有一次 `window.prompt`、无按钮式 `window.confirm`。
+
+## 28. v3.0.28：节点删除保留累计流量
+
+- 删除节点默认清理 `daily` 与 `samples`，但不再删 `totals` 中该 node scope 的累计总额；API 返回 `cumulative_preserved: true`。
+- 面板文字确认改为说明累计流量保留、每日及采样历史清理；新 API 测试断言三张表按预期分别保留/清空。
