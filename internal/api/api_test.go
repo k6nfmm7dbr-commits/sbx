@@ -29,6 +29,10 @@ func (f *fakeSource) Snapshot() traffic.Status {
 	return st
 }
 
+func (f *fakeSource) StatusLite() traffic.Status {
+	return traffic.Status{Error: f.err, LastOK: f.lastOK, HasConns: f.hasConns}
+}
+
 func (f *fakeSource) BackendName() string { return f.backend }
 
 func newTestServer(t *testing.T, token string, src traffic.LiveSource,
@@ -407,5 +411,33 @@ func TestExportCSV(t *testing.T) {
 	if resp.Header.Get("Content-Type") != "text/csv; charset=utf-8" ||
 		resp.Header.Get("Content-Disposition") != "attachment; filename=sbx-traffic.csv" {
 		t.Error("CSV 响应头异常")
+	}
+}
+
+// 内嵌前端资源缓存：重复读取必须返回同一份只读切片（避免每次请求重新拷贝
+// app.js/style.css），且内容与非缓存路径逐字节一致；不存在的资源仍返回错误。
+func TestAssetBytesCachedAndImmutable(t *testing.T) {
+	a1, err := assetBytes("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a2, err := assetBytes("/app.js") // 前导斜杠必须归一到同一缓存键
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(a1) == 0 || &a1[0] != &a2[0] {
+		t.Fatal("assetBytes 未复用缓存切片")
+	}
+	// 内容仍必须是真实的前端脚本（缓存不得改变内容）。
+	if !strings.Contains(string(a1), "fmtRate") {
+		t.Fatal("app.js 内容异常")
+	}
+	if _, err := assetBytes("does-not-exist.js"); err == nil {
+		t.Fatal("不存在的资源应返回错误")
+	}
+	// 缓存命中的资源也必须逐字节稳定（防止返回被改写的共享缓冲）。
+	again, err := assetBytes("app.js")
+	if err != nil || string(again) != string(a1) {
+		t.Fatal("缓存命中后内容发生变化")
 	}
 }

@@ -19,8 +19,13 @@ type Counters struct {
 }
 
 // LiveSource 是 API 层获取采集器快照的最小接口（可为 nil，等价 collector=None）。
+//
+// StatusLite 是 Snapshot 的无分配版本（只含标量字段，不拷贝连接数 map）：
+// 缓存版本号与 /healthz 这类每个请求都要走的路径只用它，避免每次请求深拷贝
+// 整张连接数 map。
 type LiveSource interface {
 	Snapshot() Status
+	StatusLite() Status
 	BackendName() string
 }
 
@@ -156,10 +161,13 @@ func BuildSummary(cfg *config.Config, db *sql.DB, src LiveSource) (*Summary, err
 	}
 
 	for _, n := range list {
-		scope := "node:" + nodes.IDString(n)
+		// id/scope 每节点只拼接一次（旧实现把 "node:"+IDString 拼了两次，
+		// 且 IDString 也重复调用）。
+		id := nodes.IDString(n)
+		scope := "node:" + id
 		t := todayRows[scope]
 		a := totals[scope]
-		c := conns[nodes.IDString(n)]
+		c := conns[id]
 		sn := SummaryNode{
 			ID:       n["id"],
 			Name:     nodes.DisplayName(n),
@@ -167,7 +175,7 @@ func BuildSummary(cfg *config.Config, db *sql.DB, src LiveSource) (*Summary, err
 			Port:     n["port"],
 			Today:    countersOf(t),
 			Total:    countersOf(a),
-			Rate:     rates["node:"+nodes.IDString(n)],
+			Rate:     rates[scope],
 			ConnsTCP: c.TCP,
 			ConnsUDP: c.UDP,
 		}
@@ -244,10 +252,11 @@ func BuildLive(cfg *config.Config, db *sql.DB, src LiveSource) (*Live, error) {
 	}
 	l.ConnsTotal, l.ConnsUDPTotal = connsTotals(conns)
 	for _, n := range list {
-		c := conns[nodes.IDString(n)]
+		id := nodes.IDString(n)
+		c := conns[id]
 		l.Nodes = append(l.Nodes, LiveNode{
 			ID:       n["id"],
-			Rate:     rates["node:"+nodes.IDString(n)],
+			Rate:     rates["node:"+id],
 			ConnsTCP: c.TCP,
 			ConnsUDP: c.UDP,
 		})

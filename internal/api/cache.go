@@ -151,7 +151,10 @@ const cacheTTL = 2 * time.Second
 func (s *Server) dataVersion() string {
 	var lastOK int64
 	if s.src != nil {
-		lastOK = s.src.Snapshot().LastOK
+		// StatusLite 而非 Snapshot：本函数每个缓存请求都会调用，只需要一个
+		// 标量；Snapshot 会深拷贝整张连接数 map（50 节点 = 1 map + 100 指针），
+		// 在这里是纯粹的每请求浪费。
+		lastOK = s.src.StatusLite().LastOK
 	}
 	var polVer uint64
 	if s.policy != nil {

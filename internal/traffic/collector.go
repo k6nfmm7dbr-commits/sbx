@@ -102,6 +102,17 @@ func (c *Collector) Snapshot() Status {
 	}
 }
 
+// StatusLite 返回不含连接数 map 的轻量状态：只读标量字段，不做任何分配。
+//
+// 用途：缓存版本号（dataVersion）与 /healthz 只需要 Error / LastOK 两个标量，
+// 而 Snapshot 每次都会深拷贝整张连接数 map（50 节点 = 1 张 map + 100 个 *int）。
+// 这些路径每个 HTTP 请求都会走到，用 StatusLite 可以完全避免这份无谓分配。
+func (c *Collector) StatusLite() Status {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return Status{Error: c.lastError, LastOK: c.lastOKTs, HasConns: c.hasConns}
+}
+
 // cloneConns 深拷贝连接数 map（Conns 含 *int 指针字段，须复制指向值）。
 func cloneConns(m map[string]connection.Conns) map[string]connection.Conns {
 	if m == nil {

@@ -135,3 +135,69 @@ func TestLoadStrictCacheMissingFile(t *testing.T) {
 		t.Fatalf("不存在应返回 (nil,nil): n=%d err=%v", len(l), err)
 	}
 }
+
+// ---- 宽松加载（LoadPanelNodes）缓存：展示路径（/api/summary、/api/live） ----
+
+func TestLoadPanelNodesTolerantCacheHit(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "nodes.json")
+	writeNodes(t, p, twoNodes)
+	l1 := LoadPanelNodes(p)
+	l2 := LoadPanelNodes(p)
+	if len(l1) != 2 || len(l2) != 2 {
+		t.Fatalf("n1=%d n2=%d", len(l1), len(l2))
+	}
+	if &l1[0] != &l2[0] {
+		t.Fatal("宽松加载缓存未命中：两次返回不同切片")
+	}
+}
+
+// 内容变化必须失效重读，绝不返回陈旧列表（面板会显示已删除/已改名的旧节点）。
+func TestLoadPanelNodesTolerantCacheInvalidateOnChange(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "nodes.json")
+	writeNodes(t, p, twoNodes)
+	if l := LoadPanelNodes(p); len(l) != 2 {
+		t.Fatalf("期望 2, got %d", len(l))
+	}
+	time.Sleep(10 * time.Millisecond)
+	writeNodes(t, p, threeNodes)
+	if l := LoadPanelNodes(p); len(l) != 3 {
+		t.Fatalf("变化后应重读得到 3, got %d", len(l))
+	}
+}
+
+// 关键：宽松加载只缓存成功解析的结果。文件损坏时返回 nil，且**不得**用之前
+// 缓存的好结果掩盖损坏；修复后必须立刻恢复读取。
+func TestLoadPanelNodesTolerantCacheNoStaleOnCorruption(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "nodes.json")
+	writeNodes(t, p, twoNodes)
+	if l := LoadPanelNodes(p); len(l) != 2 {
+		t.Fatalf("首次期望 2, got %d", len(l))
+	}
+	time.Sleep(10 * time.Millisecond)
+	writeNodes(t, p, `{ broken json`)
+	if l := LoadPanelNodes(p); len(l) != 0 {
+		t.Fatalf("损坏时必须返回空列表而不是缓存的好结果, got %d", len(l))
+	}
+	time.Sleep(10 * time.Millisecond)
+	writeNodes(t, p, threeNodes)
+	if l := LoadPanelNodes(p); len(l) != 3 {
+		t.Fatalf("修复后应恢复读取 3, got %d", len(l))
+	}
+}
+
+// 严格缓存与宽松缓存互相独立：严格读取不得污染宽松结果（反之亦然）。
+func TestPanelCachesAreIndependent(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "nodes.json")
+	// 该文件对宽松加载合法（跳过非法元素），对严格加载非法（缺 id）。
+	writeNodes(t, p, `[{"id":1,"type":"vless","port":443},{"type":"vless","port":8443}]`)
+	if l := LoadPanelNodes(p); len(l) != 1 {
+		t.Fatalf("宽松加载应保留 1 个含 id 的节点, got %d", len(l))
+	}
+	if _, err := LoadPanelNodesStrict(p); err == nil {
+		t.Fatal("严格加载必须拒绝缺 id 的节点")
+	}
+	// 严格失败不得污染宽松缓存。
+	if l := LoadPanelNodes(p); len(l) != 1 {
+		t.Fatalf("严格失败后宽松结果应保持 1, got %d", len(l))
+	}
+}

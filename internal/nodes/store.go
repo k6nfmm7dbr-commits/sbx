@@ -130,7 +130,20 @@ func decodeNodesFile(data []byte) ([]Node, bool, error) {
 //
 // 注意：宽松读取仅限纯展示场景。所有会生成/覆盖 nftables 规则或改写
 // counter_state / epoch 的路径必须使用 LoadPanelNodesStrict。
+//
+// 性能：与 LoadPanelNodesStrict 同理走 (文件身份, mtime, size) 缓存——本函数在
+// /api/summary 与 /api/live 的每次构建中被调用（面板开着就每 2~8 秒一次），
+// 50 节点解析约 340µs/87KB/1386 allocs，属于纯重复工作。缓存语义与严格版一致：
+// 只缓存成功解析的结果，任何读失败/解析失败都返回 nil 且不写缓存；文件被替换
+// （原子 rename 或 mtime/size 变化）必然失效重读。返回的切片是只读共享视图，
+// 调用方不得改写（展示路径只遍历）。
 func LoadPanelNodes(path string) []Node {
+	fi, statErr := osStat(path)
+	if statErr == nil {
+		if list, ok := panelTolerantCache.lookup(path, fi); ok {
+			return list
+		}
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
@@ -155,6 +168,11 @@ func LoadPanelNodes(path string) []Node {
 		if _, has := m["id"]; has {
 			out = append(out, Node(m))
 		}
+	}
+	// 仅在成功解析后写缓存（与严格版同规则）：读失败/解析失败一律不缓存，
+	// 因此「文件损坏期间反复读取」不会被旧结果掩盖，也不会缓存损坏态。
+	if statErr == nil {
+		panelTolerantCache.put(path, fi, out)
 	}
 	return out
 }

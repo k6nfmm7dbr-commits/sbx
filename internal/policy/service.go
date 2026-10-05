@@ -388,14 +388,6 @@ type NodeIPSnapshot struct {
 	Rejected []IPEntry `json:"rejected"`
 }
 
-// buildNodeIPSnapshot 由 reconcile 在 runMu 下调用，把私有 NodeIPState
-// 转成不可变展示快照。切片/字段一律新建，发布后绝不再修改。
-// 生产路径由 buildNodeSnapshots 单遍构造；此包装保留给测试/诊断。
-func buildNodeIPSnapshot(nodeID string, st *NodeIPState) NodeIPSnapshot {
-	snap, _ := buildNodeSnapshots(nodeID, st)
-	return snap
-}
-
 // buildNodeSnapshots 单次遍历 Slots/Observed，同时生成 API snapshot 与 active IP
 // 列表。此前两者分别构造，各自扫描 Slots、查 Observed、做排序；合并后减少
 // 每个节点每个 reconcile 的重复 map 遍历与排序准备。

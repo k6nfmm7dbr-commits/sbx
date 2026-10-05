@@ -6,15 +6,29 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/k6nfmm7dbr-commits/sbx/internal/fsx"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/nodes"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/webui"
 )
 
-// assetBytes 从内嵌前端读取文件。
+// assetCache 缓存内嵌前端资源的字节内容（name -> []byte）。
+//
+// 为什么可以永久缓存：资源经 go:embed 编进二进制，进程生命周期内**不可能变化**
+// （升级=换二进制=换进程）。旧实现每次请求都 Open + 全量拷贝一份新副本：
+// app.js 33KB、style.css 28KB，每次页面加载/刷新都要多分配一份。
+//
+// 返回值是只读共享切片：调用方只把它写进 HTTP 响应，绝不修改。
+var assetCache sync.Map
+
+// assetBytes 从内嵌前端读取文件（结果进程内缓存）。
 func assetBytes(name string) ([]byte, error) {
-	f, err := webui.FS().Open(strings.TrimLeft(name, "/"))
+	name = strings.TrimLeft(name, "/")
+	if v, ok := assetCache.Load(name); ok {
+		return v.([]byte), nil
+	}
+	f, err := webui.FS().Open(name)
 	if err != nil {
 		return nil, err
 	}
@@ -23,7 +37,10 @@ func assetBytes(name string) ([]byte, error) {
 	if _, err := buf.ReadFrom(f); err != nil {
 		return nil, err
 	}
-	return buf.Bytes(), nil
+	data := buf.Bytes()
+	// 并发首读可能重复解析同一资源，结果逐字节相同，无害。
+	assetCache.Store(name, data)
+	return data, nil
 }
 
 // ---- 响应输出（对齐旧 _send/_json 的头与编码） ---------------------------

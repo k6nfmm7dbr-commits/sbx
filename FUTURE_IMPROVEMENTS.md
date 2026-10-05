@@ -784,3 +784,17 @@ CSV 流式导出、nodes/config JSON 读取、策略 no-op enforcement 与 recon
 
 - 删除节点默认清理 `daily` 与 `samples`，但不再删 `totals` 中该 node scope 的累计总额；API 返回 `cumulative_preserved: true`。
 - 面板文字确认改为说明累计流量保留、每日及采样历史清理；新 API 测试断言三张表按预期分别保留/清空。
+
+## 29. v3.0.29：第四轮审计（热路径分配削减）
+
+证据：`staticcheck ./...` 全仓仅剩 1 条 ST1005（中文错误串被误判首字母大写）与 3 条测试辅助函数 U1000，生产代码无新增告警；`go vet`、`go test`、`go test -race` 全绿。
+
+改动与理由：
+
+- `nodes.LoadPanelNodes`（宽松、展示路径）此前**无缓存**：每次 `/api/summary`、`/api/live` 构建都重新 read + JSON 解析。真机基准（50 节点）：未命中 321,850 ns / 83,481 B / 1374 allocs → 命中 1,252 ns / 272 B / 2 allocs。缓存规则与严格版完全一致（文件身份 + mtime + size；仅成功解析才写入），两套结果各持独立缓存，严格失败不会污染宽松结果（有回归测试）。
+- `Collector.StatusLite()`：`dataVersion()` 与 `/healthz` 只需标量，此前调用 `Snapshot()` 会深拷贝连接数 map（50 节点 = 1 map + 100 个 `*int`）。`LiveSource` 接口相应扩展，`/api/summary` 与 `/api/live` 仍用完整 `Snapshot()`（它们确实需要连接数）。
+- 静态资源：`assetBytes` 每次请求都重新 Open + 整份拷贝内嵌资源；改为进程内永久缓存（`go:embed` 内容在进程生命周期内不可变），返回只读共享切片。
+- `BuildSummary`/`BuildLive` 每节点只拼一次 `node:<id>`，避免重复 `IDString` 与两次拼接。
+- 删除无调用方的 `buildNodeIPSnapshot`。
+
+未做（有意）：nft 计数器 netlink 直读、SQLite 批量写合并、`Snapshot()` 改返回共享 map——前者需引入 netlink 依赖与内核特性探测（计数器正确性是最高优先级），后两者在实测中不是瓶颈且会改变既有契约/语义。`/api/daily` 的 GROUP BY 提前退出改写此前已实测否决（分配量不变），本轮未重复尝试。

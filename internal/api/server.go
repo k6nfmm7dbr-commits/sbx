@@ -201,7 +201,8 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, route string)
 		// 三个字段全部 omitempty：一切正常时输出与旧版完全一致。
 		resp := map[string]any{"ok": true}
 		if s.src != nil {
-			st := s.src.Snapshot()
+			// 探针只读标量字段：用 StatusLite 避免为每次探活深拷贝连接数 map。
+			st := s.src.StatusLite()
 			if st.Error != "" {
 				resp["collector_error"] = st.Error
 			}

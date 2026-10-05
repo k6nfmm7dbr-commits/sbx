@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func benchNodesFile(tb testing.TB, n int) string {
@@ -59,6 +60,43 @@ func BenchmarkLoadPanelNodesStrict(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+// BenchmarkLoadPanelNodesTolerant 是 /api/summary 与 /api/live 每次构建都调用的
+// 函数（面板开着就每 2~8 秒一次）。它走与严格版同样的 (文件身份, mtime, size)
+// 缓存，命中时只剩一次 stat。
+func BenchmarkLoadPanelNodesTolerant(b *testing.B) {
+	for _, n := range []int{5, 50, 200} {
+		p := benchNodesFile(b, n)
+		b.Run("nodes="+itoaB(n), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				list := LoadPanelNodes(p)
+				if len(list) != n {
+					b.Fatalf("n=%d", len(list))
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkLoadPanelNodesTolerantCold 是同一函数的**未命中缓存**成本：每轮用
+// os.Chtimes 改 mtime 强制失效（内容不变），等价于优化前每次调用都重新
+// read+JSON 解析的行为，用于 A/B 量化缓存收益。
+func BenchmarkLoadPanelNodesTolerantCold(b *testing.B) {
+	p := benchNodesFile(b, 50)
+	base := time.Now()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := os.Chtimes(p, base.Add(time.Duration(i)*time.Millisecond), base.Add(time.Duration(i)*time.Millisecond)); err != nil {
+			b.Fatal(err)
+		}
+		if list := LoadPanelNodes(p); len(list) != 50 {
+			b.Fatalf("n=%d", len(list))
+		}
 	}
 }
 
