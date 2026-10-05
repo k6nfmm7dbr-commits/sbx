@@ -419,7 +419,10 @@ function showNodeFormError(message) {
 
 function deleteNodeConfig(id) {
   var n = findManageNode(id);
-  if (!n || !window.confirm('确定删除节点“' + n.name + '”？该节点的累计与每日流量历史也会同时清除，此操作不可恢复。')) return;
+  if (!n) return;
+  var confirmation = window.prompt('即将删除节点“' + n.name + '”，并清除其累计、每日和采样流量历史，此操作不可恢复。\n请输入“我已确定”以继续删除：');
+  if (confirmation === null) return;
+  if (confirmation.trim() !== '我已确定') { toast('验证文字不匹配，已取消删除'); return; }
   nodeRequest('/api/nodes/' + id, 'DELETE').then(function (d) {
     toast(d.warning || (d.history_cleared ? '节点及全部历史流量已删除' : '节点已删除'));
     return refreshAfterNodeMutation();
