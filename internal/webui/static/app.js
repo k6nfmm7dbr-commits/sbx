@@ -419,11 +419,9 @@ function showNodeFormError(message) {
 
 function deleteNodeConfig(id) {
   var n = findManageNode(id);
-  if (!n || !window.confirm('确定删除节点“' + n.name + '”？节点会从 sing-box 配置移除。')) return;
-  var clearHistory = window.confirm('是否同时清除该节点的累计与每日流量历史？此操作不可恢复。\n选择“取消”会保留历史数据。');
-  var path = '/api/nodes/' + id + (clearHistory ? '?clear_history=1' : '');
-  nodeRequest(path, 'DELETE').then(function (d) {
-    toast(d.warning || (d.history_cleared ? '节点及历史流量已删除' : '节点已删除，历史流量已保留'));
+  if (!n || !window.confirm('确定删除节点“' + n.name + '”？该节点的累计与每日流量历史也会同时清除，此操作不可恢复。')) return;
+  nodeRequest('/api/nodes/' + id, 'DELETE').then(function (d) {
+    toast(d.warning || (d.history_cleared ? '节点及全部历史流量已删除' : '节点已删除'));
     return refreshAfterNodeMutation();
   }).catch(function (e) { if (e.message !== '未登录') toast(e.message); });
 }

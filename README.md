@@ -7,7 +7,7 @@ SBX 用一条命令在你的服务器上搭好 sing-box 代理节点,并附带�
 netfilter 后端是 **nftables-only**:流量统计、节点暂停、在线 IP 上限和节点限速全部由 nftables(表 `sbx_traffic` / `sbx_policy`)在内核里完成。不支持 iptables,也没有后端自动选择或回退——nftables 不可用时 SBX 会**明确失败并中止**,绝不静默降级或"假装成功"。
 
 <p>
-  <img alt="version" src="https://img.shields.io/badge/version-v3.0.25-blue">
+  <img alt="version" src="https://img.shields.io/badge/version-v3.0.26-blue">
   <img alt="go" src="https://img.shields.io/badge/Go-1.27.1%2B-00ADD8">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
   <img alt="backend" src="https://img.shields.io/badge/netfilter-nftables--only-orange">
@@ -210,7 +210,7 @@ sudo apt-get update
 | **节点** | 单节点流量趋势与详情 |
 | **配置** | 节点列表、新增、分享链接查看、编辑与删除 |
 
-删除节点默认保留其累计与每日流量历史；在确认删除后，可再选择是否一并清除该节点的历史记录。
+删除节点时会一并清除该节点累计、每日与采样流量历史（daily/totals/samples），并在唯一一次确认中明确提示不可恢复。API 默认相同；仅显式指定 `clear_history=0` 才保留历史记录。
 
 实时性由两条通道保证:
 
@@ -228,7 +228,7 @@ sudo apt-get update
 | `/api/daily?days=N&scope=` | GET | 每日流量表(默认 30,钳制 `[1,365]`) |
 | `/api/nodes` | GET / POST | 脱敏节点列表 / 新增节点（服务器生成节点密钥） |
 | `/api/export` | GET | CSV 导出全量流量 |
-| `/api/nodes/<id>` | PUT / DELETE | 修改节点可编辑项 / 删除节点（`clear_history=1` 可同时清理历史流量） |
+| `/api/nodes/<id>` | PUT / DELETE | 修改节点可编辑项 / 删除节点（默认清理流量历史；显式 `clear_history=0` 可保留） |
 | `/api/nodes/<id>/links` | GET | 获取该节点分享链接（及 Snell Surge 配置） |
 | `/api/nodes/<id>/policy` | GET / PUT | 读取或设置暂停状态、IP 上限和限速 |
 | `/api/nodes/<id>/active-ips` | GET | 查看节点当前在线 IP |
@@ -424,7 +424,7 @@ CI 门禁(`main` 推送全绿才发布):`gofmt` / `go vet` / `go test` / `go tes
 ## 当前版本
 
 ```text
-v3.0.25
+v3.0.26
 ```
 
 源码在 `main` 分支,二进制从 `dist` 分支分发(rolling latest)。

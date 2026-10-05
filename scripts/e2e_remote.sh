@@ -42,7 +42,7 @@ ck "安装脚本退出码 0" $?
 grep -q "安装完成" /tmp/e2e-install.log; ck "输出含「安装完成」" $?
 [[ -x "$CORE" ]]; ck "sbx-core 已安装" $?
 [[ -x "$ROOT/usr/local/bin/sing-box" ]]; ck "sing-box 已安装" $?
-"$CORE" version | grep -q "v3.0.25"; ck "core 版本 3.0.25 ($("$CORE" version))" $?
+"$CORE" version | grep -q "v3.0.26"; ck "core 版本 3.0.26 ($("$CORE" version))" $?
 jq -e '.token and (.port|type)=="number" and .port>=1 and .port<=65535' "$PANEL_CONF" >/dev/null 2>&1
 ck "panel.json 合法(token+port)" $?
 # nftables-only（v3.0.9）：新装配置不得含废弃后端键，必须含 nft_conf
@@ -279,7 +279,7 @@ for i in $(seq 1 30); do ss -Hlnt | grep -q ':18389 ' && break; sleep 0.5; done
 ss -Hlnt | grep -q ':18389 '; ck "修改后的 sing-box 节点端口启动" $?
 DELETE=$(curl -fsS -m 60 -X DELETE -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/api/nodes/1" 2>/tmp/e2e-node-delete.err)
 ck "面板 API 删除节点" $?
-echo "$DELETE" | jq -e '.deleted=="1" and .history_cleared==false' >/dev/null 2>&1; ck "删除保留历史流量" $?
+echo "$DELETE" | jq -e '.deleted=="1" and .history_cleared==true' >/dev/null 2>&1; ck "删除默认清除历史流量" $?
 jq -e 'length==0' "$NODES_JSON" >/dev/null 2>&1; ck "删除后节点列表为空" $?
 jq -e '[.inbounds[]|select((.tag // "")|startswith("sbx-n"))]|length==0' "$SB_DIR/config.json" >/dev/null 2>&1; ck "删除后 sing-box 配置无该节点" $?
 

@@ -298,32 +298,62 @@ func TestPanelDeleteReportsCandidateGenerationCause(t *testing.T) {
 	}
 }
 
-func TestPanelDeleteKeepsHistoryUnlessExplicitlyRequested(t *testing.T) {
+func TestPanelDeleteClearsHistoryByDefault(t *testing.T) {
 	ts, nodesFile, _, _, srv := newNodeCRUDTestServer(t)
-	code, _ := doJSON(t, ts, http.MethodPost, "/api/nodes", `{"type":"shadowsocks","name":"keep-history","port":8389}`)
+	code, _ := doJSON(t, ts, http.MethodPost, "/api/nodes", `{"type":"shadowsocks","name":"clear-history","port":8389}`)
+	if code != http.StatusOK {
+		t.Fatalf("create failed: %d", code)
+	}
+	for _, query := range []string{
+		"INSERT INTO daily(day,scope,rx,tx,rx_pkts,tx_pkts) VALUES('2026-10-05','node:1',9,4,0,0)",
+		"INSERT INTO totals(scope,rx,tx,rx_pkts,tx_pkts) VALUES('node:1',9,4,0,0)",
+		"INSERT INTO samples(ts,scope,rx,tx,duration_ms,valid) VALUES(1,'node:1',9,4,2000,1)",
+	} {
+		if _, err := srv.db.Exec(query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, result := doJSON(t, ts, http.MethodDelete, "/api/nodes/1", "")
+	if code != http.StatusOK || result["history_cleared"] != true {
+		t.Fatalf("delete default should clear history: %d %#v", code, result)
+	}
+	for _, table := range []string{"daily", "totals", "samples"} {
+		var count int
+		if err := srv.db.QueryRow("SELECT COUNT(*) FROM " + table + " WHERE scope='node:1'").Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Errorf("default delete must clear %s history, count=%d", table, count)
+		}
+	}
+	data, err := os.ReadFile(nodesFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var remaining []any
+	if err := json.Unmarshal(data, &remaining); err != nil || len(remaining) != 0 {
+		t.Fatalf("node should be deleted: %s err=%v", data, err)
+	}
+}
+
+func TestPanelDeleteCanExplicitlyKeepHistory(t *testing.T) {
+	ts, _, _, _, srv := newNodeCRUDTestServer(t)
+	code, _ := doJSON(t, ts, http.MethodPost, "/api/nodes", `{"type":"shadowsocks","name":"keep-history","port":8391}`)
 	if code != http.StatusOK {
 		t.Fatalf("create failed: %d", code)
 	}
 	if _, err := srv.db.Exec("INSERT INTO totals(scope,rx,tx,rx_pkts,tx_pkts) VALUES('node:1',9,4,0,0)"); err != nil {
 		t.Fatal(err)
 	}
-	code, result := doJSON(t, ts, http.MethodDelete, "/api/nodes/1", "")
+	code, result := doJSON(t, ts, http.MethodDelete, "/api/nodes/1?clear_history=0", "")
 	if code != http.StatusOK || result["history_cleared"] != false {
-		t.Fatalf("delete default should preserve history: %d %#v", code, result)
+		t.Fatalf("explicit clear_history=0 should preserve history: %d %#v", code, result)
 	}
 	var count int
 	if err := srv.db.QueryRow("SELECT COUNT(*) FROM totals WHERE scope='node:1'").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 1 {
-		t.Fatalf("history must remain by default, count=%d", count)
-	}
-	b, err := os.ReadFile(nodesFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var remaining []any
-	if err := json.Unmarshal(b, &remaining); err != nil || len(remaining) != 0 {
-		t.Fatalf("node should still be deleted: %s err=%v", b, err)
+		t.Fatalf("explicit opt-out must retain history, count=%d", count)
 	}
 }

@@ -507,7 +507,7 @@ func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request, id string) {
 		s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	clearHistory := false
+	clearHistory := true
 	if raw := qsGet(r, "clear_history"); raw != "" {
 		if raw != "1" && raw != "0" {
 			s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": "clear_history must be 0 or 1"})

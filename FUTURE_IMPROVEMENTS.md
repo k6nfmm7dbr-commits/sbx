@@ -769,3 +769,8 @@ CSV 流式导出、nodes/config JSON 读取、策略 no-op enforcement 与 recon
 - 根因定位：服务单元使用 `ProtectSystem=full`，该沙箱会把 `/etc` 变成只读；`ReadWritePaths` 当时只允许 `$APP_DIR`，而 API 通过原子写在 `$SB_DIR` (`/etc/sing-box`) 创建 `config.json.candidate`。因此配置变更在 CLI 候选阶段就因 `EROFS` 失败，未提交节点删除。
 - 最小修复：在 `ReadWritePaths` 中增加 `$SB_DIR`，不开放整个 `/etc`。安装器 `prepare_dirs` 已创建该路径，满足旧 systemd 对白名单目录必须存在的要求；升级时 `setup_services` 重写 unit 并重启服务。
 - `installer_flow_test.sh` 锁定该白名单同时仍拒绝 `/run`、`/tmp` 这类临时路径。
+
+## 26. v3.0.26：删除节点一次确认并默认清空完整历史
+
+- 面板不再弹第二次“是否同时清除历史”对话框；首次确认即告知节点及其历史都将删除。
+- DELETE API 未提供 `clear_history` 时默认删除该 scope 的 `daily/totals/samples`；API 调用方显式设置 `clear_history=0` 可保留。事务测试写入并逐表确认三类历史删除。
