@@ -10,17 +10,21 @@ ck "一键安装退出码 0" $?
 grep -q "安装完成" /tmp/gh-install.log; ck "输出含「安装完成」" $?
 grep -q "sbx-core 安装完成" /tmp/gh-install.log && grep -qE "下载 sbx-core|已安装" /tmp/gh-install.log; ck "sbx-core 走 Releases 下载路径" $?
 
-/usr/local/bin/sbx-core version | grep -q "v3.0.22"; ck "core 版本 v3.0.22" $?
+/usr/local/bin/sbx-core version | grep -q "v3.0.23"; ck "core 版本 v3.0.23" $?
 systemctl is-active --quiet sbx-panel; ck "面板服务 active" $?
 systemctl is-active --quiet sing-box; ck "sing-box active" $?
 PORT=$(jq -r '.port' /etc/sbx/panel.json)
 curl -fsS "http://127.0.0.1:$PORT/healthz" | grep -q '"ok":true'; ck "API 健康" $?
 
-echo "== 菜单添加节点（真实用户路径） =="
-# 1=节点配置 → 1=添加节点 → 2=Shadowsocks → 1=加密算法(128) → 端口 → 备注 → 回车(pause) → 0=退出
-printf '1\n1\n2\n1\n28388\ngh-e2e\n\n0\n' | env NO_COLOR=1 bash /usr/local/bin/sbx >/tmp/gh-menu.log 2>&1
-ck "菜单加节点退出码 0" $?
-jq -e 'length==1 and .[0].port==28388' /etc/sbx/nodes.json >/dev/null 2>&1
+echo "== 面板添加节点（真实用户 API 路径） =="
+TOKEN=$(jq -r '.token' /etc/sbx/panel.json)
+CREATE=$(curl -fsS -m 60 -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"type":"shadowsocks","name":"gh-e2e","port":28388,"method":"2022-blake3-aes-128-gcm"}' \
+  "http://127.0.0.1:$PORT/api/nodes" 2>/tmp/gh-node-create.err)
+ck "面板 API 添加节点" $?
+echo "$CREATE" | jq -e '.node.id==1 and .node.port==28388 and .node.name=="gh-e2e"' >/dev/null 2>&1
+ck "API 返回新节点摘要" $?
+jq -e 'length==1 and .[0].port==28388 and .[0].name=="gh-e2e"' /etc/sbx/nodes.json >/dev/null 2>&1
 ck "节点落库正确" $?
 
 sleep 3

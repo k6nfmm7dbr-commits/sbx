@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 APP_NAME="SBX"
-APP_VERSION="3.0.22"
+APP_VERSION="3.0.23"
 RAW_URL="${SBX_RAW_URL:-https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh}"
 
 # SBX_ROOT 仅用于测试/沙箱安装（把整套目录挪到前缀下），正常安装留空
@@ -1830,44 +1830,19 @@ main_menu() {
       "$(panel_running && echo "${C_GREEN}●${C_RESET}" || echo "${C_RED}●${C_RESET}")" \
       "$C_DIM" "$APP_VERSION" "$C_RESET"
     printf '  面板: %s%s%s\n\n' "$C_CYAN" "$(panel_url)" "$C_RESET"
-    echo "  1) 节点配置"
-    echo "  2) 系统设置与运维"
-    echo "  3) 检查更新"
-    echo "  4) 卸载"
+    echo "  1) 系统设置与运维"
+    echo "  2) 检查更新"
+    echo "  3) 卸载"
     echo "  0) 退出"
     echo
     printf '请选择: '
     read -r c || true
     case "$c" in
-      1) menu_nodes ;;
-      2) menu_settings ;;
-      3) do_update; pause ;;
-      4) uninstall_all ;;
+      1) menu_settings ;;
+      2) do_update; pause ;;
+      3) uninstall_all ;;
       0|"") clear 2>/dev/null || true; exit 0 ;;
       *) warn "无效选择"; sleep 1 ;;
-    esac
-  done
-}
-
-menu_nodes() {
-  while :; do
-    banner
-    printf '%s节点配置%s\n\n' "$C_B" "$C_RESET"
-    echo "  1) 添加节点"
-    echo "  2) 查看分享链接"
-    echo "  3) 修改节点（端口 / SNI）"
-    echo "  4) 删除节点"
-    echo "  0) 返回"
-    echo
-    printf '请选择: '
-    read -r c || true
-    case "$c" in
-      1) menu_add_node ;;
-      2) menu_show_links ;;
-      3) menu_edit_node ;;
-      4) menu_remove_node ;;
-      0|"") return 0 ;;
-      *) warn "无效选择" ;;
     esac
   done
 }
@@ -2159,7 +2134,7 @@ do_install() {
   ok "安装完成"
   hr
   if [[ "$nnum" == "0" ]]; then
-    printf '%s还没有任何节点。%s在菜单里选「1) 节点配置 → 1) 添加节点」即可创建。\n' "$C_B" "$C_RESET"
+    printf '%s还没有任何节点。%s打开面板「配置」页并点击「添加节点」即可创建。\n' "$C_B" "$C_RESET"
   else
     printf '%s节点分享链接%s\n' "$C_B" "$C_RESET"
     core_node links --host "$host" || true
@@ -2167,7 +2142,7 @@ do_install() {
   show_panel_info
   printf '\n%s提示%s\n' "$C_B" "$C_RESET"
   printf '  · 随时运行 %ssbx%s 打开管理菜单\n' "$C_CYAN" "$C_RESET"
-  printf '  · 首次使用请在菜单「1) 节点配置 → 1) 添加节点」创建你要的节点\n'
+  printf '  · 首次使用请打开面板「配置」页添加节点\n'
   if [[ -n "$host6" ]]; then
     printf '  · 本机支持 IPv6，添加节点后会同时给出 IPv4 与 IPv6 两条分享链接\n'
   fi
@@ -2175,7 +2150,7 @@ do_install() {
   printf '  · 若服务器有云防火墙/安全组，请放行节点端口与面板端口 %s\n' "$(panel_get port)"
   echo
   if [[ ! -t 0 ]]; then
-    printf '%s管道运行模式下不进入交互菜单，安装已完成。运行 sbx 打开菜单添加节点。%s\n' "$C_DIM" "$C_RESET"
+    printf '%s管道运行模式下不进入交互菜单，安装已完成。运行 sbx 打开菜单设置运维，添加节点请打开面板「配置」页。%s\n' "$C_DIM" "$C_RESET"
     return 0
   fi
   pause
@@ -2193,7 +2168,6 @@ main() {
     --clear-firewall) require_root; "$CORE_BIN" clear; exit $? ;;
     --panel-url) panel_url; exit 0 ;;
     --show) "$CORE_BIN" show; exit 0 ;;
-    --links) core_node links --host "$(core_node get-host)"; exit 0 ;;
     --update|update|upgrade) do_update "${2:-}"; exit $? ;;
     --apply-update) apply_update; exit $? ;;   # 内部使用：升级时由新脚本调用
     --uninstall) require_root; detect_platform; uninstall_all ;;
@@ -2210,7 +2184,6 @@ $APP_NAME v$APP_VERSION — sing-box 节点 + 流量面板（Go 后端，单二�
   --update           在线升级到最新版本（保留节点与流量历史）
   --update --force   强制重装当前/最新版本
   --show             命令行查看流量统计
-  --links            输出节点分享链接
   --panel-url        输出面板访问地址
   --apply-firewall   重建流量计数规则
   --clear-firewall   移除流量计数规则

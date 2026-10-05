@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"log/slog"
 	"net"
 	"net/http"
@@ -61,6 +62,17 @@ type Server struct {
 	verKey int64  // 上次 FormatInt 的 lastOK
 	verPol uint64 // 上次 FormatUint 的 polVer
 	verStr string // 已生成的 "lastOK.polVer" 串
+
+	// 节点配置页面 mutation hooks 由 service.Serve 注入，测试可替换。
+	nodeRestart func(context.Context) error
+	nodeFwApply func(context.Context) error
+	mutationMu  sync.Mutex // 同进程保护 candidate/backup 区间；跨进程使用 SBX_LOCK
+}
+
+// SetNodeMutationHooks 设置节点配置变更后的服务动作；仅 Serve 启动流程调用。
+func (s *Server) SetNodeMutationHooks(restart, applyFirewall func(context.Context) error) {
+	s.nodeRestart = restart
+	s.nodeFwApply = applyFirewall
 }
 
 // cacheFor 返回缓存实例（懒初始化，保证零值 Server 可用）。
@@ -155,7 +167,17 @@ func (s *Server) serveRoutes(w http.ResponseWriter, r *http.Request) {
 		}
 		s.handleGet(w, r, route)
 	case http.MethodPost:
+		if strings.HasPrefix(route, "/api/nodes") {
+			s.handleAPI(w, r, route)
+			return
+		}
 		s.handlePost(w, r, route)
+	case http.MethodDelete:
+		if strings.HasPrefix(route, "/api/nodes/") {
+			s.handleAPI(w, r, route)
+			return
+		}
+		s.sendText(w, r, http.StatusNotFound, "not found")
 	case http.MethodPut:
 		if strings.HasPrefix(route, "/api/") {
 			s.handleAPI(w, r, route)

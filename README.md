@@ -7,7 +7,7 @@ SBX 用一条命令在你的服务器上搭好 sing-box 代理节点,并附带�
 netfilter 后端是 **nftables-only**:流量统计、节点暂停、在线 IP 上限和节点限速全部由 nftables(表 `sbx_traffic` / `sbx_policy`)在内核里完成。不支持 iptables,也没有后端自动选择或回退——nftables 不可用时 SBX 会**明确失败并中止**,绝不静默降级或"假装成功"。
 
 <p>
-  <img alt="version" src="https://img.shields.io/badge/version-v3.0.22-blue">
+  <img alt="version" src="https://img.shields.io/badge/version-v3.0.23-blue">
   <img alt="go" src="https://img.shields.io/badge/Go-1.27.1%2B-00ADD8">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
   <img alt="backend" src="https://img.shields.io/badge/netfilter-nftables--only-orange">
@@ -170,17 +170,18 @@ sudo apt-get update
 
 ---
 
-`sbx` 主菜单聚焦于 CLI 节点配置与系统运维；首页流量总览、每日趋势、节点流量/连接数、在线 IP 和暂停/IP限制/限速设置统一放在 Web 面板中，避免重复入口。主菜单布局为：
+## 管理菜单
+
+`sbx` 主菜单只保留面板没有的系统设置与运维、检查更新、卸载。添加/查看/编辑/删除节点都在面板新增的「配置」页完成；`sbx-core node` 子命令仍保留，供脚本及高级运维调用。
 
 ```text
-1) 节点配置          添加 / 查看分享链接 / 修改 / 删除
-2) 系统设置与运维    面板访问设置 / 分享地址 / 服务启停与日志 / 统计自检与清空
-3) 检查更新
-4) 卸载
+1) 系统设置与运维    面板访问设置 / 分享地址 / 服务启停与日志 / 统计自检与清空
+2) 检查更新
+3) 卸载
 0) 退出
 ```
 
-流量统计和每日趋势可直接打开菜单顶部显示的面板地址；节点启用/暂停、IP 上限和限速在面板的节点卡片「管理」中设置。CLI 子命令 `sbx-core show` / `daily` 仍保留，供终端、脚本及自动化调用，但不作为交互菜单入口。
+首页流量总览和每日趋势从面板查看。节点创建、分享链接、修改与删除统一在「配置」页；启用/暂停、IP 上限和限速在面板的节点卡片「管理」中设置。`sbx-core show` / `daily` 仍可用于终端、脚本和自动化。
 
 
 ---
@@ -198,15 +199,18 @@ sudo apt-get update
 
 ## Web 面板
 
-首页保持浅色主题，页面从实时速率与现有 KPI 直接开始（不再显示品牌/连接状态顶栏）；桌面速率卡采用左右分栏，手机端上传/下载并列。下列既有页签、字段和操作保持不变。
+浅色主题保持不变。首页从实时速率与现有 KPI 直接开始（不再显示品牌/连接状态顶栏）；桌面速率卡采用左右分栏，手机端上传/下载并列。新增「配置」页签把既有节点配置操作迁入面板；原有统计字段、IP 策略和限速逻辑不变。
 
-底部三页签,令牌登录(HttpOnly Cookie,`SameSite=Lax`,`Max-Age=7d`):
+底部四页签,令牌登录(HttpOnly Cookie,`SameSite=Lax`,`Max-Age=7d`):
 
 | 页签 | 内容 |
 |---|---|
 | **首页** | 节点卡片 + 顶部 KPI 汇总。卡片展示累计/今日流量、限速、TCP/UDP；在线 IP 行和状态徽标；暂停节点明确显示“已暂停” |
 | **每日** | 全节点流量趋势(近 180 天)与单节点详情 |
-| **节点** | 节点管理抽屉——启用/暂停、IP 上限、限速、查看在线 IP |
+| **节点** | 单节点流量趋势与详情 |
+| **配置** | 节点列表、新增、分享链接查看、编辑与删除 |
+
+删除节点默认保留其累计与每日流量历史；在确认删除后，可再选择是否一并清除该节点的历史记录。
 
 实时性由两条通道保证:
 
@@ -222,8 +226,10 @@ sudo apt-get update
 | `/api/live` | GET | 轻量实时:速率 + 连接数(短 TTL 缓存) |
 | `/api/events` | GET | SSE,推送在线 IP 增量 |
 | `/api/daily?days=N&scope=` | GET | 每日流量表(默认 30,钳制 `[1,365]`) |
-| `/api/nodes` | GET | 脱敏节点列表 |
+| `/api/nodes` | GET / POST | 脱敏节点列表 / 新增节点（服务器生成节点密钥） |
 | `/api/export` | GET | CSV 导出全量流量 |
+| `/api/nodes/<id>` | PUT / DELETE | 修改节点可编辑项 / 删除节点（`clear_history=1` 可同时清理历史流量） |
+| `/api/nodes/<id>/links` | GET | 获取该节点分享链接（及 Snell Surge 配置） |
 | `/api/nodes/<id>/policy` | GET / PUT | 读取或设置暂停状态、IP 上限和限速 |
 | `/api/nodes/<id>/active-ips` | GET | 查看节点当前在线 IP |
 
@@ -283,7 +289,7 @@ sbx                     # 管理菜单
 sbx --update            # 在线升级(SHA256 校验 + 内容比对)
 sbx --update --force    # 强制重装当前/最新版本
 sbx --show              # 今日/累计流量
-sbx --links             # 分享链接
+sbx-core node links     # CLI/自动化查看分享链接
 sbx --panel-url         # 面板地址
 sbx --apply-firewall    # 重建计数规则
 sbx --clear-firewall    # 移除计数规则
@@ -418,7 +424,7 @@ CI 门禁(`main` 推送全绿才发布):`gofmt` / `go vet` / `go test` / `go tes
 ## 当前版本
 
 ```text
-v3.0.22
+v3.0.23
 ```
 
 源码在 `main` 分支,二进制从 `dist` 分支分发(rolling latest)。

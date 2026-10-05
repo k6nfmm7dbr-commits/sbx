@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -76,7 +77,13 @@ func Serve() int {
 
 	addr := net.JoinHostPort(cfg.Listen, fmt.Sprint(cfg.Port))
 
-	_, hs := api.New(cfg, db, collector, policySvc)
+	apiServer, hs := api.New(cfg, db, collector, policySvc)
+	apiServer.SetNodeMutationHooks(restartSingBoxForNodeMutation, func(context.Context) error {
+		if Apply() != 0 {
+			return fmt.Errorf("计数规则重建失败")
+		}
+		return nil
+	})
 
 	ln, lerr := net.Listen("tcp", addr)
 	if lerr != nil {
@@ -146,4 +153,38 @@ func listenIsPublic(listen string) bool {
 		return !ip.IsLoopback()
 	}
 	return true
+}
+
+// restartSingBoxForNodeMutation reloads the changed inbounds via the installed service
+// manager and verifies that sing-box remains active. Node management API callers use
+// this after atomically committing candidate config/nodes files.
+func restartSingBoxForNodeMutation(ctx context.Context) error {
+	// Isolated E2E/installer sandboxes have no init manager; production systemd/OpenRC
+	// units do not set this variable, so real panel mutations always reload the service.
+	if os.Getenv("SBX_NO_SERVICE") != "" {
+		return nil
+	}
+	if _, err := os.Stat("/run/systemd/system"); err == nil {
+		rc, _, stderr := firewall.RunCmd(ctx, "systemctl", "restart", "sing-box")
+		if rc != 0 {
+			return fmt.Errorf("systemctl restart sing-box failed: %s", strings.TrimSpace(stderr))
+		}
+		rc, _, stderr = firewall.RunCmd(ctx, "systemctl", "is-active", "--quiet", "sing-box")
+		if rc != 0 {
+			return fmt.Errorf("sing-box service is not active after restart: %s", strings.TrimSpace(stderr))
+		}
+		return nil
+	}
+	if firewall.Which("rc-service") {
+		rc, _, stderr := firewall.RunCmd(ctx, "rc-service", "sing-box", "restart")
+		if rc != 0 {
+			return fmt.Errorf("rc-service restart sing-box failed: %s", strings.TrimSpace(stderr))
+		}
+		rc, _, stderr = firewall.RunCmd(ctx, "rc-service", "sing-box", "status")
+		if rc != 0 {
+			return fmt.Errorf("sing-box service is not active after restart: %s", strings.TrimSpace(stderr))
+		}
+		return nil
+	}
+	return fmt.Errorf("no supported service manager found for sing-box restart")
 }

@@ -104,9 +104,19 @@
     </div>
   </section>
 
+  <!-- ===== 节点配置（新增 / 查看分享 / 修改 / 删除） ===== -->
+  <section class="view" id="view-manage">
+    <div class="panel glass manage-panel">
+      <div class="panel-head manage-head">
+        <h2>节点配置</h2>
+        <button class="btn primary" id="node-create-open" type="button">添加节点</button>
+      </div>
+      <div id="node-manage-list" class="manage-list"></div>
+    </div>
+  </section>
+
 </main>
 
-<!-- ===== 底部导航 ===== -->
 <nav class="dock glass">
   <button class="tab on" data-view="home">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M9 21v-6h6v6"/></svg>
@@ -119,6 +129,10 @@
   <button class="tab" data-view="node">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="3"/><circle cx="5" cy="19" r="3"/><circle cx="19" cy="19" r="3"/><path d="M12 8v4m0 0-5.5 5.5M12 12l5.5 5.5"/></svg>
     <span>节点</span>
+  </button>
+  <button class="tab" data-view="manage">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 8h8M8 12h5M8 16h3"/></svg>
+    <span>配置</span>
   </button>
 </nav>
 
@@ -193,6 +207,37 @@
     </button>
   </header>
   <div class="drawer-body"><div id="ips-list" class="ips-list"></div></div>
+</aside>
+
+<!-- ===== 节点配置编辑抽屉 ===== -->
+<aside class="drawer" id="node-editor-drawer" role="dialog" aria-modal="true">
+  <header class="drawer-head">
+    <div><small id="node-editor-kicker">节点配置</small><h3 id="node-editor-title">添加节点</h3></div>
+    <button class="icon-btn" id="node-editor-close" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+  </header>
+  <div class="drawer-body">
+    <section class="sect" id="node-editor-type-section">
+      <label class="field"><small>协议</small><select id="node-form-type"><option value="vless">VLESS + Reality</option><option value="shadowsocks">Shadowsocks 2022</option><option value="trojan">Trojan</option><option value="anytls">AnyTLS</option><option value="snell">Snell</option></select></label>
+    </section>
+    <section class="sect">
+      <label class="field"><small>节点名称</small><input id="node-form-name" type="text" maxlength="80" placeholder="例如 香港-01"></label>
+      <label class="field"><small>端口</small><input id="node-form-port" type="number" min="1" max="65535" inputmode="numeric" placeholder="443"></label>
+      <label class="field node-form-sni"><small>伪装域名（SNI）</small><input id="node-form-sni" type="text" placeholder="www.example.com"></label>
+      <label class="field node-form-ss hidden"><small>加密算法</small><select id="node-form-method"><option value="2022-blake3-aes-128-gcm">2022-blake3-aes-128-gcm</option><option value="2022-blake3-aes-256-gcm">2022-blake3-aes-256-gcm</option></select></label>
+      <label class="field node-form-snell hidden"><small>Snell 版本</small><select id="node-form-version"><option value="5">Snell v5</option><option value="6">Snell v6</option></select></label>
+      <label class="field node-form-psk hidden"><small>新 PSK（留空则不变）</small><input id="node-form-psk" type="password" autocomplete="new-password" placeholder="留空保持当前 PSK"></label>
+      <small class="node-secret-note" id="node-secret-note">节点密钥和密码由服务器安全生成，面板不会显示或传输这些密钥。</small>
+    </section>
+    <div class="err hidden" id="node-form-error"></div>
+  </div>
+  <footer class="drawer-foot"><button class="btn ghost" id="node-form-cancel">取消</button><button class="btn primary" id="node-form-save">保存</button></footer>
+</aside>
+
+<!-- ===== 节点分享链接抽屉 ===== -->
+<aside class="drawer" id="node-links-drawer" role="dialog" aria-modal="true">
+  <header class="drawer-head"><div><small>节点分享</small><h3 id="node-links-title">—</h3></div><button class="icon-btn" id="node-links-close" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></header>
+  <div class="drawer-body"><div id="node-links-list" class="node-links-list"></div></div>
+  <footer class="drawer-foot"><button class="btn ghost" id="node-links-done">关闭</button></footer>
 </aside>
 
 <div id="toast" role="status"></div>

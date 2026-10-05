@@ -42,7 +42,7 @@ ck "安装脚本退出码 0" $?
 grep -q "安装完成" /tmp/e2e-install.log; ck "输出含「安装完成」" $?
 [[ -x "$CORE" ]]; ck "sbx-core 已安装" $?
 [[ -x "$ROOT/usr/local/bin/sing-box" ]]; ck "sing-box 已安装" $?
-"$CORE" version | grep -q "v3.0.22"; ck "core 版本 3.0.22 ($("$CORE" version))" $?
+"$CORE" version | grep -q "v3.0.23"; ck "core 版本 3.0.23 ($("$CORE" version))" $?
 jq -e '.token and (.port|type)=="number" and .port>=1 and .port<=65535' "$PANEL_CONF" >/dev/null 2>&1
 ck "panel.json 合法(token+port)" $?
 # nftables-only（v3.0.9）：新装配置不得含废弃后端键，必须含 nft_conf
@@ -51,13 +51,25 @@ ck "panel.json 无 backend/ipt_script 且有 nft_conf" $?
 [[ ! -e "$APP_DIR/iptables.sh" ]]; ck "不生成 iptables.sh" $?
 grep -q '^#!/usr/sbin/nft -f' "$APP_DIR/nft.conf"; ck "nft.conf 是 nft 脚本" $?
 
-# ---------------------------------------------------------------- 2. 菜单加节点
-section "2. 菜单添加 Shadowsocks 2022 节点"
-# 按键序列：主菜单 1=节点配置 → 1=添加节点 → 2=Shadowsocks → 1=算法 → 端口/备注 → pause → 0=退出
-# 密码由 `sbx-core node ss2022-key` 用 crypto/rand 生成，菜单不再询问。
-printf '1\n1\n2\n1\n18388\nss-e2e\n\n0\n' | env SBX_ROOT="$ROOT" SBX_NO_SERVICE=1 \
-  NO_COLOR=1 bash "$ROOT/usr/local/bin/sbx" >/tmp/e2e-menu.log 2>&1
-ck "菜单流程退出码 0" $?
+# ---------------------------------------------------------------- 2. 启动面板并通过面板 API 创建节点
+section "2. 面板 API 添加 Shadowsocks 2022 节点"
+PORT=$(jq -r '.port' "$PANEL_CONF")
+TOKEN=$(jq -r '.token' "$PANEL_CONF")
+# E2E 沙箱没有 systemd/OpenRC：让面板 API 的节点流程在提交后由测试脚本启动 sing-box。
+env SBX_CONF="$PANEL_CONF" SBX_NO_SERVICE=1 SBX_SB_BIN="$SB_BIN" "$CORE" serve >/tmp/e2e-panel.log 2>&1 &
+CORE_PID=$!
+for i in $(seq 1 30); do curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1 && break; sleep 0.5; done
+ck "面板 healthz" $?
+CREATE=$(curl -fsS -m 60 -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"type":"shadowsocks","name":"ss-e2e","port":18388,"method":"2022-blake3-aes-128-gcm"}' \
+  "http://127.0.0.1:$PORT/api/nodes" 2>/tmp/e2e-node-create.err)
+ck "面板 API 添加节点" $?
+echo "$CREATE" | jq -e '.node.id==1 and .node.port==18388 and .node.name=="ss-e2e"' >/dev/null 2>&1
+ck "面板返回新节点安全摘要" $?
+curl -fsS -m 10 -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/api/nodes/1/links" | jq -e '.ipv4|startswith("ss://")' >/dev/null 2>&1
+ck "面板可查看节点分享链接" $?
+curl -fsS -m 10 -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/api/nodes" | jq -e '(.nodes|length)==1 and ((.nodes[0]|has("password"))|not) and ((.nodes[0]|has("uuid"))|not)' >/dev/null 2>&1
+ck "面板节点列表脱敏" $?
 jq -e 'length==1 and .[0].type=="shadowsocks" and .[0].port==18388 and .[0].name=="ss-e2e"' "$NODES_JSON" >/dev/null 2>&1
 ck "nodes.json 记录正确" $?
 jq -e '
@@ -67,21 +79,12 @@ jq -e '
   and any(.outbounds[]; .tag=="direct")' "$SB_DIR/config.json" >/dev/null 2>&1
 ck "sing-box 配置生成正确" $?
 "$SB_BIN" check -c "$SB_DIR/config.json" >/dev/null 2>&1; ck "sing-box check 通过" $?
-grep -q "ss://" /tmp/e2e-menu.log; ck "分享链接已输出" $?
 
-# ---------------------------------------------------------------- 3. 启动服务
-section "3. 启动 sing-box 与面板"
+# 配置已通过面板 CRUD 提交；沙箱没有 init manager，由本脚本启动 sing-box。
 "$SB_BIN" run -C "$SB_DIR" >/tmp/e2e-sb.log 2>&1 &
 SB_PID=$!
 for i in $(seq 1 30); do ss -Hlnt | grep -q ':18388 ' && break; sleep 0.5; done
-PORT=$(jq -r '.port' "$PANEL_CONF")
-TOKEN=$(jq -r '.token' "$PANEL_CONF")
-env SBX_CONF="$PANEL_CONF" "$CORE" serve >/tmp/e2e-panel.log 2>&1 &
-CORE_PID=$!
-for i in $(seq 1 30); do curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1 && break; sleep 0.5; done
-ck "面板 healthz" $?
-ss -Hlnt | grep -q ":18388 "; ck "节点端口已监听" $?
-
+ss -Hlnt | grep -q ':18388 '; ck "节点端口已监听" $?
 # ---------------------------------------------------------------- 4. 真实流量
 section "4. veth 命名空间真实流量计数"
 ip netns add e2e
@@ -263,7 +266,24 @@ done
 ck "策略表被外部删除后自动重建" $REBUILT
 grep -q "策略表被外部移除" /tmp/e2e-panel.log; ck "日志明确记录重建原因" $?
 
-# 8.6 恢复节点后 clear 清除计数表与策略表
+# 8.7 面板配置页修改 / 删除节点
+EDIT=$(curl -fsS -m 60 -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"port":18389}' "http://127.0.0.1:$PORT/api/nodes/1" 2>/tmp/e2e-node-edit.err)
+ck "面板 API 修改节点端口" $?
+echo "$EDIT" | jq -e '.node.port==18389' >/dev/null 2>&1; ck "修改结果返回新端口" $?
+jq -e '.[0].port==18389' "$NODES_JSON" >/dev/null 2>&1; ck "修改已原子写入 nodes.json" $?
+kill -TERM "$SB_PID" 2>/dev/null; wait "$SB_PID" 2>/dev/null || true
+"$SB_BIN" run -C "$SB_DIR" >/tmp/e2e-sb.log 2>&1 &
+SB_PID=$!
+for i in $(seq 1 30); do ss -Hlnt | grep -q ':18389 ' && break; sleep 0.5; done
+ss -Hlnt | grep -q ':18389 '; ck "修改后的 sing-box 节点端口启动" $?
+DELETE=$(curl -fsS -m 60 -X DELETE -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/api/nodes/1" 2>/tmp/e2e-node-delete.err)
+ck "面板 API 删除节点" $?
+echo "$DELETE" | jq -e '.deleted=="1" and .history_cleared==false' >/dev/null 2>&1; ck "删除保留历史流量" $?
+jq -e 'length==0' "$NODES_JSON" >/dev/null 2>&1; ck "删除后节点列表为空" $?
+jq -e '[.inbounds[]|select((.tag // "")|startswith("sbx-n"))]|length==0' "$SB_DIR/config.json" >/dev/null 2>&1; ck "删除后 sing-box 配置无该节点" $?
+
+# 8.8 clear 清除计数表与策略表
 policy_put '{"paused":false,"ip_limit_enabled":false,"ip_limit_max":0,"rate_limit_enabled":false,"rate_limit_mbps":0}' >/dev/null 2>&1
 kill -TERM "$CORE_PID" 2>/dev/null; wait "$CORE_PID" 2>/dev/null
 # 防误伤前置：放一张「用户自己的」nft 表，clear 之后它必须完好无损

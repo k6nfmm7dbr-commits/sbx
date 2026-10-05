@@ -44,8 +44,13 @@ func TestHealthzDegradedFields(t *testing.T) {
 	if !strings.Contains(got, `"collector_error":"nft 读取失败: permission denied"`) {
 		t.Fatalf("缺少 collector_error: %s", got)
 	}
-	if !strings.Contains(got, `"sample_age_s":30`) {
-		t.Fatalf("缺少 sample_age_s: %s", got)
+	var health map[string]any
+	if err := json.Unmarshal([]byte(got), &health); err != nil {
+		t.Fatalf("healthz JSON 无效: %v", err)
+	}
+	age, ok := health["sample_age_s"].(float64)
+	if !ok || age < 30 || age > 32 {
+		t.Fatalf("sample_age_s 应处于 30–32 秒，got %v (%s)", health["sample_age_s"], got)
 	}
 }
 

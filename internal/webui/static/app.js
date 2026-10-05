@@ -227,14 +227,184 @@ function loadNodeDaily() {
     .catch(function (e) { if (e.message !== '未登录') toast(e.message); });
 }
 
+/* ---------- 节点配置页：新增 / 查看分享 / 编辑 / 删除 ---------- */
+var manageNodes = [];
+var editingNode = null;
+
+function loadManageNodes() {
+  return api('/api/nodes').then(function (d) {
+    manageNodes = d.nodes || [];
+    renderManageNodes();
+  }).catch(function (e) {
+    if (e.message !== '未登录') toast(e.message);
+  });
+}
+
+function renderManageNodes() {
+  var host = document.getElementById('node-manage-list');
+  if (!host) return;
+  if (!manageNodes.length) {
+    host.innerHTML = '<div class="empty">暂无节点，点击“添加节点”创建</div>';
+    return;
+  }
+  host.innerHTML = manageNodes.map(function (n) {
+    var protocol = n.protocol || n.type;
+    var meta = [n.type || protocol, '端口 ' + n.port];
+    if (n.paused) meta.push('已暂停');
+    return '<article class="manage-node' + (n.paused ? ' paused' : '') + '">' +
+      '<div class="manage-node-main"><strong>' + esc(n.name) + '</strong>' +
+      '<span>' + esc(meta.join(' · ')) + '</span></div>' +
+      '<div class="manage-node-actions">' +
+      '<button type="button" class="mini-btn" data-node-links="' + esc(n.id) + '">分享</button>' +
+      '<button type="button" class="mini-btn" data-node-edit="' + esc(n.id) + '">编辑</button>' +
+      '<button type="button" class="mini-btn danger" data-node-delete="' + esc(n.id) + '">删除</button>' +
+      '</div></article>';
+  }).join('');
+}
+
+function findManageNode(id) {
+  return manageNodes.filter(function (n) { return String(n.id) === String(id); })[0] || null;
+}
+
+function updateNodeFormFields() {
+  var protocol = editingNode ? editingNode.protocol : document.getElementById('node-form-type').value;
+  document.querySelectorAll('.node-form-sni').forEach(function (el) {
+    el.classList.toggle('hidden', ['vless', 'trojan', 'anytls'].indexOf(protocol) < 0);
+  });
+  document.querySelectorAll('.node-form-ss').forEach(function (el) { el.classList.toggle('hidden', protocol !== 'shadowsocks'); });
+  document.querySelectorAll('.node-form-snell').forEach(function (el) { el.classList.toggle('hidden', protocol !== 'snell'); });
+  document.querySelectorAll('.node-form-psk').forEach(function (el) { el.classList.toggle('hidden', !editingNode || protocol !== 'snell'); });
+  var secretNote = document.getElementById('node-secret-note');
+  secretNote.textContent = editingNode && protocol === 'shadowsocks'
+    ? '切换加密算法会重新生成密钥；新的分享链接会同步更新。'
+    : '节点密钥和密码由服务器安全生成，面板不会显示或传输这些密钥。';
+  secretNote.classList.toggle('hidden', !!editingNode && protocol !== 'shadowsocks');
+}
+
+function openNodeEditor(id) {
+  editingNode = id == null ? null : findManageNode(id);
+  if (id != null && !editingNode) { toast('节点不存在或列表尚未加载'); return; }
+  document.getElementById('node-editor-title').textContent = editingNode ? '编辑节点' : '添加节点';
+  document.getElementById('node-editor-kicker').textContent = editingNode ? '修改节点配置' : '创建新节点';
+  document.getElementById('node-editor-type-section').classList.toggle('hidden', !!editingNode);
+  document.getElementById('node-form-type').value = editingNode ? (editingNode.protocol || 'vless') : 'vless';
+  document.getElementById('node-form-name').value = editingNode ? editingNode.name : '';
+  document.getElementById('node-form-name').disabled = !!editingNode;
+  document.getElementById('node-form-port').value = editingNode ? editingNode.port : '';
+  document.getElementById('node-form-sni').value = editingNode ? (editingNode.sni || '') : '';
+  document.getElementById('node-form-method').value = editingNode ? (editingNode.method || '2022-blake3-aes-128-gcm') : '2022-blake3-aes-128-gcm';
+  document.getElementById('node-form-version').value = editingNode ? String(editingNode.version || 5) : '5';
+  document.getElementById('node-form-version').disabled = !!editingNode;
+  document.getElementById('node-form-psk').value = '';
+  document.getElementById('node-form-error').classList.add('hidden');
+  var btn = document.getElementById('node-form-save');
+  btn.disabled = false; btn.textContent = editingNode ? '保存修改' : '添加节点';
+  updateNodeFormFields();
+  openDrawer('node-editor-drawer');
+}
+
+function nodeRequest(path, method, body) {
+  return fetch(path, {
+    method: method,
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined
+  }).then(function (r) {
+    if (r.status === 401) { location.replace('/login'); throw new Error('未登录'); }
+    return r.json().then(function (d) { if (!r.ok) throw new Error(d.error || ('请求失败 ' + r.status)); return d; });
+  });
+}
+
+function saveNodeConfig() {
+  var port = Number(document.getElementById('node-form-port').value);
+  if (!(port >= 1 && port <= 65535)) { showNodeFormError('端口必须在 1–65535'); return; }
+  var body, path, method;
+  if (editingNode) {
+    body = { port: port };
+    var protocol = editingNode.protocol || '';
+    if (['vless', 'trojan', 'anytls'].indexOf(protocol) >= 0) body.sni = document.getElementById('node-form-sni').value.trim();
+    if (protocol === 'shadowsocks') body.method = document.getElementById('node-form-method').value;
+    if (protocol === 'snell') body.psk = document.getElementById('node-form-psk').value.trim();
+    path = '/api/nodes/' + editingNode.id; method = 'PUT';
+  } else {
+    body = {
+      type: document.getElementById('node-form-type').value,
+      name: document.getElementById('node-form-name').value.trim(),
+      port: port,
+      sni: document.getElementById('node-form-sni').value.trim(),
+      method: document.getElementById('node-form-method').value,
+      version: Number(document.getElementById('node-form-version').value)
+    };
+    path = '/api/nodes'; method = 'POST';
+  }
+  var btn = document.getElementById('node-form-save');
+  btn.disabled = true; btn.textContent = '处理中…';
+  nodeRequest(path, method, body).then(function (d) {
+    closeDrawer('node-editor-drawer');
+    toast(d.warning || (editingNode ? '节点已更新' : '节点已添加'));
+    editingNode = null;
+    return Promise.all([loadManageNodes(), loadSummary(), loadDaily()]);
+  }).catch(function (e) {
+    if (e.message !== '未登录') showNodeFormError(e.message);
+  }).finally(function () {
+    btn.disabled = false; btn.textContent = editingNode ? '保存修改' : '添加节点';
+  });
+}
+
+function showNodeFormError(message) {
+  var el = document.getElementById('node-form-error');
+  el.textContent = message; el.classList.remove('hidden');
+}
+
+function deleteNodeConfig(id) {
+  var n = findManageNode(id);
+  if (!n || !window.confirm('确定删除节点“' + n.name + '”？节点会从 sing-box 配置移除。')) return;
+  var clearHistory = window.confirm('是否同时清除该节点的累计与每日流量历史？此操作不可恢复。\n选择“取消”会保留历史数据。');
+  var path = '/api/nodes/' + id + (clearHistory ? '?clear_history=1' : '');
+  nodeRequest(path, 'DELETE').then(function (d) {
+    toast(d.warning || (d.history_cleared ? '节点及历史流量已删除' : '节点已删除，历史流量已保留'));
+    return Promise.all([loadManageNodes(), loadSummary(), loadDaily()]);
+  }).catch(function (e) { if (e.message !== '未登录') toast(e.message); });
+}
+
+function showNodeLinks(id) {
+  var n = findManageNode(id);
+  document.getElementById('node-links-title').textContent = n ? n.name : '节点分享';
+  var host = document.getElementById('node-links-list');
+  host.innerHTML = '<div class="empty">正在加载分享链接…</div>';
+  openDrawer('node-links-drawer');
+  nodeRequest('/api/nodes/' + id + '/links', 'GET').then(function (d) {
+    var html = '<div class="link-field"><small>分享链接</small><pre>' + esc(d.ipv4) + '</pre></div>';
+    if (d.ipv6) html += '<div class="link-field"><small>IPv6</small><pre>' + esc(d.ipv6) + '</pre></div>';
+    (d.surge || []).forEach(function (line, i) { html += '<div class="link-field"><small>Surge' + (i ? ' IPv6' : '') + '</small><pre>' + esc(line) + '</pre></div>'; });
+    host.innerHTML = html;
+  }).catch(function (e) {
+    if (e.message !== '未登录') host.innerHTML = '<div class="err">' + esc(e.message) + '</div>';
+  });
+}
+
+function bindNodeManageUI() {
+  document.getElementById('node-create-open').addEventListener('click', function () { openNodeEditor(null); });
+  document.getElementById('node-form-type').addEventListener('change', updateNodeFormFields);
+  document.getElementById('node-form-save').addEventListener('click', saveNodeConfig);
+  document.getElementById('node-form-cancel').addEventListener('click', function () { closeDrawer('node-editor-drawer'); });
+  document.getElementById('node-editor-close').addEventListener('click', function () { closeDrawer('node-editor-drawer'); });
+  document.getElementById('node-links-close').addEventListener('click', function () { closeDrawer('node-links-drawer'); });
+  document.getElementById('node-links-done').addEventListener('click', function () { closeDrawer('node-links-drawer'); });
+  document.getElementById('node-manage-list').addEventListener('click', function (e) {
+    var el = e.target.closest('[data-node-links]'); if (el) { showNodeLinks(el.getAttribute('data-node-links')); return; }
+    el = e.target.closest('[data-node-edit]'); if (el) { openNodeEditor(el.getAttribute('data-node-edit')); return; }
+    el = e.target.closest('[data-node-delete]'); if (el) deleteNodeConfig(el.getAttribute('data-node-delete'));
+  });
+}
+
 /* ---------- 事件 ---------- */
 document.getElementById('node-select').addEventListener('change', function (e) {
   state.nodeId = e.target.value; loadNodeDaily();
 });
 
-/* ---------- 三页底部导航 ---------- */
+/* ---------- 底部导航 ---------- */
 (function initNav() {
-  var valid = { home: 1, daily: 1, node: 1 }, positions = { home: 0, daily: 0, node: 0 };
+  var valid = { home: 1, daily: 1, node: 1, manage: 1 }, positions = { home: 0, daily: 0, node: 0, manage: 0 };
   var current = (location.hash || '#home').slice(1); if (!valid[current]) current = 'home';
   function show(name, push) {
     if (!valid[name]) name = 'home';
@@ -245,6 +415,7 @@ document.getElementById('node-select').addEventListener('change', function (e) {
     requestAnimationFrame(function () { window.scrollTo(0, positions[name] || 0); });
     if (name === 'daily' && !cache.daily) loadDaily();
     if (name === 'node' && !cache.nodeDaily) loadNodeDaily();
+    if (name === 'manage') loadManageNodes();
   }
   document.querySelectorAll('.tab').forEach(function (b) {
     b.addEventListener('click', function () { show(b.dataset.view, true); });
@@ -435,7 +606,7 @@ document.getElementById('node-cards').addEventListener('click', function (e) {
   if (mg) { showPolicy(mg.getAttribute('data-manage')); return; }
 });
 document.getElementById('drawer-close').addEventListener('click', function () { closeDrawer('policy-drawer'); });
-document.getElementById('drawer-mask').addEventListener('click', function () { closeDrawer('policy-drawer'); closeDrawer('ips-drawer'); });
+document.getElementById('drawer-mask').addEventListener('click', function () { closeDrawer('policy-drawer'); closeDrawer('ips-drawer'); closeDrawer('node-editor-drawer'); closeDrawer('node-links-drawer'); });
 document.getElementById('pol-cancel').addEventListener('click', function () { closeDrawer('policy-drawer'); });
 document.getElementById('pol-save').addEventListener('click', savePolicy);
 document.getElementById('ips-close').addEventListener('click', function () { closeDrawer('ips-drawer'); });
@@ -445,3 +616,4 @@ document.getElementById('pol-ip-enable').addEventListener('change', function (e)
 document.getElementById('pol-rate-enable').addEventListener('change', function (e) {
   document.getElementById('pol-rate-box').classList.toggle('hidden', !e.target.checked);
 });
+bindNodeManageUI();

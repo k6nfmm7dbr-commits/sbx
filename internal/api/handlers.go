@@ -86,14 +86,42 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request, route string)
 			})
 
 	case "/api/nodes":
-		// 只返回脱敏后的 PublicNodeDTO，绝不下发 password/uuid/private_key 等。
-		list := nodes.LoadPanelNodes(s.cfg.NodesFile)
-		s.sendJSON(w, r, http.StatusOK, map[string]any{"nodes": nodes.PublicNodes(list)})
+		if r.Method == http.MethodPost {
+			s.createNode(w, r)
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			s.sendJSON(w, r, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		// 面板管理页需要严格节点列表；损坏时明确报错，不能表现为空列表。
+		list, err := nodes.LoadPanelNodesStrict(s.cfg.NodesFile)
+		if err != nil {
+			s.failUnavailable(w, r, codeNodesFileUnavailable, "", "节点配置文件不可用", err)
+			return
+		}
+		public := nodes.PublicNodes(list)
+		if s.policy != nil {
+			states, _ := s.policy.Snapshot()
+			for i := range public {
+				if st, ok := states[strconv.FormatInt(public[i].ID, 10)]; ok {
+					public[i].Paused = st.Paused
+					public[i].IPLimitOn = st.IPLimitOn
+					public[i].IPLimitMax = st.IPLimitMax
+					public[i].RateLimitOn = st.RateLimitOn
+					public[i].RateLimitMbps = st.RateLimitMbps
+				}
+			}
+		}
+		s.sendJSON(w, r, http.StatusOK, map[string]any{"nodes": public})
 
 	case "/api/export":
 		s.handleExport(w, r)
 
 	default:
+		if handled := s.tryNodeAdminRoute(w, r, route); handled {
+			return
+		}
 		// 策略子路由：/api/nodes/<id>/{policy|active-ips|ip-state}
 		if handled := s.tryPolicyRoute(w, r, route); handled {
 			return

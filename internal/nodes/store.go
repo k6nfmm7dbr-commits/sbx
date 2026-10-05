@@ -20,8 +20,9 @@ type Node map[string]any
 
 // Store 持有节点相关文件路径。
 type Store struct {
-	AppDir string
-	SBConf string
+	AppDir    string
+	SBConf    string
+	NodesFile string // 可选：panel.json 使用自定义 nodes_file 时覆盖默认路径
 }
 
 // NewStore 从环境变量构造（SBX_DIR / SBX_SB_CONF），默认值与旧实现一致。
@@ -37,7 +38,12 @@ func NewStore() *Store {
 	return &Store{AppDir: app, SBConf: sb}
 }
 
-func (s *Store) NodesPath() string { return filepath.Join(s.AppDir, "nodes.json") }
+func (s *Store) NodesPath() string {
+	if s.NodesFile != "" {
+		return s.NodesFile
+	}
+	return filepath.Join(s.AppDir, "nodes.json")
+}
 func (s *Store) StatePath() string { return filepath.Join(s.AppDir, "state.json") }
 func (s *Store) CertDir() string   { return filepath.Join(s.AppDir, "certs") }
 

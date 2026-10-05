@@ -265,7 +265,7 @@ func TestAPIEndpoints(t *testing.T) {
 		t.Errorf("live 节点 conns 异常: %+v", node0)
 	}
 
-	// /api/nodes 必须脱敏：只含 id/name/type/port，绝不含 secret 字段。
+	// /api/nodes 返回脱敏的管理元数据（展示/编辑所需），绝不包含节点密码、UUID 或密钥。
 	resp = doReq(t, ts, http.MethodGet, "/api/nodes", nil)
 	var nd struct {
 		Nodes []map[string]any `json:"nodes"`

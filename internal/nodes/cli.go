@@ -27,24 +27,36 @@ const (
 )
 
 // Run 执行 node 子命令，返回进程退出码。
-func (c *CLI) Run(args []string) int {
+func (c *CLI) Run(args []string) int { return c.runCommand(args, true) }
+
+// RunUnlocked 执行子命令而不获取 CLI flock。调用方必须已经持有 SBX_LOCK；
+// HTTP 节点编辑事务会用它把 prepare/commit/restart/rollback 包在同一锁内。
+func (c *CLI) RunUnlocked(args []string) int { return c.runCommand(args, false) }
+
+func (c *CLI) runCommand(args []string, lockMutations bool) int {
+	mutate := func(fn func() int) int {
+		if lockMutations {
+			return c.mutationLocked(fn)
+		}
+		return fn()
+	}
 	if len(args) == 0 {
 		return c.usageError("需要子命令")
 	}
 	cmd, rest := args[0], args[1:]
 	switch cmd {
 	case "add":
-		return c.mutationLocked(func() int { return c.cmdAdd(rest) })
+		return mutate(func() int { return c.cmdAdd(rest) })
 	case "remove":
-		return c.mutationLocked(func() int { return c.cmdRemove(rest) })
+		return mutate(func() int { return c.cmdRemove(rest) })
 	case "edit":
-		return c.mutationLocked(func() int { return c.cmdEdit(rest) })
+		return mutate(func() int { return c.cmdEdit(rest) })
 	case "sync":
-		return c.mutationLocked(c.cmdSync)
+		return mutate(c.cmdSync)
 	case "commit":
-		return c.mutationLocked(c.cmdCommit)
+		return mutate(c.cmdCommit)
 	case "rollback":
-		return c.mutationLocked(c.cmdRollback)
+		return mutate(c.cmdRollback)
 	case "ss2022-key":
 		return c.cmdSS2022Key(rest)
 	case "list":

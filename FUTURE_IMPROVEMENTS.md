@@ -739,3 +739,19 @@ CSV 流式导出、nodes/config JSON 读取、策略 no-op enforcement 与 recon
   summary/live 暴露 paused；NodeIP/SSE 与流量统计契约保留。
 - E2E 策略流程从 quota block 改为 pause→nft 双向规则→流量不可达→resume 恢复，并以 paused
   静态规则测试外部删表自愈；IP allow-set、限速、clear 自有表安全测试继续保留。
+
+
+## 23. v3.0.23：面板节点配置管理与安全提交
+
+- 新增面板「配置」页签与 POST `/api/nodes`、PUT/DELETE `/api/nodes/:id`、GET `/api/nodes/:id/links`。
+  节点列表只暴露 id/name/type/protocol/port/SNI/method/version 与暂停/IP/限速状态，不下发密码、UUID、
+  Reality key 或 Snell PSK；分享 URI 单独走鉴权接口返回（本身含客户端连接凭据）。
+- 创建操作由服务端生成 UUID / Reality keypair / SS2022 key / Trojan/AnyTLS 密码与 TLS cert / Snell PSK；
+  secrets 不经过 UI 文本字段。改 SS2022 method 沿用现有 CLI 规则重新生成兼容长度的 key。
+- Web API 与 CLI 共用 `/run/lock/sbx.lock`；候选 config + nodes 经 route.final 校正与 `sing-box check`，
+  保存 config/nodes 备份后再 durable rename commit。sing-box restart 失败则从备份原子恢复两文件并尝试重启旧配置；
+  如果恢复本身失败保留 `.bak`，返回需人工介入的明确错误。计数规则 apply 失败属于 commit 后 partial warning，
+  不回滚已正常运行的节点配置。
+- 真机 API tests 覆盖 Shadowsocks CRUD/share、并发创建不丢节点、sing-box restart 故障恢复、VLESS/Trojan
+  key/cert server-side generation 和 public list secret redaction。实际长期运行代理机上的完整 namespace E2E 未在该工作站执行；
+  CI/真机 Go suite 与带 API add 的 E2E 脚本覆盖构建路径和协议逻辑。
