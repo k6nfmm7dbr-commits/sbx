@@ -635,7 +635,7 @@ func (s *Server) mutateNodeFiles(ctx context.Context, cli *nodes.CLI, build func
 	result, err = runNodeCLI(cli, args...)
 	if err != nil {
 		_ = cli.RunUnlocked([]string{"rollback"})
-		return "", "", errors.New("节点配置无法生成候选；请检查节点参数与当前配置")
+		return "", "", fmt.Errorf("节点配置候选生成失败：%w", err)
 	}
 	confCand := cli.Store.SBConf + ".candidate"
 	if _, err = os.Stat(confCand); err != nil {

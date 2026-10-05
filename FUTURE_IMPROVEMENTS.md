@@ -755,3 +755,11 @@ CSV 流式导出、nodes/config JSON 读取、策略 no-op enforcement 与 recon
 - 真机 API tests 覆盖 Shadowsocks CRUD/share、并发创建不丢节点、sing-box restart 故障恢复、VLESS/Trojan
   key/cert server-side generation 和 public list secret redaction。实际长期运行代理机上的完整 namespace E2E 未在该工作站执行；
   CI/真机 Go suite 与带 API add 的 E2E 脚本覆盖构建路径和协议逻辑。
+
+## 24. v3.0.24：前端热点削减与节点管理错误诊断
+
+- Dashboard `renderNodeCards` 不再在每次 summary 更新时重建整组卡片；仅在节点结构变化时重建，再定点更新统计、策略状态和 IP 文本。`renderLive` 在非总览页只保存快照，不扫描隐藏卡片 DOM。
+- `/api/daily` 只在趋势/节点页可见时刷新；总趋势和节点趋势均设 60 秒 freshness 并按当前 node ID 缓存。切换回未过期节点即时显示，过期数据先显示后后台刷新。快速切换时旧响应不能覆盖当前选择；节点变更通过缓存代次阻止旧请求回填已失效数据。`summary/live` 只在总览页轮询，离开总览暂停 2s live 与 8s summary 请求，返回立即补刷。
+- 新增节点表单把 443 从纯 placeholder 改成实际初始值；端口范围校验仍保留。
+- 删除候选构建错误不再被统一包装成“参数与配置有问题”，改为向已鉴权的面板返回 CLI 的具体校验/IO 原因；新增故障注入测试确保错误诊断可见且原节点仍在。
+- 不因“激进优化”而重写 nftables/collector/database 的稳定热路径：本轮未拿到端到端 CPU profile 或服务端 A/B 证据，不做猜测性语义改写。复核服务器基准确认稳态 API cache key 72.4ns/32B/1 alloc、dataVersion 12.3ns/0B、enforcement no-op 171.8ns/0B；50 节点×10 IP reconcile 0.738ms/245KB/1177 alloc，50×50 为 3.014ms/0.938MB/1477 alloc。保留这些已收敛的热路径，后续需要先有端到端 profile 再决定激进改写。

@@ -2,6 +2,7 @@
 'use strict';
 
 var state = { days: 180, nodeId: null, summary: null, live: null };
+var activeView = 'home';
 
 var inflight = {};
 function api(path, params) {
@@ -86,7 +87,10 @@ function renderSummary(s) {
   easeTo('kpi-today-total', s.today.rx + s.today.tx, fmtBytes);
   easeTo('kpi-all-total', s.total.rx + s.total.tx, fmtBytes);
   setText('kpi-nodes', s.nodes.length);
-  renderNodeCards(s);
+  if (activeView === 'home') {
+    renderNodeCards(s);
+    if (state.live) renderLive(state.live);
+  }
   renderNodeSelect(s);
   if (s.error) toast(s.error);
   // 策略 enforcement 错误（如 nft 规则应用失败）：变化时提醒一次，
@@ -108,60 +112,73 @@ function nodeStatus(n) {
 }
 function renderNodeCards(s) {
   var host = document.getElementById('node-cards');
-  if (!s.nodes.length) { host.innerHTML = '<div class="empty">暂无节点，运行 sbx 菜单添加</div>'; return; }
-  host.innerHTML = s.nodes.map(function (n) {
+  if (!host) return;
+  var nodes = s.nodes || [];
+  var signature = JSON.stringify(nodes.map(function (n) { return [n.id, n.name, n.type, n.port]; }));
+  if (host._nodeStructure !== signature) {
+    host._nodeStructure = signature;
+    if (!nodes.length) {
+      host.innerHTML = '<div class="empty">暂无节点，运行 sbx 菜单添加</div>';
+      return;
+    }
+    host.innerHTML = nodes.map(function (n) {
+      var id = esc(n.id);
+      return '<div class="node-card' + (n.paused ? ' paused' : '') + '">' +
+        '<div class="node-top"><div class="node-title">' +
+          '<div class="node-name"><span data-node-name></span><span class="node-paused-tag hidden" data-node-paused>暂停</span></div>' +
+          '<div class="node-meta-line"><span class="chip">' + esc(n.type || '—') + '</span><span class="port">端口 ' + esc(portText(n)) + '</span></div>' +
+        '</div><div class="node-rate">' +
+          '<b class="up" data-node-live="' + id + '" data-kind="rate-up">—</b>' +
+          '<b class="down" data-node-live="' + id + '" data-kind="rate-down">—</b>' +
+        '</div></div>' +
+        '<div class="node-stats">' +
+          '<div class="node-stat"><span>累计 / 今日</span><b><span data-node-total></span><span class="sep">/</span><span data-node-today></span></b></div>' +
+          '<div class="node-stat"><span>限速</span><b data-node-rate></b></div>' +
+          '<div class="node-stat"><span>TCP / UDP</span><b><i data-node-live="' + id + '" data-kind="conns">—</i><span class="sep">/</span><i data-node-live="' + id + '" data-kind="conns_udp">—</i></b></div>' +
+        '</div>' +
+        '<button class="ip-strip" data-view-ips="' + id + '"><span class="ip-strip-label">在线 IP</span>' +
+          '<span class="ip-strip-val" data-node-ips="' + id + '">—</span><span class="ip-strip-arrow">›</span></button>' +
+        '<div class="node-foot"><div data-node-status></div><div class="node-actions"><button class="mini-btn primary" data-manage="' + id + '">管理</button></div></div>' +
+      '</div>';
+    }).join('');
+  }
+  for (var i = 0; i < nodes.length; i++) {
+    var n = nodes[i], card = host.children[i];
+    if (!card) continue;
     var total = (n.total && (n.total.rx + n.total.tx)) || 0;
     var today = (n.today && (n.today.rx + n.today.tx)) || 0;
+    card.classList.toggle('paused', !!n.paused);
+    card.querySelector('[data-node-name]').textContent = n.name || '';
+    card.querySelector('[data-node-paused]').classList.toggle('hidden', !n.paused);
+    card.querySelector('[data-node-total]').textContent = fmtBytes(total);
+    card.querySelector('[data-node-today]').textContent = fmtBytes(today);
+    card.querySelector('[data-node-rate]').textContent = rateText(n);
+    card.querySelector('[data-node-status]').innerHTML = nodeStatus(n);
     var ipVal = (n.active_ip_count || 0) + (n.ip_limit_enabled ? ' / ' + n.ip_limit_max : '');
-    return '<div class="node-card' + (n.paused ? ' paused' : '') + '">' +
-      '<div class="node-top">' +
-        '<div class="node-title">' +
-          '<div class="node-name">' + esc(n.name) + (n.paused ? ' <span class="node-paused-tag">暂停</span>' : '') + '</div>' +
-          '<div class="node-meta-line"><span class="chip">' + esc(n.type || '—') + '</span>' +
-            '<span class="port">端口 ' + esc(portText(n)) + '</span></div>' +
-        '</div>' +
-        '<div class="node-rate">' +
-          '<b class="up" data-node-live="' + esc(n.id) + '" data-kind="rate-up">—</b>' +
-          '<b class="down" data-node-live="' + esc(n.id) + '" data-kind="rate-down">—</b>' +
-        '</div>' +
-      '</div>' +
-      '<div class="node-stats">' +
-        '<div class="node-stat"><span>累计 / 今日</span><b>' + fmtBytes(total) +
-          '<span class="sep">/</span>' + fmtBytes(today) + '</b></div>' +
-        '<div class="node-stat"><span>限速</span><b>' + esc(rateText(n)) + '</b></div>' +
-        '<div class="node-stat"><span>TCP / UDP</span><b>' +
-          '<i data-node-live="' + esc(n.id) + '" data-kind="conns">—</i><span class="sep">/</span>' +
-          '<i data-node-live="' + esc(n.id) + '" data-kind="conns_udp">—</i></b></div>' +
-      '</div>' +
-      '<button class="ip-strip" data-view-ips="' + esc(n.id) + '">' +
-        '<span class="ip-strip-label">在线 IP</span>' +
-        '<span class="ip-strip-val" data-node-ips="' + esc(n.id) + '">' + esc(ipVal) + '</span>' +
-        '<span class="ip-strip-arrow">›</span>' +
-      '</button>' +
-      '<div class="node-foot">' +
-        nodeStatus(n) +
-        '<div class="node-actions"><button class="mini-btn primary" data-manage="' + esc(n.id) + '">管理</button></div>' +
-      '</div>' +
-    '</div>';
-  }).join('');
-  if (state.live) renderLive(state.live);
+    card.querySelector('[data-node-ips]').textContent = ipVal;
+  }
 }
 
 function renderNodeSelect(s) {
   var sel = document.getElementById('node-select');
-  var want = state.nodeId != null ? String(state.nodeId) : (s.nodes.length ? String(s.nodes[0].id) : '');
-  var sig = s.nodes.map(function (n) { return n.id + ':' + n.name; }).join('|');
+  var nodes = s.nodes || [];
+  var previous = state.nodeId == null ? '' : String(state.nodeId);
+  var exists = nodes.some(function (n) { return String(n.id) === previous; });
+  var want = exists ? previous : (nodes.length ? String(nodes[0].id) : '');
+  var sig = nodes.map(function (n) { return n.id + ':' + n.name; }).join('|');
   if (sel._sig !== sig) {
     sel._sig = sig;
-    sel.innerHTML = s.nodes.map(function (n) { return '<option value="' + esc(n.id) + '">' + esc(n.name) + '</option>'; }).join('');
+    sel.innerHTML = nodes.map(function (n) { return '<option value="' + esc(n.id) + '">' + esc(n.name) + '</option>'; }).join('');
   }
   if (want && sel.value !== want) sel.value = want;
-  if (state.nodeId == null && want) { state.nodeId = want; loadNodeDaily(); }
+  state.nodeId = want || null;
+  if (previous !== want && want && activeView === 'node') loadNodeDaily();
 }
 
 /* ---------- 渲染：实时（高频 live） ---------- */
 function renderLive(v) {
   state.live = v;
+  if (activeView !== 'home') return;
   var live = v.rate_known !== false;
 
   var rt = v.rate_total || { rx: 0, tx: 0 };
@@ -197,7 +214,11 @@ function renderLive(v) {
 }
 
 /* ---------- 明细表格 ---------- */
-var cache = { daily: null, nodeDaily: null };
+var cache = { daily: null, dailyFetchedAt: 0, nodeDaily: Object.create(null) };
+var dailyRequest = 0;
+var dailyEpoch = 0;
+var nodeDailyRequest = 0;
+var nodeDailyEpoch = 0;
 
 function renderTable(hostId, rows) {
   var host = document.getElementById(hostId); if (!host) return;
@@ -215,15 +236,42 @@ function renderTable(hostId, rows) {
   host.innerHTML = html;
 }
 function drawDaily() { if (cache.daily) renderTable('daily-table', cache.daily); }
-function drawNodeDaily() { if (cache.nodeDaily) renderTable('node-daily-table', cache.nodeDaily); }
-function loadDaily() {
-  return api('/api/daily', { days: 180 }).then(function (d) { cache.daily = d.days; drawDaily(); })
-    .catch(function (e) { if (e.message !== '未登录') toast(e.message); });
+function drawNodeDaily() {
+  if (state.nodeId == null) return;
+  var entry = cache.nodeDaily[String(state.nodeId)];
+  if (entry) renderTable('node-daily-table', entry.days);
 }
-function loadNodeDaily() {
+function loadDaily(force) {
+  if (!force && cache.daily && Date.now() - cache.dailyFetchedAt < 60000) {
+    if (activeView === 'daily') drawDaily();
+    return Promise.resolve();
+  }
+  var request = ++dailyRequest, epoch = dailyEpoch;
+  return api('/api/daily', { days: 180 }).then(function (d) {
+    if (epoch !== dailyEpoch) return;
+    cache.daily = d.days || [];
+    cache.dailyFetchedAt = Date.now();
+    if (activeView === 'daily' && request === dailyRequest) drawDaily();
+  }).catch(function (e) { if (e.message !== '未登录') toast(e.message); });
+}
+function loadNodeDaily(force) {
   if (state.nodeId == null) return Promise.resolve();
-  return api('/api/daily', { days: 180, scope: 'node:' + state.nodeId })
-    .then(function (d) { cache.nodeDaily = d.days; drawNodeDaily(); })
+  var id = String(state.nodeId), cached = cache.nodeDaily[id];
+  if (!force && cached) {
+    drawNodeDaily();
+    if (Date.now() - cached.fetchedAt < 60000) return Promise.resolve();
+  }
+  var request = ++nodeDailyRequest, epoch = nodeDailyEpoch;
+  if (!cached) {
+    var host = document.getElementById('node-daily-table');
+    if (host) host.innerHTML = '<div class="empty">正在加载节点趋势…</div>';
+  }
+  return api('/api/daily', { days: 180, scope: 'node:' + id })
+    .then(function (d) {
+      if (epoch !== nodeDailyEpoch) return;
+      cache.nodeDaily[id] = { days: d.days || [], fetchedAt: Date.now() };
+      if (activeView === 'node' && String(state.nodeId) === id && request === nodeDailyRequest) drawNodeDaily();
+    })
     .catch(function (e) { if (e.message !== '未登录') toast(e.message); });
 }
 
@@ -237,6 +285,20 @@ function loadManageNodes() {
     renderManageNodes();
   }).catch(function (e) {
     if (e.message !== '未登录') toast(e.message);
+  });
+}
+
+function refreshAfterNodeMutation() {
+  cache.daily = null;
+  cache.dailyFetchedAt = 0;
+  cache.nodeDaily = Object.create(null);
+  dailyRequest++;
+  dailyEpoch++;
+  nodeDailyRequest++;
+  nodeDailyEpoch++;
+  return Promise.all([loadManageNodes(), loadSummary()]).then(function () {
+    if (activeView === 'daily') return loadDaily();
+    if (activeView === 'node') return loadNodeDaily(true);
   });
 }
 
@@ -290,7 +352,7 @@ function openNodeEditor(id) {
   document.getElementById('node-form-type').value = editingNode ? (editingNode.protocol || 'vless') : 'vless';
   document.getElementById('node-form-name').value = editingNode ? editingNode.name : '';
   document.getElementById('node-form-name').disabled = !!editingNode;
-  document.getElementById('node-form-port').value = editingNode ? editingNode.port : '';
+  document.getElementById('node-form-port').value = editingNode ? editingNode.port : '443';
   document.getElementById('node-form-sni').value = editingNode ? (editingNode.sni || '') : '';
   document.getElementById('node-form-method').value = editingNode ? (editingNode.method || '2022-blake3-aes-128-gcm') : '2022-blake3-aes-128-gcm';
   document.getElementById('node-form-version').value = editingNode ? String(editingNode.version || 5) : '5';
@@ -342,7 +404,7 @@ function saveNodeConfig() {
     closeDrawer('node-editor-drawer');
     toast(d.warning || (editingNode ? '节点已更新' : '节点已添加'));
     editingNode = null;
-    return Promise.all([loadManageNodes(), loadSummary(), loadDaily()]);
+    return refreshAfterNodeMutation();
   }).catch(function (e) {
     if (e.message !== '未登录') showNodeFormError(e.message);
   }).finally(function () {
@@ -362,7 +424,7 @@ function deleteNodeConfig(id) {
   var path = '/api/nodes/' + id + (clearHistory ? '?clear_history=1' : '');
   nodeRequest(path, 'DELETE').then(function (d) {
     toast(d.warning || (d.history_cleared ? '节点及历史流量已删除' : '节点已删除，历史流量已保留'));
-    return Promise.all([loadManageNodes(), loadSummary(), loadDaily()]);
+    return refreshAfterNodeMutation();
   }).catch(function (e) { if (e.message !== '未登录') toast(e.message); });
 }
 
@@ -399,7 +461,8 @@ function bindNodeManageUI() {
 
 /* ---------- 事件 ---------- */
 document.getElementById('node-select').addEventListener('change', function (e) {
-  state.nodeId = e.target.value; loadNodeDaily();
+  state.nodeId = e.target.value || null;
+  loadNodeDaily();
 });
 
 /* ---------- 底部导航 ---------- */
@@ -408,13 +471,19 @@ document.getElementById('node-select').addEventListener('change', function (e) {
   var current = (location.hash || '#home').slice(1); if (!valid[current]) current = 'home';
   function show(name, push) {
     if (!valid[name]) name = 'home';
-    positions[current] = window.scrollY || 0; current = name;
+    positions[current] = window.scrollY || 0; current = name; activeView = name;
     document.querySelectorAll('.view').forEach(function (v) { v.classList.toggle('on', v.id === 'view-' + name); });
     document.querySelectorAll('.tab').forEach(function (b) { b.classList.toggle('on', b.dataset.view === name); });
     if (push && location.hash !== '#' + name) history.pushState(null, '', '#' + name);
     requestAnimationFrame(function () { window.scrollTo(0, positions[name] || 0); });
-    if (name === 'daily' && !cache.daily) loadDaily();
-    if (name === 'node' && !cache.nodeDaily) loadNodeDaily();
+    if (name === 'home') {
+      if (state.summary) renderNodeCards(state.summary);
+      if (state.live) renderLive(state.live);
+      loadSummary();
+      loadLive();
+    }
+    if (name === 'daily') loadDaily();
+    if (name === 'node') loadNodeDaily();
     if (name === 'manage') loadManageNodes();
   }
   document.querySelectorAll('.tab').forEach(function (b) {
@@ -428,13 +497,20 @@ document.getElementById('node-select').addEventListener('change', function (e) {
 function loadSummary() { return api('/api/summary').then(renderSummary).catch(function (e) { if (e.message !== '未登录') toast(e.message); }); }
 function loadLive() { return api('/api/live').then(renderLive).catch(function () {}); }
 
-loadSummary().then(function () { loadLive(); loadDaily(); });
+loadSummary().then(function () { if (activeView === 'home') loadLive(); });
 startEvents();
-setInterval(function () { if (!document.hidden) loadLive(); }, 2000);
-setInterval(function () { if (!document.hidden) loadSummary(); }, 8000);
-setInterval(function () { if (!document.hidden) { loadDaily(); loadNodeDaily(); } }, 60000);
+setInterval(function () { if (!document.hidden && activeView === 'home') loadLive(); }, 2000);
+setInterval(function () { if (!document.hidden && activeView === 'home') loadSummary(); }, 8000);
+setInterval(function () {
+  if (document.hidden) return;
+  if (activeView === 'daily') loadDaily(true);
+  else if (activeView === 'node') loadNodeDaily(true);
+}, 60000);
 document.addEventListener('visibilitychange', function () {
-  if (!document.hidden) { loadLive(); loadSummary(); }
+  if (!document.hidden && activeView === 'home') {
+    loadSummary();
+    loadLive();
+  }
 });
 
 /* ==================== 节点策略管理（暂停 / IP Limit / Rate Limit） ==================== */

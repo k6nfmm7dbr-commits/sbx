@@ -19,14 +19,14 @@ APP_VER=$(grep -m1 '^APP_VERSION=' "$ROOT/installer-template.sh" | sed -E 's/^AP
 GO_VER=$(grep '^const Version = ' "$ROOT/internal/version/version.go" | sed 's/.*"\(.*\)".*/\1/')
 README_VER=$(awk '/^## 当前版本/{f=1;next} f&&/^```text$/{g=1;next} g&&/^```$/{exit} g{print;exit}' "$ROOT/README.md" | tr -d 'v')
 SBX_VER=$(grep -m1 '^APP_VERSION=' "$ROOT/sbx.sh" | sed -E 's/^APP_VERSION="?([^"]+)"?.*/\1/')
-ck "APP_VERSION == 3.0.23" "3.0.23" "$APP_VER"
-ck "Go Version == 3.0.23" "3.0.23" "$GO_VER"
-ck "README 当前版本 == 3.0.23" "3.0.23" "$README_VER"
-ck "sbx.sh 版本 == 3.0.23" "3.0.23" "$SBX_VER"
+ck "APP_VERSION == 3.0.24" "3.0.24" "$APP_VER"
+ck "Go Version == 3.0.24" "3.0.24" "$GO_VER"
+ck "README 当前版本 == 3.0.24" "3.0.24" "$README_VER"
+ck "sbx.sh 版本 == 3.0.24" "3.0.24" "$SBX_VER"
 ck "四者完全一致" 1 "$([ "$APP_VER" == "$GO_VER" ] && [ "$GO_VER" == "$README_VER" ] && [ "$README_VER" == "$SBX_VER" ] && echo 1 || echo 0)"
 # 终验脚本期望版本
 for s in fresh_install_github e2e_remote fullinstall_remote; do
-  grep -q '3\.0\.23' "$ROOT/scripts/$s.sh"; ck "终验脚本 $s 期望 3.0.23" 0 $?
+  grep -q '3\.0\.24' "$ROOT/scripts/$s.sh"; ck "终验脚本 $s 期望 3.0.24" 0 $?
 done
 # 面板已提供流量总览/趋势；交互菜单不得再重复列出这项，也不保留旧入口。
 grep -q 'menu_traffic' "$ROOT/installer-template.sh"; ck "sbx 菜单已移除重复流量统计入口" 1 $?
@@ -102,7 +102,7 @@ grep -q 'core_version_of()' "$TMPD/cv.sh" || { echo "未找到 core_version_of�
 cat >> "$TMPD/cv.sh" <<'STUBS'
 warn() { echo "[warn] $*" >&2; }
 die()  { echo "[die] $*" >&2; exit 1; }
-APP_VERSION="3.0.23"
+APP_VERSION="3.0.24"
 CORE_BIN="$TMPD/installed-core"
 install_sbx_core() { source "$TMPD/cv.sh"; local cand_ver; cand_ver=$(core_version_of "$1"); [[ "$cand_ver" == "$APP_VERSION" ]]; }
 STUBS
@@ -111,29 +111,41 @@ mk_candidate() { printf '#!/bin/sh\necho "sbx-core v%s"\n' "$1" > "$TMPD/cand"; 
 # mismatch：3.0.3 → 必须拒绝
 mk_candidate 3.0.3
 ( set +u; source "$TMPD/cv.sh"; install_sbx_core "$TMPD/cand" ) 2>/dev/null; RC=$?
-ck "candidate version 3.0.3 != APP 3.0.23 → 拒绝" 1 "$([ "$RC" != 0 ] && echo 1 || echo 0)"
-# success：3.0.23 → 允许
-mk_candidate 3.0.23
+ck "candidate version 3.0.3 != APP 3.0.24 → 拒绝" 1 "$([ "$RC" != 0 ] && echo 1 || echo 0)"
+# success：3.0.24 → 允许
+mk_candidate 3.0.24
 ( set +u; source "$TMPD/cv.sh"; install_sbx_core "$TMPD/cand" ) 2>/dev/null; RC=$?
-ck "candidate version 3.0.23 == APP → 允许" 0 "$([ "$RC" == 0 ] && echo 0 || echo 1)"
+ck "candidate version 3.0.24 == APP → 允许" 0 "$([ "$RC" == 0 ] && echo 0 || echo 1)"
 # 无法解析的输出 → 拒绝（严格解析，非 substring）
-printf '#!/bin/sh\necho "SBX Core version v3.0.23 linux amd64 build 123"\n' > "$TMPD/cand"; chmod +x "$TMPD/cand"
+printf '#!/bin/sh\necho "SBX Core version v3.0.24 linux amd64 build 123"\n' > "$TMPD/cand"; chmod +x "$TMPD/cand"
 ( set +u; source "$TMPD/cv.sh"; install_sbx_core "$TMPD/cand" ) 2>/dev/null; RC=$?
 ck "非标准 version 输出 → 拒绝（严格解析）" 1 "$([ "$RC" != 0 ] && echo 1 || echo 0)"
-# substring 陷阱：输出含 3.0.23 但实际版本不同 → 拒绝
-printf '#!/bin/sh\necho "sbx-core v3.0.231"\n' > "$TMPD/cand"; chmod +x "$TMPD/cand"
+# substring 陷阱：输出含 3.0.24 但实际版本不同 → 拒绝
+printf '#!/bin/sh\necho "sbx-core v3.0.241"\n' > "$TMPD/cand"; chmod +x "$TMPD/cand"
 ( set +u; source "$TMPD/cv.sh"; install_sbx_core "$TMPD/cand" ) 2>/dev/null; RC=$?
-ck "3.0.231 不得匹配 3.0.23（substring 陷阱）" 1 "$([ "$RC" != 0 ] && echo 1 || echo 0)"
-# 真实 Go 二进制 version 输出可被解析为 3.0.23
+ck "3.0.241 不得匹配 3.0.24（substring 陷阱）" 1 "$([ "$RC" != 0 ] && echo 1 || echo 0)"
+# 真实 Go 二进制 version 输出可被解析为 3.0.24
 # （iSH 等环境无法执行 Go 二进制——仓库 FUTURE_IMPROVEMENTS #6 已记录；CI/真机覆盖此检查）
 REAL_VER=$( (cd "$ROOT" && go run ./cmd/sbx-core version 2>/dev/null) )
 if [[ -n "$REAL_VER" ]]; then
-  printf '%s\n' "$REAL_VER" | grep -q '^sbx-core v3\.0\.23$'; ck "go run ./cmd/sbx-core version == sbx-core v3.0.23" 0 $?
-  echo "$REAL_VER" | sed -nE 's/^sbx-core v?([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' | grep -qx '3.0.23'; ck "真实二进制输出可被 core_version_of 解析为 3.0.23" 0 $?
+  printf '%s\n' "$REAL_VER" | grep -q '^sbx-core v3\.0\.24$'; ck "go run ./cmd/sbx-core version == sbx-core v3.0.24" 0 $?
+  echo "$REAL_VER" | sed -nE 's/^sbx-core v?([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' | grep -qx '3.0.24'; ck "真实二进制输出可被 core_version_of 解析为 3.0.24" 0 $?
 else
   echo "  [SKIP] 当前环境无法执行 Go 二进制（iSH 限制），由 CI 覆盖"
   PASS=$((PASS+2))
 fi
+
+# ---- O. v3.0.24 面板流畅性 / 节点表单回归 ----
+grep -q 'id="node-form-port"[^>]*value="443"' "$ROOT/internal/webui/static/index.html"
+ck "新建节点端口真实默认值为 443" 0 $?
+grep -q 'host._nodeStructure !== signature' "$ROOT/internal/webui/static/app.js"
+ck "节点卡片结构按需重建而非每次全量替换" 0 $?
+grep -Fq 'cache.nodeDaily[id] = { days:' "$ROOT/internal/webui/static/app.js"
+ck "节点趋势按 ID 缓存响应" 0 $?
+grep -q 'request === nodeDailyRequest' "$ROOT/internal/webui/static/app.js"
+ck "节点切换响应防止旧请求覆盖当前视图" 0 $?
+grep -q "activeView === 'node') loadNodeDaily(true)" "$ROOT/internal/webui/static/app.js"
+ck "只在节点趋势页定时重载趋势数据" 0 $?
 
 # ---- N. nftables-only 架构静态收口（v3.0.9） --------------------------------
 # 目的：锁定「iptables 后端已彻底移除」，防止未来无意中把双后端逻辑写回来。

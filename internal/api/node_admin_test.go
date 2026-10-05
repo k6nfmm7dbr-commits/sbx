@@ -275,6 +275,29 @@ exit 0
 	}
 }
 
+func TestPanelDeleteReportsCandidateGenerationCause(t *testing.T) {
+	ts, nodesFile, _, _, _ := newNodeCRUDTestServer(t)
+	code, created := doJSON(t, ts, http.MethodPost, "/api/nodes", `{"type":"shadowsocks","name":"candidate-error","port":8390}`)
+	if code != http.StatusOK {
+		t.Fatalf("create failed: %d %#v", code, created)
+	}
+	if err := os.WriteFile(os.Getenv("SBX_SB_CONF"), []byte(`{"inbounds":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, result := doJSON(t, ts, http.MethodDelete, "/api/nodes/1", "")
+	if code != http.StatusUnprocessableEntity || !strings.Contains(fmt.Sprint(result["error"]), "inbounds 必须是数组") {
+		t.Fatalf("delete should expose safe candidate validation cause, got %d %#v", code, result)
+	}
+	data, err := os.ReadFile(nodesFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nodes []any
+	if err := json.Unmarshal(data, &nodes); err != nil || len(nodes) != 1 {
+		t.Fatalf("failed delete must preserve the original node: %s err=%v", data, err)
+	}
+}
+
 func TestPanelDeleteKeepsHistoryUnlessExplicitlyRequested(t *testing.T) {
 	ts, nodesFile, _, _, srv := newNodeCRUDTestServer(t)
 	code, _ := doJSON(t, ts, http.MethodPost, "/api/nodes", `{"type":"shadowsocks","name":"keep-history","port":8389}`)
