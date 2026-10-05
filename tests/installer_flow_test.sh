@@ -233,6 +233,8 @@ sed -n '/^# >>> panel-unit/,/^# <<< panel-unit/p' "$TPL" > "$TMPD/unit.sh"
 grep -q 'sbx-panel.service' "$TMPD/unit.sh" || { echo "未找到 panel-unit 区块（模板标记被破坏？）"; exit 1; }
 RW="$(grep -m1 '^ReadWritePaths=' "$TMPD/unit.sh" | sed 's/^ReadWritePaths=//')"
 ck "panel unit 有 ReadWritePaths" 0 "$([ -n "$RW" ] && echo 0 || echo 1)"
+grep -Fq 'ReadWritePaths=$APP_DIR $SB_DIR' "$TMPD/unit.sh"
+ck "panel unit 允许写节点候选配置且只开放 sing-box 目录" 0 $?
 BAD_RUN=0
 for rwp in $RW; do
   case "$rwp" in

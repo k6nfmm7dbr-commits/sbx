@@ -763,3 +763,9 @@ CSV 流式导出、nodes/config JSON 读取、策略 no-op enforcement 与 recon
 - 新增节点表单把 443 从纯 placeholder 改成实际初始值；端口范围校验仍保留。
 - 删除候选构建错误不再被统一包装成“参数与配置有问题”，改为向已鉴权的面板返回 CLI 的具体校验/IO 原因；新增故障注入测试确保错误诊断可见且原节点仍在。
 - 不因“激进优化”而重写 nftables/collector/database 的稳定热路径：本轮未拿到端到端 CPU profile 或服务端 A/B 证据，不做猜测性语义改写。复核服务器基准确认稳态 API cache key 72.4ns/32B/1 alloc、dataVersion 12.3ns/0B、enforcement no-op 171.8ns/0B；50 节点×10 IP reconcile 0.738ms/245KB/1177 alloc，50×50 为 3.014ms/0.938MB/1477 alloc。保留这些已收敛的热路径，后续需要先有端到端 profile 再决定激进改写。
+
+## 25. v3.0.25：systemd 节点配置目录写权限
+
+- 根因定位：服务单元使用 `ProtectSystem=full`，该沙箱会把 `/etc` 变成只读；`ReadWritePaths` 当时只允许 `$APP_DIR`，而 API 通过原子写在 `$SB_DIR` (`/etc/sing-box`) 创建 `config.json.candidate`。因此配置变更在 CLI 候选阶段就因 `EROFS` 失败，未提交节点删除。
+- 最小修复：在 `ReadWritePaths` 中增加 `$SB_DIR`，不开放整个 `/etc`。安装器 `prepare_dirs` 已创建该路径，满足旧 systemd 对白名单目录必须存在的要求；升级时 `setup_services` 重写 unit 并重启服务。
+- `installer_flow_test.sh` 锁定该白名单同时仍拒绝 `/run`、`/tmp` 这类临时路径。

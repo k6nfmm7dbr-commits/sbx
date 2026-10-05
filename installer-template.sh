@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 APP_NAME="SBX"
-APP_VERSION="3.0.24"
+APP_VERSION="3.0.25"
 RAW_URL="${SBX_RAW_URL:-https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh}"
 
 # SBX_ROOT 仅用于测试/沙箱安装（把整套目录挪到前缀下），正常安装留空
@@ -1369,6 +1369,8 @@ PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=full
 # 只列出**实际存在且确实要写**的路径。
+# Web API 管理节点时会在 $SB_DIR 内原子写入 sing-box 候选配置；节点/策略/数据库
+# 状态写入 $APP_DIR。两者都由 prepare_dirs 提前创建，并且只开放这两个目录。
 #
 # 为什么这条注释必须留着：ReadWritePaths 里出现不存在的路径时，
 # systemd < 248（Debian 11 / Ubuntu 20.04 / RHEL 8 等）会让服务以
@@ -1376,9 +1378,9 @@ ProtectSystem=full
 # 在新系统上"看起来没问题"，到老系统上就是面板永远起不来。
 # 曾因此写过 /run/sbx：它在代码里从未被创建也从未被使用（全仓只有这一处提及），
 # 而 /run 是 tmpfs、每次重启清空，于是 Debian 11 上安装后面板直接不可用。
-# 规则：只写 $APP_DIR 这类安装时确实创建的路径；确需"可能不存在"的路径时
+# 规则：只写 $APP_DIR 与 $SB_DIR 这类 prepare_dirs 确实创建的路径；确需"可能不存在"的路径时
 # 必须加 "-" 前缀（systemd 会忽略缺失项）。
-ReadWritePaths=$APP_DIR
+ReadWritePaths=$APP_DIR $SB_DIR
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
