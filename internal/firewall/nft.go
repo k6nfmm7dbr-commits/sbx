@@ -48,7 +48,7 @@ type nftReadCall struct {
 }
 
 // NewNft 构造 nft 后端，confPath 用于 repair() 重建规则表。
-func NewNft(confPath string) *Nft { return &Nft{confPath} }
+func NewNft(confPath string) *Nft { return &Nft{confPath: confPath} }
 
 func (n *Nft) Name() string { return "nft" }
 
