@@ -1,9 +1,11 @@
 package firewall
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 )
@@ -46,10 +48,12 @@ type nftReadCall struct {
 }
 
 // NewNft 构造 nft 后端，confPath 用于 repair() 重建规则表。
-func NewNft(confPath string) *Nft { return &Nft{confPath: confPath} }
+func NewNft(confPath string) *Nft { return &Nft{confPath} }
 
 func (n *Nft) Name() string { return "nft" }
 
+// Read 读取 nftables 计数器快照。使用流式 JSON 解析，仅提取需要的计数器，
+// 跳过 sbx_epoch_* / sbx_sys_* / sbx_ct_activate 等无关计数器，降低 CPU 开销。
 func (n *Nft) Read(ctx context.Context) (Snapshot, error) {
 	n.mu.Lock()
 	if call := n.inflight; call != nil {
@@ -90,22 +94,158 @@ func (n *Nft) readOnce(ctx context.Context) (Snapshot, error) {
 		}
 		return nil, fmt.Errorf("nft 读取失败: %s", msg)
 	}
-	var doc nftDoc
-	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+
+	// 使用流式 json.Decoder 解析，跳过不需要的计数器。
+	res := make(Snapshot)
+	dec := json.NewDecoder(bytes.NewReader([]byte(out)))
+	// 解析外层 { "nftables": [...] }
+	if err := skipToKey(dec, "nftables"); err != nil {
 		return nil, fmt.Errorf("nft JSON 解析失败: %w", err)
 	}
-	res := Snapshot{}
-	for _, item := range doc.Nftables {
-		c := item.Counter
-		if c == nil {
+	if err := skipToArrayStart(dec); err != nil {
+		return nil, fmt.Errorf("nft JSON 解析失败: %w", err)
+	}
+
+	for {
+		// 尝试解析数组中的下一个元素
+		var item struct {
+			Counter *struct {
+				Name    string `json:"name"`
+				Bytes   int64  `json:"bytes"`
+				Packets int64  `json:"packets"`
+			} `json:"counter"`
+		}
+		// 如果到达数组末尾，退出循环
+		if dec.More() {
+			if err := dec.Decode(&item); err != nil {
+				if err == io.EOF {
+					break
+				}
+				return nil, fmt.Errorf("nft JSON 解析失败: %w", err)
+			}
+		} else {
+			break
+		}
+
+		if item.Counter == nil {
 			continue
 		}
-		res[c.Name] = [2]int64{c.Bytes, c.Packets}
+		name := item.Counter.Name
+		// 只提取 sbx_n<id>_(i|o) 格式的计数器（节点流量计数）。
+		// 跳过 sbx_epoch_* / sbx_sys_* / sbx_ct_activate 等无关计数器。
+		if !strings.HasPrefix(name, "sbx_n") {
+			continue
+		}
+		res[name] = [2]int64{item.Counter.Bytes, item.Counter.Packets}
 	}
+
 	if len(res) == 0 {
 		return nil, &ErrLookup{Msg: "nft table has no counters"}
 	}
 	return res, nil
+}
+
+// skipToKey 跳过 JSON 对象直到找到指定 key。
+func skipToKey(dec *json.Decoder, key string) error {
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if delim, ok := tok.(json.Delim); ok {
+			if delim == '{' {
+				// 嵌套对象，递归跳过
+				if err := skipObject(dec); err != nil {
+					return err
+				}
+				continue
+			}
+			if delim == '[' {
+				// 嵌套数组，递归跳过
+				if err := skipArray(dec); err != nil {
+					return err
+				}
+				continue
+			}
+		}
+		if s, ok := tok.(string); ok && s == key {
+			return nil
+		}
+	}
+}
+
+// skipObject 跳过当前 JSON 对象（调用方已消费 '{'）。
+func skipObject(dec *json.Decoder) error {
+	for dec.More() {
+		// 跳过 key
+		if _, err := dec.Token(); err != nil {
+			return err
+		}
+		// 跳过 value
+		if err := skipValue(dec); err != nil {
+			return err
+		}
+	}
+	// 消费 '}'
+	_, err := dec.Token()
+	return err
+}
+
+// skipArray 跳过当前 JSON 数组（调用方已消费 '['）。
+func skipArray(dec *json.Decoder) error {
+	for dec.More() {
+		if err := skipValue(dec); err != nil {
+			return err
+		}
+	}
+	_, err := dec.Token()
+	return err
+}
+
+// skipToArrayStart 跳过外层对象直到找到 nftables 数组的起始 '['。
+// 前置条件：已消费 "nftables" key，接下来应该是 ':' 和 '['。
+func skipToArrayStart(dec *json.Decoder) error {
+	// 跳过 ':'
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if delim, ok := tok.(json.Delim); ok {
+			if delim == '[' {
+				return nil
+			}
+			// 如果是 '{' 或 '['，跳过整个值
+			if delim == '{' {
+				if err := skipObject(dec); err != nil {
+					return err
+				}
+			} else if delim == '[' {
+				if err := skipArray(dec); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		// 基本类型值，继续
+	}
+}
+
+// skipValue 跳过任意 JSON 值。
+func skipValue(dec *json.Decoder) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if delim, ok := tok.(json.Delim); ok {
+		switch delim {
+		case '{':
+			return skipObject(dec)
+		case '[':
+			return skipArray(dec)
+		}
+	}
+	return nil
 }
 
 // Repair 用安装时生成的规则文件重建计数器表。

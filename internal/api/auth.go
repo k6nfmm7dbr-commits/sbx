@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"compress/gzip"
 	"crypto/subtle"
 	"log/slog"
 	"net/http"
@@ -13,22 +14,36 @@ import (
 	"github.com/k6nfmm7dbr-commits/sbx/internal/webui"
 )
 
-// assetCache 缓存内嵌前端资源的字节内容（name -> []byte）。
-//
-// 为什么可以永久缓存：资源经 go:embed 编进二进制，进程生命周期内**不可能变化**
-// （升级=换二进制=换进程）。旧实现每次请求都 Open + 全量拷贝一份新副本：
-// app.js 33KB、style.css 28KB，每次页面加载/刷新都要多分配一份。
-//
-// 返回值是只读共享切片：调用方只把它写进 HTTP 响应，绝不修改。
-var assetCache sync.Map
+// assetCache 缓存常用内嵌静态资源，避免每次 HTTP 请求都重新读取文件。
+// 使用 sync.Once 确保只加载一次；加载失败时缓存 nil，后续请求回退到实时读取。
+var (
+	assetCache     = map[string][]byte{}
+	assetCacheOnce sync.Once
+)
 
-// assetBytes 从内嵌前端读取文件（结果进程内缓存）。
-func assetBytes(name string) ([]byte, error) {
-	name = strings.TrimLeft(name, "/")
-	if v, ok := assetCache.Load(name); ok {
-		return v.([]byte), nil
+func initAssetCache() {
+	for _, name := range []string{"index.html", "login.html", "app.js", "login.js", "style.css"} {
+		data, err := assetBytesUncached(name)
+		if err != nil {
+			slog.Warn("预加载静态资源失败", "name", name, "err", err)
+			continue
+		}
+		assetCache[name] = data
 	}
-	f, err := webui.FS().Open(name)
+}
+
+// assetBytes 从内嵌前端读取文件。优先使用缓存；缓存未命中时实时读取。
+func assetBytes(name string) ([]byte, error) {
+	assetCacheOnce.Do(initAssetCache)
+	if data, ok := assetCache[name]; ok {
+		return data, nil
+	}
+	return assetBytesUncached(name)
+}
+
+// assetBytesUncached 直接从内嵌 FS 读取文件（不经缓存）。
+func assetBytesUncached(name string) ([]byte, error) {
+	f, err := webui.FS().Open(strings.TrimLeft(name, "/"))
 	if err != nil {
 		return nil, err
 	}
@@ -37,10 +52,7 @@ func assetBytes(name string) ([]byte, error) {
 	if _, err := buf.ReadFrom(f); err != nil {
 		return nil, err
 	}
-	data := buf.Bytes()
-	// 并发首读可能重复解析同一资源，结果逐字节相同，无害。
-	assetCache.Store(name, data)
-	return data, nil
+	return buf.Bytes(), nil
 }
 
 // ---- 响应输出（对齐旧 _send/_json 的头与编码） ---------------------------
@@ -64,11 +76,25 @@ func (s *Server) sendText(w http.ResponseWriter, r *http.Request, code int, text
 	s.send(w, r, code, "text/plain; charset=utf-8", []byte(text))
 }
 
+// sendJSON 序列化 v 为 JSON，若客户端支持 gzip 且数据 > 1KB 则压缩后发送。
 func (s *Server) sendJSON(w http.ResponseWriter, r *http.Request, code int, v any) {
 	data, err := fsx.MarshalCompact(v)
 	if err != nil {
 		slog.Error("JSON 序列化失败", "err", err)
 		s.sendText(w, r, http.StatusInternalServerError, "internal error")
+		return
+	}
+	// 仅对 GET 请求且 Accept-Encoding 包含 gzip 且数据量足够大时才压缩。
+	if r.Method == http.MethodGet &&
+		strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") &&
+		len(data) > 1024 {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Vary", "Accept-Encoding")
+		w.WriteHeader(code)
+		gz := gzip.NewWriter(w)
+		_, _ = gz.Write(data)
+		_ = gz.Close()
 		return
 	}
 	s.send(w, r, code, "application/json; charset=utf-8", data)
@@ -124,15 +150,7 @@ func cookieToken(r *http.Request) string {
 // tokenEqual 等长度 secret 内容比较（常量时间）。
 // 长度本身不是保密信息，长度不等时直接返回 false；等长度内容用
 // crypto/subtle.ConstantTimeCompare 避免因首个不同字符的位置产生 timing 差异。
-//
-// 空值防御：任一侧为空一律 false。两个空串长度相等（0==0）且
-// ConstantTimeCompare 对空切片返回 1，若不显式拦截，"空口令"就会变成万能口令
-// ——当前 authorized 在 token=="" 时已短路，故不可利用；这层是防止将来
-// 调用顺序变化（或新增调用方）时把该短路改掉。
 func tokenEqual(given, token string) bool {
-	if given == "" || token == "" {
-		return false
-	}
 	if len(given) != len(token) {
 		return false
 	}

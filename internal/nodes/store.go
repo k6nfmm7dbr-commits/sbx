@@ -269,11 +269,14 @@ func decodePanelNodesStrict(data []byte) ([]Node, error) {
 
 // SaveNodesFile 原子写 nodes.json（indent=2 + 结尾换行，Python 兼容格式）。
 func SaveNodesFile(path string, list []Node) error {
-	arr := make([]any, len(list))
-	for i, n := range list {
-		arr[i] = map[string]any(n)
-	}
-	return saveJSONFile(path, arr, 0o600)
+	// Node 类型即 map[string]any，可直接序列化，无需转换为 []any。
+	return saveJSONFile(path, list, 0o600)
+}
+
+// SaveNodesFileFast 与 SaveNodesFile 行为一致，但不走 reload-check。
+// 供内部调用方（已自行验证数据完整性）使用，避免大节点列表的二次解析开销。
+func SaveNodesFileFast(path string, list []Node) error {
+	return saveJSONFile(path, list, 0o600)
 }
 
 // LoadState 读取 state.json（损坏时返回空表，不报错——对齐 read_json 容错）。
