@@ -432,6 +432,44 @@ func TestEpochSwitchDropsBaseline(t *testing.T) {
 	}
 }
 
+func TestLegacyDiagnosticCounterBaselineIsPruned(t *testing.T) {
+	env := newEnv(t, 2)
+	if _, err := env.db.Exec("INSERT INTO meta(k,v) VALUES('epoch','7')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.db.Exec(
+		"INSERT INTO counter_state(name,last_bytes,last_pkts,updated_at) VALUES(?,?,?,?)",
+		firewall.CTActivateCounter, 1234, 12, env.now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	// New reader intentionally excludes this diagnostic counter from the snapshot.
+	// Its stale historical baseline must not trigger partial-read protection.
+	env.push(map[string][2]int64{
+		"sbx_epoch_7": {0, 0},
+		"sbx_n1_i":    {100, 1},
+		"sbx_n1_o":    {200, 2},
+	})
+	env.tickOK()
+
+	var count int
+	if err := env.db.QueryRow("SELECT COUNT(*) FROM counter_state WHERE name=?", firewall.CTActivateCounter).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("stale diagnostic baseline should be pruned, count=%d", count)
+	}
+	var rx, tx int64
+	if err := env.db.QueryRow("SELECT rx FROM totals WHERE scope='node:1'").Scan(&rx); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.db.QueryRow("SELECT tx FROM totals WHERE scope='node:1'").Scan(&tx); err != nil {
+		t.Fatal(err)
+	}
+	if rx != 100 || tx != 200 {
+		t.Fatalf("traffic counters should be accounted once, rx=%d tx=%d", rx, tx)
+	}
+}
+
 func TestLegacySecondsUpdatedAt(t *testing.T) {
 	env := newEnv(t, 2)
 	if _, err := env.db.Exec(

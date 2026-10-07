@@ -32,7 +32,14 @@ func legacyBaselineKey(name string) bool {
 	return strings.ContainsAny(name, "@:")
 }
 
-// Clock 可注入时钟，测试用固定时间回放。
+// nonAccountingBaselineKey 判断虽存在于 counter_state、但不参与流量记账的历史键。
+// 旧版本可能把 nft 的诊断计数器 sbx_ct_activate 写进基线；当前 Read 有意不
+// 返回它。它消失不代表业务计数快照不完整，应跳过缺项保护并在本轮差异提交
+// 中清理，避免升级后 Apply 的最终采样永久 fail-closed。
+func nonAccountingBaselineKey(name string) bool {
+	return legacyBaselineKey(name) || name == firewall.CTActivateCounter
+}
+
 type Clock func() time.Time
 
 // Collector 单调差分累加采集器。并发模型：单个 goroutine 执行 Tick，
@@ -423,12 +430,12 @@ func (c *Collector) Tick(ctx context.Context) error {
 		// 分支已整体换基线，不会走到这里）。本系统的计数器集合由单次
 		// GenNFT 一次性生成，同 epoch 内集合恒定。
 		//
-		// 兼容：老库里可能残留旧后端写入的 `sbx:n1:i@v4` 形态基线键，它们在
-		// 新快照里必然缺失。这类历史键不参与保护判定（否则升级后永远无法提交），
-		// 由 legacyBaselineKey 识别并跳过。
+		// 兼容：老库里可能残留旧后端键，或早期版本写入 counter_state 的
+		// nft 诊断计数器 sbx_ct_activate。这些键不参与流量记账；缺失时跳过保护，
+		// 差异提交会删除其陈旧基线。
 		if len(state) > 0 {
 			for name := range state {
-				if legacyBaselineKey(name) {
+				if nonAccountingBaselineKey(name) {
 					continue
 				}
 				if _, ok := snapshot[name]; !ok {
