@@ -1,7 +1,6 @@
 package firewall
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -52,9 +51,11 @@ func NewNft(confPath string) *Nft { return &Nft{confPath: confPath} }
 
 func (n *Nft) Name() string { return "nft" }
 
-// Read 读取 nftables 计数器快照。使用流式 JSON 解析，仅提取需要的计数器，
-// 跳过 sbx_epoch_* / sbx_sys_* / sbx_ct_activate 等无关计数器，降低 CPU 开销。
-func (n *Nft) Read(ctx context.Context) (Snapshot, error) {
+// Read 读取 nftables 计数器快照。使用流式 JSON 解析，仅提取需要的计数器：
+// 节点计数器、system 计数器和 epoch 标记；跳过 sbx_ct_activate 等无关计数器，
+// 降低 CPU 与快照 map 开销。epoch 不能跳过，因为采集器靠它识别规则集换代；
+// system 计数器也不能跳过，否则系统流量汇总会永久为零。
+func (n *Nft) Read(ctx context.Context) (snap Snapshot, err error) {
 	n.mu.Lock()
 	if call := n.inflight; call != nil {
 		n.mu.Unlock()
@@ -66,13 +67,25 @@ func (n *Nft) Read(ctx context.Context) (Snapshot, error) {
 	n.inflight = call
 	n.mu.Unlock()
 
-	call.snap, call.err = n.readOnce(ctx)
+	// readOnce 只处理外部命令和 JSON。即使未来某个解析分支出现 panic，
+	// 也必须完成 single-flight 清理并唤醒等待者；否则 n.inflight 会永久卡住，
+	// 后续每一轮采集都会阻塞在 WaitGroup 上，最终表现为整个守护进程停摆。
+	func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				snap = nil
+				err = fmt.Errorf("nft 读取异常: %v", rec)
+			}
+		}()
+		snap, err = n.readOnce(ctx)
+	}()
 
 	n.mu.Lock()
 	n.inflight = nil
+	call.snap, call.err = snap, err
 	n.mu.Unlock()
 	call.wg.Done()
-	return call.snap, call.err
+	return snap, err
 }
 
 // readOnce 执行一次真实读取。
@@ -97,7 +110,7 @@ func (n *Nft) readOnce(ctx context.Context) (Snapshot, error) {
 
 	// 使用流式 json.Decoder 解析，跳过不需要的计数器。
 	res := make(Snapshot)
-	dec := json.NewDecoder(bytes.NewReader([]byte(out)))
+	dec := json.NewDecoder(strings.NewReader(out))
 	// 解析外层 { "nftables": [...] }
 	if err := skipToKey(dec, "nftables"); err != nil {
 		return nil, fmt.Errorf("nft JSON 解析失败: %w", err)
@@ -131,9 +144,11 @@ func (n *Nft) readOnce(ctx context.Context) (Snapshot, error) {
 			continue
 		}
 		name := item.Counter.Name
-		// 只提取 sbx_n<id>_(i|o) 格式的计数器（节点流量计数）。
-		// 跳过 sbx_epoch_* / sbx_sys_* / sbx_ct_activate 等无关计数器。
-		if !strings.HasPrefix(name, "sbx_n") {
+		// 保留节点、system 以及 epoch 计数器；跳过 conntrack 激活计数器等
+		// 非流量数据。system/epoch 都是采集器的正式输入，不能按“非节点”丢弃。
+		if !strings.HasPrefix(name, "sbx_n") &&
+			!strings.HasPrefix(name, "sbx_sys_") &&
+			!strings.HasPrefix(name, "sbx_epoch_") {
 			continue
 		}
 		res[name] = [2]int64{item.Counter.Bytes, item.Counter.Packets}
@@ -145,33 +160,34 @@ func (n *Nft) readOnce(ctx context.Context) (Snapshot, error) {
 	return res, nil
 }
 
-// skipToKey 跳过 JSON 对象直到找到指定 key。
+// skipToKey 定位当前 JSON 对象中的 key，返回时 key 的 value 尚未消费。
+// json.Decoder.Token 不会返回冒号，因此不能把冒号当作独立 token；也不能在
+// 读到对象起始 '{' 后直接 skipObject，否则会把目标 key 一并跳过。
 func skipToKey(dec *json.Decoder, key string) error {
-	for {
-		tok, err := dec.Token()
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
+		return fmt.Errorf("期望 JSON 对象")
+	}
+	for dec.More() {
+		kt, err := dec.Token()
 		if err != nil {
 			return err
 		}
-		if delim, ok := tok.(json.Delim); ok {
-			if delim == '{' {
-				// 嵌套对象，递归跳过
-				if err := skipObject(dec); err != nil {
-					return err
-				}
-				continue
-			}
-			if delim == '[' {
-				// 嵌套数组，递归跳过
-				if err := skipArray(dec); err != nil {
-					return err
-				}
-				continue
-			}
+		name, ok := kt.(string)
+		if !ok {
+			return fmt.Errorf("JSON 对象键不是字符串")
 		}
-		if s, ok := tok.(string); ok && s == key {
+		if name == key {
 			return nil
 		}
+		if err := skipValue(dec); err != nil {
+			return err
+		}
 	}
+	return io.EOF
 }
 
 // skipObject 跳过当前 JSON 对象（调用方已消费 '{'）。

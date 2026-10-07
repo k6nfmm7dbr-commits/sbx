@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/k6nfmm7dbr-commits/sbx/internal/nodes"
 )
 
 // 构造接近真实规模的 /proc/net/tcp 文本（含表头 + n 行 ESTABLISHED）。
@@ -104,6 +106,20 @@ func BenchmarkCountByPortNodePortOnly(b *testing.B) {
 		hits, _ := CountByPortFiltered(tcpProcFiles, keep, read, want)
 		if len(hits) != 1 {
 			b.Fatalf("应只命中 1 个端口, got %d", len(hits))
+		}
+	}
+}
+
+func BenchmarkCountForNodesDirect(b *testing.B) {
+	text := synthTCP(10000)
+	read := func(string) (string, error) { return text, nil }
+	list := []nodes.Node{{"id": int64(1), "type": "vless", "port": int64(30005)}}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		got, err := countForNodes(list, read)
+		if err != nil || got.Conns["1"].TCP == nil {
+			b.Fatalf("连接统计失败: %v", err)
 		}
 	}
 }

@@ -175,7 +175,7 @@ grep -q 'func (c \*Collector) StatusLite() Status' "$ROOT/internal/traffic/colle
 ck "采集器提供无分配轻量状态" 0 $?
 grep -q 'StatusLite() Status' "$ROOT/internal/traffic/summary.go"
 ck "LiveSource 接口要求轻量状态" 0 $?
-grep -q 's.src.StatusLite().LastOK' "$ROOT/internal/api/cache.go"
+grep -q 'st := s.src.StatusLite()' "$ROOT/internal/api/cache.go"
 ck "缓存版本号读取不再深拷贝连接表" 0 $?
 grep -q 'st := s.src.StatusLite()' "$ROOT/internal/api/server.go"
 ck "健康探针不再深拷贝连接表" 0 $?

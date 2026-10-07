@@ -29,6 +29,12 @@ type LiveSource interface {
 	BackendName() string
 }
 
+// RateSource 是可选的速率缓存接口。Collector 实现它；测试 fake 或 CLI
+// 数据源不实现时，调用方回退到原有 QRate 查询，保持接口兼容。
+type RateSource interface {
+	RateSnapshot() (map[string]Rate, bool, error)
+}
+
 func countersOf(t TotalsRow) Counters {
 	return Counters{Rx: t.Rx, Tx: t.Tx, RxPkts: t.RxPkts, TxPkts: t.TxPkts}
 }
@@ -44,6 +50,19 @@ func resolveConns(st Status, list []nodes.Node) (map[string]connection.Conns, er
 		return nil, err
 	}
 	return res.Conns, nil
+}
+
+func resolveRates(db *sql.DB, interval int, nowUnix int64, src LiveSource) (map[string]Rate, error) {
+	if rs, ok := src.(RateSource); ok {
+		rates, ready, err := rs.RateSnapshot()
+		if err != nil {
+			return nil, err
+		}
+		if ready {
+			return rates, nil
+		}
+	}
+	return QRate(db, interval, nowUnix)
 }
 
 func rateTotal(rates map[string]Rate) Rate {
@@ -126,7 +145,7 @@ func BuildSummary(cfg *config.Config, db *sql.DB, src LiveSource) (*Summary, err
 		return nil, err
 	}
 	nowT := TimeNow()
-	rates, err := QRate(db, cfg.Interval, nowT.Unix())
+	rates, err := resolveRates(db, cfg.Interval, nowT.Unix(), src)
 	if err != nil {
 		return nil, err
 	}
@@ -226,7 +245,8 @@ type Live struct {
 // BuildLive 构建实时端点数据；不碰 daily/totals 表。
 func BuildLive(cfg *config.Config, db *sql.DB, src LiveSource) (*Live, error) {
 	list := nodes.LoadPanelNodes(cfg.NodesFile)
-	rates, err := QRate(db, cfg.Interval, TimeNow().Unix())
+	nowT := TimeNow()
+	rates, err := resolveRates(db, cfg.Interval, nowT.Unix(), src)
 	if err != nil {
 		return nil, err
 	}
@@ -241,7 +261,7 @@ func BuildLive(cfg *config.Config, db *sql.DB, src LiveSource) (*Live, error) {
 	}
 
 	l := &Live{
-		Now:        TimeNow().Unix(),
+		Now:        nowT.Unix(),
 		Healthy:    hasCollector && st.Error == "",
 		Error:      st.Error,
 		LastSample: st.LastOK,

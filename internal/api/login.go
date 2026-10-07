@@ -22,6 +22,7 @@ const (
 	loginFailWindow = 5 * time.Minute
 	loginFailDelay  = 2 * time.Second
 	loginFailMaxLen = 4096 // 追踪表上限，防内存被大量伪造源 IP 撑大
+	loginGCInterval = 30 * time.Second
 )
 
 type loginFailState struct {
@@ -32,6 +33,7 @@ type loginFailState struct {
 var (
 	loginFailMu sync.Mutex
 	loginFails  = map[string]*loginFailState{}
+	loginLastGC time.Time
 )
 
 // loginClientKey 取来源标识。刻意只用 RemoteAddr 的 IP 部分，不信任
@@ -82,7 +84,15 @@ func loginRecordSuccess(key string) {
 }
 
 // gcLoginFailsLocked 清理过期条目（调用方持锁）。
+// 登录失败请求是外部可控的；若每次请求都扫描最多 4096 个来源地址，攻击者
+// 可以把一次登录尝试放大成 O(4096) 的锁内工作，并与正常登录争用全局锁。
+// 过期项只影响内存回收，不影响 loginThrottle 的窗口判断，因此按固定间隔
+// 批量清理即可；表上限仍由 loginRecordFail 强制执行。
 func gcLoginFailsLocked(now time.Time) {
+	if !loginLastGC.IsZero() && now.Sub(loginLastGC) < loginGCInterval {
+		return
+	}
+	loginLastGC = now
 	for k, st := range loginFails {
 		if now.Sub(st.last) > loginFailWindow {
 			delete(loginFails, k)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -149,22 +150,90 @@ func (s *Service) reconcile(ctx context.Context) error {
 	// 而不是让 states 永远为空、UI 全显示「不限」。
 	enforceErr := s.applyEnforcement(ctx, pausedNodes, ipBlocked, rateLimited, nodeList)
 
+	newErr := ""
+	if enforceErr != nil {
+		newErr = enforceErr.Error()
+	}
+
 	s.mu.Lock()
+	// 采集器每轮都会刷新内部 flow 的 LastSeen，但只要对外快照没有改变，
+	// 就不应递增 version / 唤醒所有 SSE / 让 /api/live 的缓存全部失效。
+	// 空闲节点时这能把“每秒全量序列化与广播”降为真正有状态变化时才发生。
+	changed := !s.ready || s.lastErr != newErr ||
+		!sameStates(s.states, newStates) ||
+		!sameNodeIPSnapshots(s.ipSnaps, newSnaps) ||
+		!sameStringSlices(s.activeIPs, newActiveIPs) ||
+		!sameIntMap(s.activeTCP, newActiveTCP)
 	s.states = newStates
 	s.ipSnaps = newSnaps
 	s.activeIPs = newActiveIPs
 	s.activeTCP = newActiveTCP
 	s.ready = true
-	s.version++ // 快照已更新：通知缓存层"策略数据变了"
-	if enforceErr != nil {
-		s.lastErr = enforceErr.Error()
-	} else {
-		s.lastErr = ""
+	if changed {
+		s.version++
 	}
+	s.lastErr = newErr
 	s.mu.Unlock()
 
-	s.signalNotify()
+	if changed {
+		s.signalNotify()
+	}
 	return enforceErr
+}
+
+// sameStates / sameNodeIPSnapshots 比较已发布快照的对外内容。reconcile 内部
+// 的 flow LastSeen、Observed.LastTraffic 等变化不直接暴露给 API；只有这些函数
+// 观察到的内容变化时，才需要递增 version 并唤醒 SSE 客户端。
+func sameStates(a, b map[string]State) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for id, av := range a {
+		if bv, ok := b[id]; !ok || av != bv {
+			return false
+		}
+	}
+	return true
+}
+
+func sameNodeIPSnapshots(a, b map[string]NodeIPSnapshot) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for id, av := range a {
+		bv, ok := b[id]
+		if !ok || av.NodeID != bv.NodeID || av.Limited != bv.Limited ||
+			av.MaxIPs != bv.MaxIPs || av.Granted != bv.Granted ||
+			!slices.Equal(av.IPs, bv.IPs) || !slices.Equal(av.Rejected, bv.Rejected) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameStringSlices(a, b map[string][]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for id, av := range a {
+		bv, ok := b[id]
+		if !ok || !slices.Equal(av, bv) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameIntMap(a, b map[string]int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for id, av := range a {
+		if bv, ok := b[id]; !ok || av != bv {
+			return false
+		}
+	}
+	return true
 }
 
 // processNode 处理单个节点的策略状态：State 构造、Slot Manager admission、

@@ -60,8 +60,9 @@ type Server struct {
 	// 避免每次重新 FormatInt + FormatUint + 拼接。读多写少，用 RWMutex。
 	verMu  sync.RWMutex
 	verKey int64  // 上次 FormatInt 的 lastOK
+	verSeq uint64 // 上次成功采样的单调版本
 	verPol uint64 // 上次 FormatUint 的 polVer
-	verStr string // 已生成的 "lastOK.polVer" 串
+	verStr string // 已生成的 "lastOK.seq.polVer" 串
 
 	// 节点配置页面 mutation hooks 由 service.Serve 注入，测试可替换。
 	nodeRestart func(context.Context) error

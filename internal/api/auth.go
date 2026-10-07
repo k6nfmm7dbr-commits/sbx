@@ -34,6 +34,7 @@ func initAssetCache() {
 
 // assetBytes 从内嵌前端读取文件。优先使用缓存；缓存未命中时实时读取。
 func assetBytes(name string) ([]byte, error) {
+	name = strings.TrimLeft(name, "/")
 	assetCacheOnce.Do(initAssetCache)
 	if data, ok := assetCache[name]; ok {
 		return data, nil
@@ -151,6 +152,9 @@ func cookieToken(r *http.Request) string {
 // 长度本身不是保密信息，长度不等时直接返回 false；等长度内容用
 // crypto/subtle.ConstantTimeCompare 避免因首个不同字符的位置产生 timing 差异。
 func tokenEqual(given, token string) bool {
+	if given == "" || token == "" {
+		return false
+	}
 	if len(given) != len(token) {
 		return false
 	}

@@ -125,6 +125,86 @@ func CountByPortFiltered(files []string, keep Keep, readFile func(string) (strin
 	return hits, partial
 }
 
+// nodePortInfo 是端口解析后的稳定索引。CountForNodes 与 NodeRemoteIPsSplit
+// 共用一份 port -> node owner 映射：命中端口后直接累加到节点，避免先构造
+// port -> hits/IP 集合、再按每个节点的端口范围二次遍历。
+type nodePortInfo struct {
+	id  string
+	tcp bool
+	udp bool
+}
+
+func compileNodePortOwners(list []nodes.Node) (map[int][]int, []nodePortInfo, error) {
+	owners := make(map[int][]int, len(list))
+	infos := make([]nodePortInfo, len(list))
+	for i, n := range list {
+		ranges := nodes.ParsePorts(n)
+		if len(ranges) == 0 {
+			return nil, nil, fmt.Errorf("节点端口非法")
+		}
+		info := nodePortInfo{id: nodes.IDString(n)}
+		for _, proto := range nodes.Protocols(n) {
+			switch proto {
+			case "tcp":
+				info.tcp = true
+			case "udp":
+				info.udp = true
+			}
+		}
+		infos[i] = info
+		for _, r := range ranges {
+			for p := r[0]; p <= r[1]; p++ {
+				owners[int(p)] = append(owners[int(p)], i)
+			}
+		}
+	}
+	return owners, infos, nil
+}
+
+type nodeConnCounts struct {
+	tcp int
+	udp int
+}
+
+// countProcByNode 直接把 /proc 行归属到节点。它保留文件不存在不算 partial、
+// 文件存在但读取失败算 partial 的旧语义，同时不再生成中间 hits map。
+func countProcByNode(files []string, keep Keep, readFile func(string) (string, error),
+	owners map[int][]int, counts []nodeConnCounts, tcp bool) bool {
+	partial := false
+	for _, path := range files {
+		text, err := readFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			partial = true
+			continue
+		}
+		forEachProcLine(text, nil, func(parts []string) {
+			local, rem, st := parts[1], parts[2], parts[3]
+			if !keep(st, rem) {
+				return
+			}
+			i := strings.IndexByte(local, ':')
+			if i < 0 {
+				return
+			}
+			p, err := strconv.ParseInt(local[i+1:], 16, 64)
+			if err != nil {
+				return
+			}
+			for _, idx := range owners[int(p)] {
+				if tcp {
+					counts[idx].tcp++
+				} else {
+					counts[idx].udp++
+				}
+			}
+		})
+	}
+	return partial
+}
+
 // portFilterFor 把节点监听端口编译成 PortFilter。
 // 节点端口非法时返回错误（与既有"节点端口非法"错误路径保持一致）。
 func portFilterFor(list []nodes.Node) (PortFilter, error) {
@@ -155,16 +235,6 @@ func readOSFile(path string) (string, error) {
 	return string(b), nil
 }
 
-func sumHits(hits map[int]int, lo, hi int64) int {
-	total := 0
-	for p, c := range hits {
-		if int64(p) >= lo && int64(p) <= hi {
-			total += c
-		}
-	}
-	return total
-}
-
 // CountResult 连接数统计结果。
 type CountResult struct {
 	Conns   map[string]Conns
@@ -177,45 +247,30 @@ func CountForNodes(list []nodes.Node) (CountResult, error) {
 }
 
 func countForNodes(list []nodes.Node, readFile func(string) (string, error)) (CountResult, error) {
-	// 先编译端口过滤器：只为节点监听端口记录命中，避免为每个临时源端口建条目。
-	want, err := portFilterFor(list)
+	owners, infos, err := compileNodePortOwners(list)
 	if err != nil {
 		return CountResult{}, err
 	}
-	tcpHits, tcpPartial := CountByPortFiltered(tcpProcFiles, func(st, rem string) bool { return st == tcpEstablished }, readFile, want)
-	udpHits, udpPartial := CountByPortFiltered(udpProcFiles, func(_, rem string) bool { return RemConnected(rem) }, readFile, want)
+	counts := make([]nodeConnCounts, len(list))
+	tcpPartial := countProcByNode(tcpProcFiles,
+		func(st, rem string) bool { return st == tcpEstablished },
+		readFile, owners, counts, true)
+	udpPartial := countProcByNode(udpProcFiles,
+		func(_, rem string) bool { return RemConnected(rem) },
+		readFile, owners, counts, false)
 
 	result := make(map[string]Conns, len(list))
-	for _, n := range list {
-		ranges := nodes.ParsePorts(n)
-		if len(ranges) == 0 {
-			return CountResult{}, fmt.Errorf("节点端口非法")
-		}
-		protos := nodes.Protocols(n)
+	for i, info := range infos {
 		var pair Conns
-		hasTCP, hasUDP := false, false
-		for _, pr := range protos {
-			if pr == "tcp" {
-				hasTCP = true
-			} else if pr == "udp" {
-				hasUDP = true
-			}
-		}
-		if hasTCP {
-			v := 0
-			for _, r := range ranges {
-				v += sumHits(tcpHits, r[0], r[1])
-			}
+		if info.tcp {
+			v := counts[i].tcp
 			pair.TCP = &v
 		}
-		if hasUDP {
-			v := 0
-			for _, r := range ranges {
-				v += sumHits(udpHits, r[0], r[1])
-			}
+		if info.udp {
+			v := counts[i].udp
 			pair.UDP = &v
 		}
-		result[nodes.IDString(n)] = pair
+		result[info.id] = pair
 	}
 	return CountResult{Conns: result, Partial: tcpPartial || udpPartial}, nil
 }
@@ -295,38 +350,73 @@ type RemoteIPSet struct {
 	UDP map[string]bool
 }
 
+// remoteIPsByNode 直接把远端 IP 写入节点集合，避免中间的
+// port -> set(IP) map 和后续按端口范围合并。
+func remoteIPsByNode(files []string, keep Keep, readFile func(string) (string, error),
+	owners map[int][]int, sets []RemoteIPSet, tcp bool) bool {
+	partial := false
+	for _, path := range files {
+		text, err := readFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			partial = true
+			continue
+		}
+		forEachProcLine(text, nil, func(parts []string) {
+			local, rem, st := parts[1], parts[2], parts[3]
+			if !keep(st, rem) {
+				return
+			}
+			i := strings.IndexByte(local, ':')
+			if i < 0 {
+				return
+			}
+			p, err := strconv.ParseInt(local[i+1:], 16, 64)
+			if err != nil {
+				return
+			}
+			ip := parseRemoteIP(rem)
+			if ip == "" {
+				return
+			}
+			for _, idx := range owners[int(p)] {
+				if tcp {
+					sets[idx].TCP[ip] = true
+				} else {
+					sets[idx].UDP[ip] = true
+				}
+			}
+		})
+	}
+	return partial
+}
+
 // NodeRemoteIPsSplit 返回每个节点的 TCP/UDP 分离的活跃远端 IP 集合。
 // 供 IP Limit 追踪器区分「TCP 断开立即释放」与「UDP 靠 TTL 释放」。
 func NodeRemoteIPsSplit(list []nodes.Node, readFile func(string) (string, error)) (map[string]RemoteIPSet, bool, error) {
 	if readFile == nil {
 		readFile = readOSFile
 	}
-	// 同 countForNodes：只为节点端口建 map，否则每个临时源端口都会分配一个 map。
-	want, err := portFilterFor(list)
+	owners, infos, err := compileNodePortOwners(list)
 	if err != nil {
 		return nil, false, err
 	}
-	tcpIPs, tcpPartial := RemoteIPsByPortFiltered(tcpProcFiles, func(st, rem string) bool { return st == tcpEstablished }, readFile, want)
-	udpIPs, udpPartial := RemoteIPsByPortFiltered(udpProcFiles, func(_, rem string) bool { return RemConnected(rem) }, readFile, want)
+	sets := make([]RemoteIPSet, len(infos))
+	for i := range sets {
+		sets[i] = RemoteIPSet{TCP: map[string]bool{}, UDP: map[string]bool{}}
+	}
+	tcpPartial := remoteIPsByNode(tcpProcFiles,
+		func(st, rem string) bool { return st == tcpEstablished },
+		readFile, owners, sets, true)
+	udpPartial := remoteIPsByNode(udpProcFiles,
+		func(_, rem string) bool { return RemConnected(rem) },
+		readFile, owners, sets, false)
 
-	result := make(map[string]RemoteIPSet, len(list))
-	for _, n := range list {
-		ranges := nodes.ParsePorts(n)
-		if len(ranges) == 0 {
-			return nil, false, fmt.Errorf("节点端口非法")
-		}
-		rs := RemoteIPSet{TCP: map[string]bool{}, UDP: map[string]bool{}}
-		for _, r := range ranges {
-			for p := int(r[0]); p <= int(r[1]); p++ {
-				for ip := range tcpIPs[p] {
-					rs.TCP[ip] = true
-				}
-				for ip := range udpIPs[p] {
-					rs.UDP[ip] = true
-				}
-			}
-		}
-		result[nodes.IDString(n)] = rs
+	result := make(map[string]RemoteIPSet, len(infos))
+	for i, info := range infos {
+		result[info.id] = sets[i]
 	}
 	return result, tcpPartial || udpPartial, nil
 }

@@ -18,6 +18,8 @@
 
 真机实验台（50 节点 × 1095 天历史、真实 nftables，60s 面板轮询）：`/api/live` p50 1.8ms → **1.4ms**，`/api/summary` p50 2.2ms → **1.8ms**；CPU 0.73% → 0.63%、RSS 23.5MB → 23.0MB（同机 60s 窗口，属方向性观测，不声称精确降幅）。`/api/daily` 稳态为 0.4–0.5ms（首次调用 7.5ms 为冷启动），本轮未改动该查询。
 
+本次后续全面审计补充：修复策略轮询对私有 map 使用错误锁的并发竞态；策略快照无变化时停止无效版本递增和 SSE 广播，并修复 SSE 首包订阅窗口的更新丢失；nft JSON 解析保留 epoch/system 计数器，single-flight 异常可恢复；同世代 counter_state 改为差异 UPSERT、规则换代仍完整重建；连接数与在线 IP 统计直接聚合至节点，减少中间 map；Summary/Live 复用采样周期内的速率快照。另修复静态资源缓存键、同秒采样 API 缓存失效、策略服务退出等待及登录失败表清理开销。真实 Debian amd64 上 `go test ./...`、`go vet ./...`、`go test -race ./...`、`baseline_test.sh`（86/0）与 nft 语法检查均通过；生产 nft 表和 sing-box 服务未被更改或重启。
+
 ## v3.0.28 — 删除节点保留累计流量总额
 
 按要求调整删除数据范围：节点删除仍默认清理该节点的每日与采样历史（`daily`、`samples`），但始终保留累计流量总额（`totals`）。输入验证提示同步明确说明“累计流量会保留”；API 响应增加 `cumulative_preserved` 标记，回归测试逐表核验。

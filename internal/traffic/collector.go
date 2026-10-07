@@ -43,13 +43,19 @@ type Collector struct {
 	backend firewall.Backend
 	now     Clock
 
-	mu           sync.RWMutex
-	lastError    string
-	lastOKTs     int64
-	lastSampleTs int64
-	lastConns    map[string]connection.Conns
-	hasConns     bool
-	repairAt     int64
+	mu            sync.RWMutex
+	lastError     string
+	lastOKTs      int64
+	lastSampleTs  int64
+	sampleVersion uint64
+	lastConns     map[string]connection.Conns
+	hasConns      bool
+	repairAt      int64
+
+	rateMu      sync.Mutex
+	rateVersion uint64
+	rateReady   bool
+	rates       map[string]Rate
 
 	doneOnce sync.Once
 	done     chan struct{}
@@ -84,6 +90,7 @@ func (c *Collector) Done() <-chan struct{} { return c.done }
 type Status struct {
 	Error    string
 	LastOK   int64
+	Version  uint64
 	Conns    map[string]connection.Conns
 	HasConns bool
 }
@@ -97,6 +104,7 @@ func (c *Collector) Snapshot() Status {
 	return Status{
 		Error:    c.lastError,
 		LastOK:   c.lastOKTs,
+		Version:  c.sampleVersion,
 		Conns:    cloneConns(c.lastConns),
 		HasConns: c.hasConns,
 	}
@@ -110,7 +118,7 @@ func (c *Collector) Snapshot() Status {
 func (c *Collector) StatusLite() Status {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return Status{Error: c.lastError, LastOK: c.lastOKTs, HasConns: c.hasConns}
+	return Status{Error: c.lastError, LastOK: c.lastOKTs, Version: c.sampleVersion, HasConns: c.hasConns}
 }
 
 // cloneConns 深拷贝连接数 map（Conns 含 *int 指针字段，须复制指向值）。
@@ -134,7 +142,61 @@ func cloneConns(m map[string]connection.Conns) map[string]connection.Conns {
 	return out
 }
 
-// ---- 元数据 / 基线 -------------------------------------------------------
+// RateSnapshot 按采样版本缓存速率查询结果。Summary 与 Live 可能在同一采样
+// 周期内被多个浏览器同时请求；第一个请求查询 SQLite，其余请求直接复用，
+// 避免每个端点各自执行 MAX(ts)+GROUP BY。缓存不参与采集正确性，查询失败仍
+// 返回错误，调用方会按原路径报告。
+func (c *Collector) RateSnapshot() (map[string]Rate, bool, error) {
+	c.rateMu.Lock()
+	defer c.rateMu.Unlock()
+
+	c.mu.RLock()
+	version := c.sampleVersion
+	lastOK := c.lastOKTs
+	c.mu.RUnlock()
+	if version == 0 {
+		// 首次采样前保留旧行为：允许 API 直接读取数据库中尚未过期的历史样本。
+		return nil, false, nil
+	}
+	if c.rateReady && c.rateVersion == version {
+		if len(c.rates) > 0 && rateSnapshotStale(lastOK, c.cfg.Interval, c.now().Unix()) {
+			return map[string]Rate{}, true, nil
+		}
+		return cloneRates(c.rates), true, nil
+	}
+
+	rates, err := QRate(c.db.DB, c.cfg.Interval, lastOK)
+	if err != nil {
+		return nil, false, err
+	}
+	c.rateVersion = version
+	c.rateReady = true
+	c.rates = cloneRates(rates)
+	return cloneRates(c.rates), true, nil
+}
+
+func cloneRates(in map[string]Rate) map[string]Rate {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]Rate, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func rateSnapshotStale(last int64, interval int, now int64) bool {
+	iv := interval
+	if iv < 1 {
+		iv = 1
+	}
+	limit := int64(15)
+	if int64(iv*4) > limit {
+		limit = int64(iv * 4)
+	}
+	return now-last > limit
+}
 
 func (c *Collector) metaGet(ctx context.Context, key string) (string, bool) {
 	var val sql.NullString
@@ -185,7 +247,10 @@ const (
 	sqlUpsertSample = "INSERT INTO samples(ts,scope,rx,tx,duration_ms,valid) VALUES(?,?,?,?,?,1) " +
 		"ON CONFLICT(ts,scope) DO UPDATE SET rx=rx+excluded.rx, tx=tx+excluded.tx, " +
 		"duration_ms=MAX(duration_ms,excluded.duration_ms), valid=1"
-	sqlUpsertMeta = "INSERT INTO meta(k,v) VALUES('epoch',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v"
+	sqlUpsertMeta     = "INSERT INTO meta(k,v) VALUES('epoch',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v"
+	sqlInsertBaseline = "INSERT INTO counter_state(name,last_bytes,last_pkts,updated_at) VALUES(?,?,?,?)"
+	sqlUpsertBaseline = sqlInsertBaseline +
+		" ON CONFLICT(name) DO UPDATE SET last_bytes=excluded.last_bytes,last_pkts=excluded.last_pkts,updated_at=excluded.updated_at"
 )
 
 type deltaSlot struct {
@@ -201,7 +266,8 @@ func (d *deltaSlot) anyTraffic() bool {
 
 // commitTick 把一轮差分结果原子入账：增量、样本、基线、世代、清理同事务。
 func (c *Collector) commitTick(ctx context.Context, deltas map[string]*deltaSlot,
-	snap firewall.Snapshot, ts, tsMS int64, epoch uint64, hasEpoch bool) error {
+	snap firewall.Snapshot, state map[string]counterBaseline, freshRuleset bool,
+	ts, tsMS int64, epoch uint64, hasEpoch bool) error {
 
 	tx, err := c.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -250,17 +316,25 @@ func (c *Collector) commitTick(ctx context.Context, deltas map[string]*deltaSlot
 		}
 	}
 
-	// 基线全量重写（DELETE + INSERT，事务内一致）
+	// 同一规则世代内只差异更新计数基线，避免每轮 DELETE + 全量 INSERT 造成
+	// 不必要的 SQLite 写放大。规则世代变化时仍全量重建，保证旧计数器绝不
+	// 与新规则集混用；历史旧后端键也会在差异删除阶段自然清理。
 	names := make([]string, 0, len(snap))
 	for k := range snap {
 		names = append(names, k)
 	}
 	sort.Strings(names)
-	if _, err := tx.ExecContext(ctx, "DELETE FROM counter_state"); err != nil {
-		return err
+	fullBaseline := freshRuleset || state == nil
+	if fullBaseline {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM counter_state"); err != nil {
+			return err
+		}
 	}
-	stBase, err := tx.PrepareContext(ctx,
-		"INSERT INTO counter_state(name,last_bytes,last_pkts,updated_at) VALUES(?,?,?,?)")
+	baselineSQL := sqlUpsertBaseline
+	if fullBaseline {
+		baselineSQL = sqlInsertBaseline
+	}
+	stBase, err := tx.PrepareContext(ctx, baselineSQL)
 	if err != nil {
 		return err
 	}
@@ -269,6 +343,25 @@ func (c *Collector) commitTick(ctx context.Context, deltas map[string]*deltaSlot
 		v := snap[name]
 		if _, err := stBase.ExecContext(ctx, name, v[0], v[1], tsMS); err != nil {
 			return err
+		}
+	}
+	if !fullBaseline {
+		stDelete, err := tx.PrepareContext(ctx, "DELETE FROM counter_state WHERE name=?")
+		if err != nil {
+			return err
+		}
+		defer stDelete.Close()
+		stale := make([]string, 0)
+		for name := range state {
+			if _, ok := snap[name]; !ok {
+				stale = append(stale, name)
+			}
+		}
+		sort.Strings(stale)
+		for _, name := range stale {
+			if _, err := stDelete.ExecContext(ctx, name); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -418,7 +511,7 @@ func (c *Collector) Tick(ctx context.Context) error {
 		d.valid = d.valid && d.seenRX && d.seenTX && d.durationMS > 0
 	}
 
-	if err := c.commitTick(ctx, deltas, snapshot, ts, tsMS, epoch, hasEpoch); err != nil {
+	if err := c.commitTick(ctx, deltas, snapshot, state, freshRuleset, ts, tsMS, epoch, hasEpoch); err != nil {
 		return err
 	}
 
@@ -446,6 +539,7 @@ func (c *Collector) Tick(ctx context.Context) error {
 	c.mu.Lock()
 	c.lastSampleTs = ts
 	c.lastOKTs = wallTs
+	c.sampleVersion++
 	c.lastError = ""
 	if connsUpdated {
 		c.lastConns = connsMap

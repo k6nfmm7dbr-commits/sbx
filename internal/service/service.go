@@ -127,6 +127,13 @@ func Serve() int {
 	case <-time.After(15 * time.Second):
 		slog.Warn("等待采集器退出超时，继续收尾")
 	}
+	if done := policySvc.Done(); done != nil {
+		select {
+		case <-done:
+		case <-time.After(15 * time.Second):
+			slog.Warn("等待策略服务退出超时，继续收尾")
+		}
+	}
 	hsCtx, hsCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer hsCancel()
 	if err := hs.Shutdown(hsCtx); err != nil {

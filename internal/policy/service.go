@@ -170,6 +170,12 @@ type Service struct {
 
 	// nftApply 执行 nft 脚本（测试可替换为 no-op，规避 CI 无 nft 权限）。
 	nftApply func(ctx context.Context, scriptPath string) error
+
+	// done 用于宿主服务优雅退出时等待策略 goroutine 完全停止。若只 cancel
+	// context 后立刻关闭共享 SQLite，reconcile 仍可能在 Query/Exec 中途使用已
+	// 关闭的数据库句柄，造成退出竞态和噪声错误。
+	doneOnce sync.Once
+	done     chan struct{}
 }
 
 // New 构造策略服务。
@@ -204,11 +210,16 @@ func New(db *sql.DB, appDir, policyConf string) *Service {
 		enforceMinInterval: enforceMinInterval,
 		nftApply:           nil, // nil 表示用真实 nft 执行
 		localAddrs:         connection.LocalIPs,
+		done:               make(chan struct{}),
 	}
 }
 
 // DefaultPolicyConf 返回默认策略脚本路径（与计数规则 nft.conf 分离）。
 func DefaultPolicyConf(appDir string) string { return appDir + "/policy.nft" }
+
+// Done 在 Run 返回后关闭。Serve 退出时应等待此通道，确保共享数据库不会
+// 在策略 reconcile 仍运行时被关闭；零值 Service（仅测试构造）返回 nil。
+func (s *Service) Done() <-chan struct{} { return s.done }
 
 // SetLocalAddrs 注入本机地址读取函数（测试用）。
 func (s *Service) SetLocalAddrs(fn func() (map[string]bool, error)) { s.localAddrs = fn }
@@ -485,21 +496,35 @@ func (s *Service) NodeIPSnapshot(nodeID string) NodeIPSnapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if snap, ok := s.ipSnaps[nodeID]; ok {
+		snap.IPs = append([]IPEntry(nil), snap.IPs...)
+		snap.Rejected = append([]IPEntry(nil), snap.Rejected...)
 		return snap
 	}
 	return NodeIPSnapshot{NodeID: nodeID, IPs: []IPEntry{}, Rejected: []IPEntry{}}
 }
 
 // IPStateSnapshot 返回所有节点的在线 IP 快照（SSE 首次完整 snapshot）。
-// 直接复制已发布的不可变快照 map，不做任何计算，也不触碰 ipStates。
+// 返回值及其中的切片均为独立副本：调用方可安全修改，不会破坏服务内部
+// 的已发布快照，也不会与并发 SSE 序列化产生数据竞态。
 func (s *Service) IPStateSnapshot() map[string]NodeIPSnapshot {
+	out, _ := s.IPStateSnapshotVersion()
+	return out
+}
+
+// IPStateSnapshotVersion 原子取得「快照内容 + 版本号」。
+// SSE 初始化必须同时拿到这两个值：如果先读 Version、再读快照，reconcile
+// 可能恰好在中间发布新状态，导致旧快照被错误标记成新版本，客户端漏掉一次
+// 更新。这里在同一把 mu 下复制二者，调用方可以可靠地做一致性校验。
+func (s *Service) IPStateSnapshotVersion() (map[string]NodeIPSnapshot, uint64) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make(map[string]NodeIPSnapshot, len(s.ipSnaps))
 	for id, snap := range s.ipSnaps {
+		snap.IPs = append([]IPEntry(nil), snap.IPs...)
+		snap.Rejected = append([]IPEntry(nil), snap.Rejected...)
 		out[id] = snap
 	}
-	return out
+	return out, s.version
 }
 
 // loadConfigs 读全部策略配置。

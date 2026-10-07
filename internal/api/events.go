@@ -33,8 +33,26 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		_ = rc.SetWriteDeadline(time.Time{})
 	}
 
+	// 先订阅，再取得首包。若先写首包、后 Subscribe，reconcile 可能在这段窗口
+	// 发布更新，更新信号无人接收；更隐蔽的是首包后的去重基线可能已经读到
+	// 新版本，客户端就会永久漏掉那次变化。
+	notify, unsub := s.policy.Subscribe()
+	defer unsub()
+
+	// 原子取得快照与版本，并与共享 payload 缓存对齐。版本不一致说明 reconcile
+	// 正好跨过了初始化窗口，重取即可；订阅已经存在，因此之后的更新不会丢。
+	var snap map[string]policy.NodeIPSnapshot
+	var payloads map[string]string
+	for {
+		var snapVer, payloadVer uint64
+		snap, snapVer = s.policy.IPStateSnapshotVersion()
+		payloads, payloadVer = s.ssePayloads()
+		if snapVer == payloadVer {
+			break
+		}
+	}
+
 	// 首包完整 snapshot。
-	snap := s.policy.IPStateSnapshot()
 	nodes := make([]policy.NodeIPSnapshot, 0, len(snap))
 	for _, ns := range snap {
 		nodes = append(nodes, ns)
@@ -48,16 +66,11 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	// last 缓存已推送内容的序列化结果：既做去重判据，又直接复用为发送 payload。
 	// payload 本身来自 ssePayloads() 的跨连接共享缓存（同一策略版本的所有连接
 	// 共用一次序列化结果），本连接的 last 只负责「这个节点我这轮推过没有」。
-	last := make(map[string]string, len(snap))
-	{
-		payloads, _ := s.ssePayloads()
-		for id, pl := range payloads {
-			last[id] = pl
-		}
+	last := make(map[string]string, len(payloads))
+	for id, pl := range payloads {
+		last[id] = pl
 	}
 
-	notify, unsub := s.policy.Subscribe()
-	defer unsub()
 	// 只靠 notify 唤醒（reconcile 每轮都会向所有订阅者扇出 signal），
 	// 无状态变化时不再做任何全量快照与序列化。fallbackTick 仅作保险，
 	// 万一 notify 通道因故未触发也能在 5s 内自愈。
@@ -79,7 +92,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		case <-fallback.C:
 		}
 
-		payloads, _ := s.ssePayloads()
+		payloads, _ = s.ssePayloads()
 		for id, payload := range payloads {
 			if payload == "" || last[id] == payload {
 				continue
@@ -123,13 +136,12 @@ func marshalSnap(ns policy.NodeIPSnapshot) string {
 // 正确性依据：Version() 在每次 reconcile 发布新快照时单调自增（mu 保护），
 // 版本不变则快照必然不变——缓存不可能返回过期内容。
 func (s *Server) ssePayloads() (map[string]string, uint64) {
-	ver := s.policy.Version()
+	snap, ver := s.policy.IPStateSnapshotVersion()
 	s.sseMu.Lock()
 	defer s.sseMu.Unlock()
 	if s.sseVer == ver && s.sseCache != nil {
 		return s.sseCache, ver
 	}
-	snap := s.policy.IPStateSnapshot()
 	payloads := make(map[string]string, len(snap))
 	for id, ns := range snap {
 		payloads[id] = marshalSnapFn(ns)

@@ -141,8 +141,9 @@ func (c *ttlCache) size() int {
 // 面板无从得知），最坏也只陈旧一个采样周期。
 const cacheTTL = 2 * time.Second
 
-// dataVersion 返回当前数据版本串：采集器最后一次成功采样时间 + 策略快照版本。
-// 任一数据源更新，版本即变化，缓存 key 随之改变。
+// dataVersion 返回当前数据版本串：采集器最后一次成功采样时间 + 单调采样序号
+// + 策略快照版本。单调序号解决 interval=1 且同一秒完成两次采样时，秒级
+// LastOK 未变化导致 API 缓存继续返回旧响应的问题。
 //
 // 高频路径优化：dataVersion 每个缓存请求都会调用，原始实现每次都做
 // FormatInt + FormatUint + 字符串拼接 + 短串驻留——多标签页场景下每秒
@@ -150,26 +151,29 @@ const cacheTTL = 2 * time.Second
 // 未变即复用旧串；版本变化才重新拼接。读锁覆盖稳态命中，写锁仅在版本切换时获取。
 func (s *Server) dataVersion() string {
 	var lastOK int64
+	var sampleSeq uint64
 	if s.src != nil {
-		// StatusLite 而非 Snapshot：本函数每个缓存请求都会调用，只需要一个
-		// 标量；Snapshot 会深拷贝整张连接数 map（50 节点 = 1 map + 100 指针），
-		// 在这里是纯粹的每请求浪费。
-		lastOK = s.src.StatusLite().LastOK
+		// StatusLite 而非 Snapshot：本函数每个缓存请求都会调用，只需要标量；
+		// Version 解决同一秒内连续采样时 LastOK 秒级时间戳不变的问题。
+		st := s.src.StatusLite()
+		lastOK = st.LastOK
+		sampleSeq = st.Version
 	}
 	var polVer uint64
 	if s.policy != nil {
 		polVer = s.policy.Version()
 	}
 	s.verMu.RLock()
-	if s.verKey == lastOK && s.verPol == polVer && s.verStr != "" {
+	if s.verKey == lastOK && s.verSeq == sampleSeq && s.verPol == polVer && s.verStr != "" {
 		str := s.verStr
 		s.verMu.RUnlock()
 		return str
 	}
 	s.verMu.RUnlock()
-	str := strconv.FormatInt(lastOK, 10) + "." + strconv.FormatUint(polVer, 10)
+	str := strconv.FormatInt(lastOK, 10) + "." + strconv.FormatUint(sampleSeq, 10) + "." + strconv.FormatUint(polVer, 10)
 	s.verMu.Lock()
 	s.verKey = lastOK
+	s.verSeq = sampleSeq
 	s.verPol = polVer
 	s.verStr = str
 	s.verMu.Unlock()
