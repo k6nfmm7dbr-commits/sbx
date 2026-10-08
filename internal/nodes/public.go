@@ -17,6 +17,8 @@ type PublicNodeDTO struct {
 	IPLimitMax    int    `json:"ip_limit_max,omitempty"`
 	RateLimitOn   bool   `json:"rate_limit_enabled,omitempty"`
 	RateLimitMbps int    `json:"rate_limit_mbps,omitempty"`
+	// PortConflictWith 仅供节点管理恢复 UI 标记历史重复端口，不改变策略/enforcement。
+	PortConflictWith []int64 `json:"port_conflict_with,omitempty"`
 }
 
 // PublicNodes 把内部节点列表转为仅含展示/编辑元数据的脱敏 DTO。

@@ -798,3 +798,13 @@ CSV 流式导出、nodes/config JSON 读取、策略 no-op enforcement 与 recon
 - 删除无调用方的 `buildNodeIPSnapshot`。
 
 未做（有意）：nft 计数器 netlink 直读、SQLite 批量写合并、`Snapshot()` 改返回共享 map——前者需引入 netlink 依赖与内核特性探测（计数器正确性是最高优先级），后两者在实测中不是瓶颈且会改变既有契约/语义。`/api/daily` 的 GROUP BY 提前退出改写此前已实测否决（分配量不变），本轮未重复尝试。
+
+
+## 30. v3.0.30：重复监听端口时的 fail-closed 恢复
+
+历史 `nodes.json` 若含重复 `port`，严格 loader 会正确阻止 enforcement，但此前也让 `/api/nodes` 管理列表以及 edit/delete 入口无法读取该文件，形成无法从面板修复的死锁。
+
+- 新增 repair-only 读取路径：严格检查 JSON 结构、正整数且唯一的 id、端口范围与受支持 type，仅暂时放宽「端口必须唯一」。该路径只供管理列表和 edit/delete 找到待修复记录；summary/策略 enforcement 与最终 sing-box / nodes 候选仍走完整唯一端口校验。
+- `/api/nodes` 返回 `port_conflict_with` 节点 ID，管理页标红并提示编辑端口或删除冲突节点。冲突节点分享路由返回 409，不生成误导性分享链接。
+- CLI add/sync/最终候选继续校验所有端口唯一；编辑或删除只有在最终列表完全无冲突时才可应用，未解决的候选不会覆盖原文件或重启服务。
+- 回归测试覆盖两条重复端口记录的诊断、编辑/删除恢复、严格 loader/enforcement 仍拒绝重复端口、添加重复端口失败，以及管理列表不泄露节点凭据。

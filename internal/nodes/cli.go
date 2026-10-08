@@ -255,17 +255,9 @@ func (c *CLI) cmdAdd(args []string) int {
 	}
 
 	list = append(list, node)
-	cfg, err := RebuildConfig(c.Store, list)
-	if err != nil {
-		return c.fail(err.Error())
-	}
-	cand, err := WriteCandidate(c.Store, cfg)
-	if err != nil {
-		return c.fail(err.Error())
-	}
-	nodesCand, err := WriteNodesCandidate(c.Store, list)
-	if err != nil {
-		return c.fail(err.Error())
+	cand, nodesCand, rc := c.writeCandidates(list)
+	if rc != exitOK {
+		return rc
 	}
 	return c.outJSON(map[string]any{
 		"id":              node["id"],
@@ -285,9 +277,19 @@ func findByID(list []Node, id string) int {
 	return -1
 }
 
-// strictLoadForMutation 供 edit/remove/sync 使用。
+// strictLoadForMutation 供 sync 使用；编辑/删除使用 repairLoadForMutation。
 func (c *CLI) strictLoadForMutation() ([]Node, int) {
 	list, err := LoadToolNodesStrict(c.Store.NodesPath())
+	if err != nil {
+		return nil, c.fail(err.Error())
+	}
+	return list, exitOK
+}
+
+// repairLoadForMutation 仅供 edit/remove 使用：允许读取历史重复端口状态，以便通过
+// 编辑端口或删除冲突项修复；writeCandidates 仍执行完整校验，未修复则拒绝写入。
+func (c *CLI) repairLoadForMutation() ([]Node, int) {
+	list, err := LoadToolNodesRepair(c.Store.NodesPath())
 	if err != nil {
 		return nil, c.fail(err.Error())
 	}
@@ -323,7 +325,7 @@ func (c *CLI) cmdRemove(args []string) int {
 	if len(p.positional) != 1 {
 		return c.usageError("用法: remove <id>")
 	}
-	list, rc := c.strictLoadForMutation()
+	list, rc := c.repairLoadForMutation()
 	if rc != exitOK {
 		return rc
 	}
@@ -353,7 +355,7 @@ func (c *CLI) cmdEdit(args []string) int {
 		return c.usageError("用法: edit <id> [--port N] [--sni DOMAIN]")
 	}
 	id := p.positional[0]
-	list, rc := c.strictLoadForMutation()
+	list, rc := c.repairLoadForMutation()
 	if rc != exitOK {
 		return rc
 	}

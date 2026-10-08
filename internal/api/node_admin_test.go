@@ -147,6 +147,53 @@ func TestPanelNodeCRUDAndShareLinks(t *testing.T) {
 	}
 }
 
+func TestPanelNodeDuplicatePortRecovery(t *testing.T) {
+	ts, nodesFile, _, _, _ := newNodeCRUDTestServer(t)
+	writeTemp(t, nodesFile, `[
+	  {"id":1,"name":"first","type":"shadowsocks","port":443,"method":"2022-blake3-aes-128-gcm","password":"secret-one"},
+	  {"id":2,"name":"second","type":"shadowsocks","port":443,"method":"2022-blake3-aes-128-gcm","password":"secret-two"}
+	]`)
+
+	// 管理列表应在保留 fail-closed 的同时展示历史冲突及对应节点 ID，供用户修复。
+	code, got := doJSON(t, ts, http.MethodGet, "/api/nodes", "")
+	if code != http.StatusOK {
+		t.Fatalf("duplicate-port nodes should remain manageable: status=%d body=%#v", code, got)
+	}
+	list, ok := got["nodes"].([]any)
+	if !ok || len(list) != 2 {
+		t.Fatalf("expected two visible nodes, got %#v", got)
+	}
+	for i, wantPeer := range []float64{2, 1} {
+		entry := list[i].(map[string]any)
+		peers, ok := entry["port_conflict_with"].([]any)
+		if !ok || len(peers) != 1 || peers[0] != wantPeer {
+			t.Fatalf("node conflict diagnosis missing: node=%#v", entry)
+		}
+		if _, leaked := entry["password"]; leaked {
+			t.Fatalf("node secrets leaked in recovery list: %#v", entry)
+		}
+	}
+	if code, _ := doJSON(t, ts, http.MethodGet, "/api/nodes/1/links", ""); code != http.StatusConflict {
+		t.Fatalf("conflicting node must not get a share link, status=%d", code)
+	}
+
+	// 编辑其中一个重复节点端口后，最终候选通过严格验证并正常提交。
+	code, edited := doJSON(t, ts, http.MethodPut, "/api/nodes/2", `{"port":30012}`)
+	if code != http.StatusOK {
+		t.Fatalf("repair edit failed: status=%d body=%#v", code, edited)
+	}
+	code, got = doJSON(t, ts, http.MethodGet, "/api/nodes", "")
+	if code != http.StatusOK {
+		t.Fatalf("repaired list failed: status=%d body=%#v", code, got)
+	}
+	list = got["nodes"].([]any)
+	for _, raw := range list {
+		if _, remains := raw.(map[string]any)["port_conflict_with"]; remains {
+			t.Fatalf("conflict marker remains after repair: %#v", raw)
+		}
+	}
+}
+
 func TestPanelNodeMutationRollsBackWhenSingBoxRestartFails(t *testing.T) {
 	ts, nodesFile, _, _, srv := newNodeCRUDTestServer(t)
 	confPath := os.Getenv("SBX_SB_CONF")

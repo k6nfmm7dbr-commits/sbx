@@ -557,6 +557,8 @@ select, input[type="number"], input[type="password"], input[type="text"] { backg
   background: var(--surface);
 }
 .manage-node.paused { background: #f8f9fb; }
+.manage-node.conflict { border-color: rgba(201,75,86,.45); }
+.node-conflict-notice { line-height: 1.5; }
 .manage-node-main { display: grid; gap: 3px; min-width: 0; }
 .manage-node-main strong { overflow: hidden; color: var(--text); font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
 .manage-node-main span { overflow: hidden; color: var(--text-3); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }

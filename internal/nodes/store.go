@@ -93,6 +93,27 @@ func LoadToolNodesStrict(path string) ([]Node, error) {
 	return list, nil
 }
 
+// LoadToolNodesRepair 严格解析节点文件并校验 id/端口范围/type，但允许历史文件中
+// 暂存重复端口。仅供 edit/remove 这类可修复操作读取；最终候选仍必须通过
+// validateNodes 的完整唯一端口校验，绝不会把重复端口配置写回或应用。
+func LoadToolNodesRepair(path string) ([]Node, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("nodes.json 读取失败: %w", err)
+	}
+	list, _, err := decodeNodesFile(data)
+	if err != nil {
+		return nil, fmt.Errorf("nodes.json 解析失败，已拒绝修改。原文件未被覆盖: %w", err)
+	}
+	if err := validateNodeRecords(list); err != nil {
+		return nil, fmt.Errorf("nodes.json 校验失败，已拒绝修改。原文件未被覆盖: %w", err)
+	}
+	return list, nil
+}
+
 // decodeNodesFile 解析顶层数组；返回 (列表, 是否为合法 JSON, 错误)。
 // 严格模式要求：一个合法 JSON value 之后只允许空白与 EOF——
 // `[] garbage`、`[] {}` 这类 trailing data 一律拒绝。
@@ -226,6 +247,27 @@ func LoadPanelNodesStrict(path string) ([]Node, error) {
 	// 一律不缓存 → fail-closed 语义不受影响。
 	if statErr == nil {
 		panelStrictCache.put(path, fi, list)
+	}
+	return list, nil
+}
+
+// LoadPanelNodesRepair 供面板节点管理页展示与修复入口使用。它严格解析文件并校验
+// 节点身份、类型、端口范围，但暂时容忍重复端口，使用户仍能看到、编辑或删除冲突项。
+// 此函数不得用于防火墙 enforcement；任何写入候选仍须通过完整 validateNodes 校验。
+func LoadPanelNodesRepair(path string) ([]Node, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("nodes.json 读取失败: %w", err)
+	}
+	list, err := decodePanelNodesStrict(data)
+	if err != nil {
+		return nil, fmt.Errorf("nodes.json 损坏，拒绝据此修改防火墙规则(请修复 %s): %w", path, err)
+	}
+	if err := validateNodeRecords(list); err != nil {
+		return nil, fmt.Errorf("nodes.json 校验失败，拒绝据此修改防火墙规则(%s): %w", path, err)
 	}
 	return list, nil
 }
@@ -389,12 +431,10 @@ func strictInt64(v any) (int64, bool) {
 	}
 }
 
-// validateNodes 对节点列表做语义校验：id 为正整数且不重复、port 在 1..65535
-// 且不重复、type 属于受支持协议。用于所有 state-changing 路径前的兜底，
-// 防止「明显损坏的节点数据」被当作空列表/合法数据继续修改 firewall/config。
-func validateNodes(list []Node) error {
+// validateNodeRecords 校验每条节点记录自身及 id 唯一性，但不检查端口唯一性。
+// 只供恢复 UI / edit / remove 读取历史冲突状态；绝不能单独作为写入或 enforcement 校验。
+func validateNodeRecords(list []Node) error {
 	seenID := map[int64]bool{}
-	seenPort := map[int64]bool{}
 	for _, n := range list {
 		id, ok := strictInt64(n["id"])
 		if !ok || id <= 0 {
@@ -409,17 +449,65 @@ func validateNodes(list []Node) error {
 		if !ok || port < 1 || port > 65535 {
 			return fmt.Errorf("节点 %d 端口非法: %v", id, n["port"])
 		}
-		if seenPort[port] {
-			return fmt.Errorf("节点端口重复: %d", port)
-		}
-		seenPort[port] = true
-
 		t := Str(n, "type")
 		if !ValidType(t) {
 			return fmt.Errorf("节点 %d 类型不受支持: %q", id, t)
 		}
 	}
 	return nil
+}
+
+// validateNodes 是最终候选与 enforcement 使用的完整语义校验：id/port 合法唯一，
+// type 受支持。重复端口会让 sing-box inbound / firewall 归属产生歧义，必须拒绝。
+func validateNodes(list []Node) error {
+	if err := validateNodeRecords(list); err != nil {
+		return err
+	}
+	byPort := make(map[int64][]int64, len(list))
+	for _, n := range list {
+		id, _ := strictInt64(n["id"])
+		port, _ := strictInt64(n["port"])
+		byPort[port] = append(byPort[port], id)
+	}
+	for _, n := range list {
+		port, _ := strictInt64(n["port"])
+		ids := byPort[port]
+		if len(ids) > 1 {
+			parts := make([]string, len(ids))
+			for i, id := range ids {
+				parts[i] = strconv.FormatInt(id, 10)
+			}
+			return fmt.Errorf("节点端口重复: %d (节点 id=%s)", port, strings.Join(parts, ","))
+		}
+	}
+	return nil
+}
+
+// PortConflicts 返回每个冲突节点对应的其它节点 ID。用于恢复界面标记并指引用户
+// 编辑或删除冲突节点；函数不修改输入，也不改变 enforcement 的严格校验行为。
+func PortConflicts(list []Node) map[int64][]int64 {
+	byPort := make(map[int64][]int64, len(list))
+	for _, n := range list {
+		id, idOK := strictInt64(n["id"])
+		port, portOK := strictInt64(n["port"])
+		if idOK && id > 0 && portOK && port >= 1 && port <= 65535 {
+			byPort[port] = append(byPort[port], id)
+		}
+	}
+	out := make(map[int64][]int64)
+	for _, ids := range byPort {
+		if len(ids) < 2 {
+			continue
+		}
+		for _, id := range ids {
+			for _, other := range ids {
+				if id != other {
+					out[id] = append(out[id], other)
+				}
+			}
+		}
+	}
+	return out
 }
 
 // ParsePorts 对齐 panel.parse_ports：唯一监听端口 -> [(p,p)]，非法返回空。

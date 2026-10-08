@@ -309,19 +309,28 @@ function renderManageNodes() {
     host.innerHTML = '<div class="empty">暂无节点，点击“添加节点”创建</div>';
     return;
   }
-  host.innerHTML = manageNodes.map(function (n) {
+  var conflicts = manageNodes.filter(function (n) {
+    return Array.isArray(n.port_conflict_with) && n.port_conflict_with.length > 0;
+  });
+  var warning = conflicts.length
+    ? '<div class="err node-conflict-notice">发现历史重复监听端口，防火墙变更会保持 fail-closed。请编辑冲突节点改为不同端口，或删除多余节点；修复前不能新增或分享冲突节点。</div>'
+    : '';
+  var cards = manageNodes.map(function (n) {
     var protocol = n.protocol || n.type;
     var meta = [n.type || protocol, '端口 ' + n.port];
     if (n.paused) meta.push('已暂停');
-    return '<article class="manage-node' + (n.paused ? ' paused' : '') + '">' +
+    var peers = Array.isArray(n.port_conflict_with) ? n.port_conflict_with : [];
+    if (peers.length) meta.push('端口重复，与节点 #' + peers.join(', #') + ' 冲突');
+    return '<article class="manage-node' + (n.paused ? ' paused' : '') + (peers.length ? ' conflict' : '') + '">' +
       '<div class="manage-node-main"><strong>' + esc(n.name) + '</strong>' +
       '<span>' + esc(meta.join(' · ')) + '</span></div>' +
       '<div class="manage-node-actions">' +
-      '<button type="button" class="mini-btn" data-node-links="' + esc(n.id) + '">分享</button>' +
+      '<button type="button" class="mini-btn" data-node-links="' + esc(n.id) + '"' + (peers.length ? ' disabled title="请先解决端口冲突"' : '') + '>分享</button>' +
       '<button type="button" class="mini-btn" data-node-edit="' + esc(n.id) + '">编辑</button>' +
       '<button type="button" class="mini-btn danger" data-node-delete="' + esc(n.id) + '">删除</button>' +
       '</div></article>';
   }).join('');
+  host.innerHTML = warning + cards;
 }
 
 function findManageNode(id) {

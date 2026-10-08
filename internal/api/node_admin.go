@@ -75,6 +75,25 @@ func (s *Server) nodeStore() *nodes.Store {
 	return &nodes.Store{AppDir: appDir, SBConf: sbConf, NodesFile: s.cfg.NodesFile}
 }
 
+// requireNodeForRepairMutation is intentionally narrower than requireNode: edit/delete
+// may read a structurally valid nodes.json with duplicate ports so users can repair it.
+// The CLI still validates the final candidate strictly before any commit or enforcement.
+func (s *Server) requireNodeForRepairMutation(w http.ResponseWriter, r *http.Request, nodeID string) bool {
+	list, err := nodes.LoadPanelNodesRepair(s.cfg.NodesFile)
+	if err != nil {
+		s.failUnavailable(w, r, codeNodesFileUnavailable, "",
+			"节点配置文件不可用，无法安全修复", err)
+		return false
+	}
+	for _, n := range list {
+		if nodes.IDString(n) == nodeID {
+			return true
+		}
+	}
+	s.sendJSON(w, r, http.StatusNotFound, map[string]string{"error": "not found"})
+	return false
+}
+
 func (s *Server) nodeCLI(store *nodes.Store) (*nodes.CLI, *bytes.Buffer, *bytes.Buffer) {
 	out, stderr := &bytes.Buffer{}, &bytes.Buffer{}
 	return &nodes.CLI{Store: store, Stdout: out, Stderr: stderr}, out, stderr
@@ -457,7 +476,7 @@ func (s *Server) editNode(w http.ResponseWriter, r *http.Request, id string) {
 		s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	if !s.requireNode(w, r, id) {
+	if !s.requireNodeForRepairMutation(w, r, id) {
 		return
 	}
 	var req nodeEditRequest
@@ -515,7 +534,7 @@ func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request, id string) {
 		}
 		clearHistory = raw == "1"
 	}
-	if !s.requireNode(w, r, id) {
+	if !s.requireNodeForRepairMutation(w, r, id) {
 		return
 	}
 	cli, _, _ := s.newNodeCLI()
@@ -560,12 +579,16 @@ func (s *Server) nodeLinks(w http.ResponseWriter, r *http.Request, id string) {
 		s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	if !s.requireNode(w, r, id) {
+	if !s.requireNodeForRepairMutation(w, r, id) {
 		return
 	}
-	list, err := nodes.LoadPanelNodesStrict(s.cfg.NodesFile)
+	list, err := nodes.LoadPanelNodesRepair(s.cfg.NodesFile)
 	if err != nil {
 		s.failUnavailable(w, r, codeNodesFileUnavailable, "", "节点配置文件不可用", err)
+		return
+	}
+	if len(nodes.PortConflicts(list)[toI64(id)]) > 0 {
+		s.sendJSON(w, r, http.StatusConflict, map[string]string{"error": "该节点端口与其他节点重复，请先编辑或删除冲突节点"})
 		return
 	}
 	store := s.nodeStore()

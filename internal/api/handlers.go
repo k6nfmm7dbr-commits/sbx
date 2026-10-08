@@ -94,13 +94,19 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request, route string)
 			s.sendJSON(w, r, http.StatusNotFound, map[string]string{"error": "not found"})
 			return
 		}
-		// 面板管理页需要严格节点列表；损坏时明确报错，不能表现为空列表。
-		list, err := nodes.LoadPanelNodesStrict(s.cfg.NodesFile)
+		// 节点管理列表必须在重复端口的历史坏数据下仍可打开，否则用户既看不到
+		// 冲突节点也无法用 UI 修复。这里只放宽端口唯一性；文件结构、id、端口范围、
+		// type 仍严格校验。策略 enforcement 与所有最终候选继续使用严格唯一端口校验。
+		list, err := nodes.LoadPanelNodesRepair(s.cfg.NodesFile)
 		if err != nil {
 			s.failUnavailable(w, r, codeNodesFileUnavailable, "", "节点配置文件不可用", err)
 			return
 		}
 		public := nodes.PublicNodes(list)
+		conflicts := nodes.PortConflicts(list)
+		for i := range public {
+			public[i].PortConflictWith = conflicts[public[i].ID]
+		}
 		if s.policy != nil {
 			states, _ := s.policy.Snapshot()
 			for i := range public {
