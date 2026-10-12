@@ -50,11 +50,12 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request, route string)
 	}
 
 	// Origin/Referer 校验只保护已鉴权 API 的状态变更方法；GET/HEAD 轮询、SSE 不受影响。
-	if isUnsafeMethod(r.Method) && !originMatchesRequestHost(r) {
-		auditEvent(r, "cross_site_request_blocked", "rejected", "error_code", codeCrossSiteBlocked)
+	// 默认按 host:port 严格比较；反代改写 Host 的部署需显式配置 trusted_origin。
+	if isUnsafeMethod(r.Method) && !s.originAllowed(r) {
+		auditEvent(r, "cross_site_request_blocked", "rejected", originAuditFields(r)...)
 		rid := requestID(r)
 		s.sendJSON(w, r, http.StatusForbidden, map[string]any{
-			"error": "cross-site request blocked", "error_code": codeCrossSiteBlocked, "request_id": rid,
+			"error": originErrorText, "error_code": codeCrossSiteBlocked, "request_id": rid,
 		})
 		return
 	}
