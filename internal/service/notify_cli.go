@@ -98,6 +98,8 @@ func redactNotify(nc *config.NotifyConfig) *config.NotifyConfig {
 		ch.BotToken = notify.RedactSecret(ch.BotToken)
 		ch.SendKey = notify.RedactSecret(ch.SendKey)
 		ch.Secret = notify.RedactSecret(ch.Secret)
+		ch.SPT = notify.RedactSecret(ch.SPT)
+		ch.AppToken = notify.RedactSecret(ch.AppToken)
 		ch.Webhook = notify.RedactURL(ch.Webhook)
 		ch.URL = notify.RedactURL(ch.URL)
 	}
