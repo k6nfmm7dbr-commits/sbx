@@ -58,15 +58,25 @@ func assetBytesUncached(name string) ([]byte, error) {
 
 // ---- 响应输出（对齐旧 _send/_json 的头与编码） ---------------------------
 
-func (s *Server) send(w http.ResponseWriter, r *http.Request, code int, ctype string, body []byte) {
-	w.Header().Set("Content-Type", ctype)
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("X-Frame-Options", "DENY")
+func (s *Server) securityHeaders(h http.Header) {
+	h.Set("Cache-Control", "no-store")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("X-Frame-Options", "DENY")
 	// 前端已无内联脚本；style.css 里 select 的下拉箭头用 data:image/svg+xml，
 	// 因此 img-src 需额外放行 data:。
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:")
+	h.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:")
+	h.Set("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+	// 只有明确表示前置 HTTPS 反代的配置才启用 HSTS；纯 HTTP 直连启用会锁住客户端，
+	// 使其后续无法访问，因此 secure_cookie 是这一模式的显式 opt-in。
+	if s.cfg != nil && s.cfg.SecureCookie {
+		h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+	}
+}
+
+func (s *Server) send(w http.ResponseWriter, r *http.Request, code int, ctype string, body []byte) {
+	w.Header().Set("Content-Type", ctype)
+	s.securityHeaders(w.Header())
 	w.WriteHeader(code)
 	if r.Method != http.MethodHead && len(body) > 0 {
 		_, _ = w.Write(body)
@@ -89,6 +99,7 @@ func (s *Server) sendJSON(w http.ResponseWriter, r *http.Request, code int, v an
 	if r.Method == http.MethodGet &&
 		strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") &&
 		len(data) > 1024 {
+		s.securityHeaders(w.Header())
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Content-Encoding", "gzip")
 		w.Header().Set("Vary", "Accept-Encoding")

@@ -18,6 +18,11 @@ import (
 //
 // error_code 是给前端/脚本判断用的稳定标识，**不要**在版本间随意改名。
 const (
+	// 403 类
+	codeCrossSiteBlocked = "cross_site_blocked"
+	codeRateLimited      = "rate_limited"
+	codeInvalidScope     = "invalid_scope"
+
 	// 500 类
 	codeSummaryFailed = "summary_failed" // /api/summary 构建失败
 	codeLiveFailed    = "live_failed"    // /api/live 构建失败

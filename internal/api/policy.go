@@ -130,15 +130,24 @@ func (s *Server) putPolicy(w http.ResponseWriter, r *http.Request, nodeID string
 	cur.RateLimitMbps = req.RateLimitMbps
 
 	if err := s.policy.UpsertConfig(r.Context(), cur); err != nil {
+		auditEvent(r, "policy_change", "failure", "node_id", nodeID)
 		s.failInternalNode(w, r, codePolicySave, nodeID, err)
 		return
 	}
 	// 立即 reconcile：让 nft enforcement 生效并刷新缓存。
 	if err := s.policy.Reconcile(r.Context()); err != nil {
+		auditEvent(r, "policy_change", "apply_failure", "node_id", nodeID,
+			"paused", cur.Paused, "ip_limit_enabled", cur.IPLimitEnabled,
+			"ip_limit_max", cur.IPLimitMax, "rate_limit_enabled", cur.RateLimitEnabled,
+			"rate_limit_mbps", cur.RateLimitMbps)
 		s.failInternalMsg(w, r, codePolicyApply, nodeID,
 			"策略已保存但应用失败", err)
 		return
 	}
+	auditEvent(r, "policy_change", "success", "node_id", nodeID,
+		"paused", cur.Paused, "ip_limit_enabled", cur.IPLimitEnabled,
+		"ip_limit_max", cur.IPLimitMax, "rate_limit_enabled", cur.RateLimitEnabled,
+		"rate_limit_mbps", cur.RateLimitMbps)
 	s.invalidateCache()
 	states, _ := s.policy.Snapshot()
 	s.sendJSON(w, r, http.StatusOK, states[nodeID])

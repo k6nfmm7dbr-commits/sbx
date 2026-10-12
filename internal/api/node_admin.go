@@ -370,6 +370,8 @@ func pemBlock(data []byte, label string) []byte {
 }
 
 func (s *Server) createNode(w http.ResponseWriter, r *http.Request) {
+	auditResult, auditNodeID := "failure", ""
+	defer func() { auditEvent(r, "node_create", auditResult, "node_id", auditNodeID) }()
 	var req nodeCreateRequest
 	if err := decodeNodeBody(r, &req); err != nil {
 		s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": "invalid json"})
@@ -388,6 +390,7 @@ func (s *Server) createNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := s.mutationID(result, "")
+	auditNodeID, auditResult = id, "success"
 	dto, err := s.publicNodeByID(id)
 	if err != nil {
 		s.failInternal(w, r, codeNodesFileUnavailable, err)
@@ -476,6 +479,8 @@ func (s *Server) editNode(w http.ResponseWriter, r *http.Request, id string) {
 		s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	auditResult := "failure"
+	defer func() { auditEvent(r, "node_edit", auditResult, "node_id", id) }()
 	if !s.requireNodeForRepairMutation(w, r, id) {
 		return
 	}
@@ -511,6 +516,7 @@ func (s *Server) editNode(w http.ResponseWriter, r *http.Request, id string) {
 		s.sendJSON(w, r, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
 	}
+	auditResult = "success"
 	dto, err := s.publicNodeByID(id)
 	if err != nil {
 		s.failInternal(w, r, codeNodesFileUnavailable, err)
@@ -526,6 +532,8 @@ func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request, id string) {
 		s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	auditResult := "failure"
+	defer func() { auditEvent(r, "node_delete", auditResult, "node_id", id) }()
 	clearHistory := true
 	if raw := qsGet(r, "clear_history"); raw != "" {
 		if raw != "1" && raw != "0" {
@@ -543,6 +551,7 @@ func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request, id string) {
 		s.sendJSON(w, r, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
 	}
+	auditResult = "success"
 	historyCleared := false
 	if clearHistory {
 		if err := s.clearNodeDailyAndSampleHistory(r.Context(), id); err != nil {

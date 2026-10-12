@@ -222,6 +222,8 @@ func (s *Server) tryPolicyRoute(w http.ResponseWriter, r *http.Request, route st
 	return true
 }
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
+	auditResult := "failure"
+	defer func() { auditEvent(r, "csv_export", auditResult) }()
 	// 流式导出：逐行从数据库读、逐行写响应，不在内存里攒整份 CSV。
 	// daily 表无清理策略、随运行年限增长（50 节点 × 3 年 ≈ 5.5 万行），
 	// 旧实现「全表读进 []exportRow + strings.Builder 拼完再写」在大库上有
@@ -236,13 +238,11 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Disposition", "attachment; filename=sbx-traffic.csv")
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	// 与 s.send() 的安全响应头保持一致（send() 面向整包 body，这里流式写出）。
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("X-Frame-Options", "DENY")
+	// 流式响应也复用普通响应的统一安全头（含 SecureCookie 模式的 HSTS）。
+	s.securityHeaders(w.Header())
 	w.WriteHeader(http.StatusOK)
 	if r.Method == http.MethodHead {
+		auditResult = "success"
 		return
 	}
 
@@ -289,7 +289,9 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		if r.Context().Err() == nil {
 			slog.Warn("CSV 导出查询中断", "error_code", codeExportFailed, "err", err)
 		}
+		return
 	}
+	auditResult = "success"
 }
 
 type exportRow struct {

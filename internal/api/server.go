@@ -45,6 +45,9 @@ type Server struct {
 	src    traffic.LiveSource
 	policy *policy.Service
 
+	// apiLimiter 为每个 RemoteAddr IP 提供有界的 API 令牌桶；零值可直接安全使用。
+	apiLimiter apiRateLimiter
+
 	// cache 缓存 /api/summary、/api/live、/api/daily 的构建+序列化结果。
 	// 懒初始化：零值 Server（单测直接构造）也能安全使用，见 cacheFor。
 	cacheOnce sync.Once
@@ -158,8 +161,17 @@ func (s *Server) serveRoutes(w http.ResponseWriter, r *http.Request) {
 		route = "/"
 	}
 
-	// 与旧实现一致：do_GET 才有 /api 路由与统一鉴权；
-	// do_POST 只处理 /login，其它路径一律 404 文本。
+	// API 总限速只覆盖 /api/*；探活与静态资源刻意不经此闸，避免破坏 systemd 与首屏。
+	if strings.HasPrefix(route, "/api/") && !s.apiLimiter.allowRequest(r, time.Now()) {
+		auditEvent(r, "api_rate_limited", "rejected", "error_code", codeRateLimited)
+		rid := requestID(r)
+		s.sendJSON(w, r, http.StatusTooManyRequests, map[string]any{
+			"error": "rate limit exceeded", "error_code": codeRateLimited, "request_id": rid,
+		})
+		return
+	}
+
+	// GET/HEAD 处理只读 API；POST 仅开放节点管理与登出 API，以及独立的 /login 表单。
 	switch r.Method {
 	case http.MethodGet, http.MethodHead:
 		if strings.HasPrefix(route, "/api/") {

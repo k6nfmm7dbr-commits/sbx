@@ -100,6 +100,25 @@ func gcLoginFailsLocked(now time.Time) {
 	}
 }
 
+// handleLogout 清除浏览器中保存的静态 token Cookie。阶段 A 不维护服务端会话，
+// 因此登出只让当前浏览器删除 Cookie；Bearer token 与已复制的 token 不会因此失效。
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	cookie := &http.Cookie{
+		Name:     "sbx_token",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	}
+	if s.cfg.SecureCookie {
+		cookie.Secure = true
+	}
+	http.SetCookie(w, cookie)
+	auditEvent(r, "logout", "success")
+	s.sendJSON(w, r, http.StatusOK, map[string]any{"ok": true})
+}
+
 // handlePost 仅处理 /login：POST 提交令牌，成功后下发 HttpOnly 会话 Cookie
 // 并重定向；令牌不再出现在 URL 里（与旧实现一致）。
 func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, route string) {
@@ -138,6 +157,7 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, route string
 		//  真机实测确认了这个问题；对攻击者的限速效果两种写法等价，
 		//  因为失败请求同样会占住连接 2s。）
 		loginRecordSuccess(key)
+		auditEvent(r, "login_success", "success")
 		cookie := &http.Cookie{
 			Name:     "sbx_token",
 			Value:    nodes.PyQuote(token, "/"),
@@ -155,6 +175,7 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, route string
 		if s.cfg.SecureCookie {
 			cookie.Secure = true
 		}
+		s.securityHeaders(w.Header())
 		http.SetCookie(w, cookie)
 		w.Header().Set("Location", "/")
 		w.WriteHeader(http.StatusFound)
@@ -162,6 +183,7 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, route string
 	}
 	// 失败：先记账，再按累计失败次数施加延迟（挡凭据喷洒与日志刷屏）。
 	loginRecordFail(key, now)
+	auditEvent(r, "login_failure", "failure")
 	if d := loginThrottle(key, now); d > 0 {
 		select {
 		case <-time.After(d):
@@ -173,6 +195,7 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, route string
 }
 
 func (s *Server) redirect(w http.ResponseWriter, location string) {
+	s.securityHeaders(w.Header())
 	w.Header().Set("Location", location)
 	w.WriteHeader(http.StatusFound)
 }
