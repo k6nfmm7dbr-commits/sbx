@@ -180,7 +180,7 @@ func (s *Server) serveRoutes(w http.ResponseWriter, r *http.Request) {
 		}
 		s.handleGet(w, r, route)
 	case http.MethodPost:
-		if strings.HasPrefix(route, "/api/nodes") {
+		if strings.HasPrefix(route, "/api/nodes") || route == "/api/logout" {
 			s.handleAPI(w, r, route)
 			return
 		}

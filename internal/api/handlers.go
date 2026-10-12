@@ -29,7 +29,24 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request, route string)
 		return
 	}
 
+	// Origin/Referer 校验只保护已鉴权 API 的状态变更方法；GET/HEAD 轮询、SSE 不受影响。
+	if isUnsafeMethod(r.Method) && !originMatchesRequestHost(r) {
+		auditEvent(r, "cross_site_request_blocked", "rejected", "error_code", codeCrossSiteBlocked)
+		rid := requestID(r)
+		s.sendJSON(w, r, http.StatusForbidden, map[string]any{
+			"error": "cross-site request blocked", "error_code": codeCrossSiteBlocked, "request_id": rid,
+		})
+		return
+	}
+
 	switch route {
+	case "/api/logout":
+		if r.Method != http.MethodPost {
+			s.sendJSON(w, r, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		s.handleLogout(w, r)
+
 	case "/api/summary":
 		s.serveCachedJSON(w, r, codeSummaryFailed, s.cacheKey("summary"), func() (any, error) {
 			sum, err := traffic.BuildSummary(s.cfg, s.db.DB, s.src)
