@@ -819,3 +819,10 @@ CSV 流式导出、nodes/config JSON 读取、策略 no-op enforcement 与 recon
 - **L-3**：`/api/daily` scope 只允许空字符串或正整数 `node:<id>`，非法输入在产生缓存键/查询前返回 400。
 - **I-1**：因维护者目标工具链已由真机/CI 确认为 Go 1.27.x，未采纳旧审计环境的 1.24 降级建议。随后 CI `govulncheck` 在 Go 1.27.1 上报告 5 个可达标准库 HTTP/HTTP2 漏洞（固定版本 1.27.2 修复）；因此将 go.mod、CI/release 与 README 一次同步升级至 1.27.2，`x/sys v0.48.0` 无需改动。
 - **I-2**：`ownedString` 文档化零拷贝只读生命周期；长期保存 conntrack IP 统一经 `cloneForPersist`，flow tracker 保存 canonical cloned key，避免 Go map key 更新时再次挂住每轮输入 buffer；新增重复解析/修改输入缓冲区的回归测试。
+
+### 31.1 第二轮复审（R 系列）处置
+
+- **R-1（已修）**：安装器 `ensure_panel_conf` 生成的 `listen` 改为 `127.0.0.1`，与 `internal/config` 的 `defaultConf()`、README 描述三方一致；安装完成提示与 `panel_url` 同步跟随监听模式；`tests/installer_flow_test.sh` 新增三方一致性断言。此前 Go 默认值虽已改，但真实安装路径仍写 `0.0.0.0`，属于「文档承诺与实现不符」。
+- **R-2（已修）**：`install_self` 的脚本落盘改为直连官方 URL + 官方 `sbx.sh.sha256` 校验；校验失败或官方源不可达时告警并跳过落盘，且仅在脚本确实存在时才写 `sbx` 包裹命令。`tests/update_integrity_test.sh` 用 `bash < harness`（令 `${BASH_SOURCE[0]}` 非普通文件，复现 `bash <(curl ...)` 路径）覆盖投毒 / 合法 / 清单重复 / 源不可达四条分支。
+- **R-3（已修）**：Origin/Referer 校验默认要求 host 与端口都一致，取消端口无关回退（`SameSite` 忽略端口，回退可被同主机名其它端口绕过）；反代改写 Host 的场景改用显式 `trusted_origin` 配置（可选键，非法值 fail-closed），并附带可排查的 403 文案与含来源的审计字段。
+- **R-4（已文档化）**：README 说明 API 限速与登录节流均以 `RemoteAddr` 为准、刻意不采信 `X-Forwarded-For`，因此反代后所有客户端共享同一限速桶与失败节流；多管理员经同一反代访问时需知晓。若将来要支持可信代理网段，需显式配置而非默认采信。

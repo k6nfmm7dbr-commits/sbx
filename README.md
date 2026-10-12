@@ -326,20 +326,23 @@ sbx-core node list|links|add|edit|remove|sync   # 节点管理
 
 `panel.json` 主要键:`listen`(默认 `127.0.0.1`,仅本机可访问)、`port`(默认 `8080`)、`token`、`interval`(采集秒数,默认 `2`)、`tz`(默认 `Asia/Shanghai`)、`db`、`nodes_file`、`nft_conf`。需从外网访问时，显式将 `listen` 配为 `0.0.0.0` 或具体网卡地址，并强烈建议置于 HTTPS 反代之后、设置 `secure_cookie=true`。路径类键在 `LoadStrict` 阶段强校验:必须为绝对路径、不含 `..`、不位于 `/proc` `/sys` `/dev`,非法配置 fail-closed。
 
+`trusted_origin`(默认不配置)与 `secure_cookie=true` 一样属于**可选键**，不写就没有这个键。它的作用是声明"浏览器实际访问面板的公开地址"，只影响状态变更接口的 CSRF 来源校验：默认要求 Origin/Referer 与请求 Host 的 host 与端口都一致；当反向代理把 Host 改写成带后端端口（如 `panel.example.com:8080`）时，浏览器发出的 Origin 是 `https://panel.example.com`，严格比较会拒绝请求，此时把 `trusted_origin` 配成 `https://panel.example.com` 即可放行该来源。取值必须是绝对 `http(s)` URL，可带路径但会被忽略；非法取值在 `LoadStrict` 阶段 fail-closed 拒绝启动（避免"配了却没生效"这种更难排查的状态）。它只放宽到"这一个确切的来源"，不影响其它校验。
+
 ---
 
 ## 安全性
 
 - **令牌鉴权**:优先 `Authorization: Bearer <token>`,其次 HttpOnly Cookie `sbx_token`;**不再接受** `?token=` 查询参数(会泄漏进日志/Referer)。面板提供 `POST /api/logout` 清除当前浏览器的 Cookie；阶段 A 不维护服务端会话，已复制的 Bearer/token 仍有效，改 token 后原凭据才会失效。服务端未配置 token 时视为完全开放(仅建议内网/本机场景)。
 - **登录节流**:同一来源 IP 连续失败 5 次后,后续每次失败强制等待 2 秒(5 分钟窗口累计,只惩罚失败、输对立即放行),挡住凭据喷洒与日志刷屏。来源只取 `RemoteAddr`,不信任可伪造的 `X-Forwarded-For`。
-- **CSRF 来源校验**:只对已鉴权 API 的 POST/PUT/DELETE/PATCH 检查 Origin/Referer；来源 host 不匹配返回 403。没有这两个浏览器头的 curl/自动化客户端仍可使用；GET/HEAD、`/healthz`、登录页与静态资源不受影响。
+- **CSRF 来源校验**:只对已鉴权 API 的 POST/PUT/DELETE/PATCH 检查 Origin/Referer；**默认要求来源与请求 Host 的 host 与端口都一致**（同主机名不同端口也会被拒绝——浏览器按 scheme+域名判定 same-site 时忽略端口，端口回退会让这层兜底失效），不匹配返回 403 + `cross_site_blocked`。没有这两个浏览器头的 curl/自动化客户端仍可使用；GET/HEAD、`/healthz`、登录页与静态资源不受影响。反向代理改写了 Host（浏览器看到 `https://panel.example.com`，转发到后端时 Host 变成 `panel.example.com:8080`）时严格比较会拒绝请求，这类部署需显式配置 `trusted_origin`（见配置章节），用声明式白名单取代隐式放宽。
 - **API 限速**:`/api/*` 按 `RemoteAddr` IP 执行 50 req/s、burst 100 的宽松令牌桶，支持正常多标签页轮询；追踪状态最多 8192 个来源并定期回收，满表时拒绝新的来源，不信任 `X-Forwarded-For`。
+- **反向代理下的来源口径**:API 限速与登录节流都只按 `RemoteAddr` 计算来源 IP，且**刻意不采信** `X-Forwarded-For`——它可由客户端伪造，采信会同时绕过限速与登录节流。因此置于反向代理之后时，所有客户端共享同一个来源 IP，即共享同一个限速桶与登录失败节流。面板自身轮询很轻（约 0.625 req/s/标签页），单机与少量管理员场景无影响；多管理员经同一反代访问时需知晓这一行为。
 - **安全审计日志**:记录登录成败、节点创建/编辑/删除、策略修改、CSV 导出、CSRF 拦截与限速拦截，含 request_id、来源 IP、路径和结果；日志明确禁止记录 token、节点密码、PSK、UUID 与私钥。
 - **内部错误不外泄**:500/503 只返回稳定的 `error_code` + 通用文案 + `request_id`(响应头 `X-Request-Id`),健康探针降级时只回布尔状态、采样年龄，完整错误只写服务端日志,不泄漏文件路径 / SQL 片段 / nft 报错。报障时把 `request_id` 提供给运维即可对齐日志。
 - **敏感文件权限**:`nodes.json` / `state.json` / sing-box config 创建即 `0600`,已存在的宽权限文件会被收紧(即使 `umask 000` 也不留暴露窗口)。
 - **最小能力**:面板服务 capability 收敛为 `CAP_NET_ADMIN`(nft 走 netlink)+ `CAP_NET_BIND_SERVICE`(绑定端口)。
 - **HTTPS**:面板本身跑 HTTP。默认只监听 `127.0.0.1`,通过本机或 SSH 隧道访问；需要外网访问时显式把 `listen` 改为 `0.0.0.0` 或具体地址，并强烈建议置于 HTTPS 反代之后、设置 `secure_cookie=true`。设置后 Cookie 带 `Secure` 与 HSTS 响应头；不设置时 HTTP Cookie 会以明文传输。
-- **供应链**: `sbx-core` 大文件可经 `SBX_GH_PROXY` / `SBX_RAW_BASE` 加速下载，但信任锚 `SHA256SUMS` 与 `sbx.sh.sha256` 固定从官方 RAW 源直连获取，防止自定义镜像同时投毒二进制和清单形成自证式校验。在线升级也固定直连官方 `sbx.sh.sha256` 校验下载的安装器脚本，校验失败或取不到可信哈希时 fail-closed，不覆盖现有安装。首次 `curl | bash` 仍应优先采用「先下载、校验 `sbx.sh.sha256`、再执行」方式；显式 `SBX_SCRIPT_SHA256` 可作为独立哈希锚。此校验仍信任 GitHub 官方仓库/账号，官方源被攻破不在哈希清单本身的防护范围内；后续可增加独立签名密钥。CI 用 `govulncheck` 扫描依赖漏洞，GitHub Actions 全部 pin 到完整 commit SHA。
+- **供应链**: `sbx-core` 大文件可经 `SBX_GH_PROXY` / `SBX_RAW_BASE` 加速下载，但**信任决策依据一律不经镜像**：`SHA256SUMS` 与 `sbx.sh.sha256` 固定从官方 RAW 源直连获取，防止自定义镜像同时投毒二进制和清单形成自证式校验。在线升级固定直连官方脚本 URL 并用官方 `sbx.sh.sha256` 校验，校验失败或取不到可信哈希时 fail-closed，不覆盖现有安装。用 `curl | bash` / `bash <(curl ...)` 一键安装时，需要重新落盘的那份安装器副本同样直连官方源并在校验通过后才写入（它随后会成为常驻的 `sbx` 命令）；校验不通过或官方源不可达时只告警并跳过落盘，不会装入未经验证的脚本。显式 `SBX_SCRIPT_SHA256` 可作为独立哈希锚。此校验仍信任 GitHub 官方仓库/账号，官方源被攻破不在哈希清单本身的防护范围内；后续可增加独立签名密钥。CI 用 `govulncheck` 扫描依赖漏洞，GitHub Actions 全部 pin 到完整 commit SHA。
 
 > ⚠️ 面板默认只监听 `127.0.0.1:8080`,仅本机可访问。需外网访问时必须显式配置 `listen` 为 `0.0.0.0` 或具体地址；如启用公网监听,请设置强 token 并强烈建议置于 HTTPS 反代之后、启用 `secure_cookie=true`。
 
