@@ -95,6 +95,13 @@ type Config struct {
 	// 而转发到后端时 Host 变成 panel.example.com:8080，此时严格比较会拒绝请求。
 	// 与 secure_cookie 一样，它不在 defaultConf 里——不配置就没有这个键。
 	TrustedOrigin string
+
+	// Notify 是流量推送配置。nil = 未配置（完全关闭，不启动任何 goroutine）。
+	// 与 secure_cookie / trusted_origin 同款：不在 defaultConf 里。
+	Notify *NotifyConfig
+	// notifyErr 保存 notify 段的解析错误：normalize() 不能返回错误，
+	// 因此在这里暂存，由 Validate() 上抛，保证 LoadStrict 阶段 fail-closed。
+	notifyErr error
 }
 
 // Load 读取配置。文件不存在或损坏时使用默认值并记日志（与 Python 行为一致）。
@@ -223,6 +230,16 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("trusted_origin 非法（应为形如 https://panel.example.com 的绝对 URL）: %w", err)
 		}
 	}
+	// notify：解析错误与语义错误都在此拒绝启动。推送配错却静默失效，
+	// 会让人误以为已有异地备份——必须 fail-closed。
+	if c.notifyErr != nil {
+		return fmt.Errorf("notify 配置解析失败: %w", c.notifyErr)
+	}
+	if c.Notify != nil {
+		if err := c.Notify.Validate(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -266,6 +283,8 @@ func (c *Config) normalize() {
 	if norm, err := CanonicalOrigin(c.TrustedOrigin); err == nil {
 		c.TrustedOrigin = norm
 	}
+	// notify：解析失败不在这里中断（normalize 无返回值），错误暂存后由 Validate 上抛。
+	c.Notify, c.notifyErr = parseNotify(c.raw["notify"])
 }
 
 // CanonicalOrigin 把绝对 URL（Origin / Referer / trusted_origin 的取值）规范化为
