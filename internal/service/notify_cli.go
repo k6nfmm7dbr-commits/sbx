@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,7 +37,7 @@ func NotifyConfigCmd(args []string) error {
 			return err
 		}
 		fmt.Printf("已写入 notify 配置: %s\n", config.ConfPath())
-		fmt.Println("需重启面板生效: systemctl restart sbx-core")
+		fmt.Println("需重启面板生效: systemctl restart sbx-panel")
 		fmt.Println("建议随后执行: sbx-core notify-test")
 		return nil
 
@@ -76,10 +77,209 @@ func NotifyConfigCmd(args []string) error {
 		}
 		fmt.Println(string(out))
 		return nil
+
+	case "status":
+		return notifyStatus()
+
+	case "add-channel":
+		if len(args) < 2 {
+			return fmt.Errorf("用法: sbx-core notify-config add-channel <渠道.json>")
+		}
+		return notifyAddChannel(args[1])
+
+	case "remove-channel":
+		if len(args) < 2 {
+			return fmt.Errorf("用法: sbx-core notify-config remove-channel <渠道名|序号>")
+		}
+		return notifyRemoveChannel(args[1])
+
+	case "set-option":
+		if len(args) < 3 {
+			return fmt.Errorf("用法: sbx-core notify-config set-option <key> <value>")
+		}
+		return notifySetOption(args[1], args[2])
 	}
-	return fmt.Errorf("未知子命令 %q（可选 set/get/show）", args[0])
+	return fmt.Errorf("未知子命令 %q（可选 set/get/show/status/add-channel/remove-channel/set-option）", args[0])
 }
 
+// notifyStatus 打印推送配置摘要（凭据不出现）。
+//
+// 供安装器菜单展示用：菜单需要的是"启用没有、有几个渠道、频率多少"，
+// 而不是一份需要自己解析的 JSON。
+func notifyStatus() error {
+	cfg, err := config.LoadStrict()
+	if err != nil {
+		return err
+	}
+	nc := cfg.Notify
+	if nc == nil {
+		fmt.Println("状态: 未配置")
+		return nil
+	}
+	if !nc.Enabled {
+		fmt.Println("状态: 未启用")
+		if len(nc.Channels) > 0 {
+			fmt.Printf("（已配置 %d 个渠道，但 enabled=false）\n", len(nc.Channels))
+		}
+		return nil
+	}
+	fmt.Println("状态: 已启用")
+	fmt.Printf("频率: 每 %d 分钟\n", nc.IntervalMinutes)
+	fmt.Printf("日结: 每日 %s\n", nc.DailyAt)
+	if nc.HeartbeatURL != "" {
+		fmt.Printf("死手开关: %s\n", notify.RedactURL(nc.HeartbeatURL))
+	}
+	fmt.Println("渠道:")
+	for i, ch := range nc.Channels {
+		fmt.Printf("  [%d] %s  events=%s\n", i, ch.Name, strings.Join(ch.Events, ","))
+	}
+	return nil
+}
+
+// notifyAddChannel 把一个渠道对象追加进 notify.channels，保留其余配置。
+//
+// 刻意做成"增量添加"而不是让菜单重新生成整份配置：菜单无法安全地合并既有 JSON
+// （shell 里做 JSON 增删很容易写坏），把这件事交给 Go 侧最稳妥。
+func notifyAddChannel(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("读取 %s 失败: %w", path, err)
+	}
+	// 先单独校验这一个渠道，避免把非法值写进正式配置。
+	probe := []byte(`{"enabled":true,"channels":[` + string(data) + `]}`)
+	if _, err := config.ParseNotifyJSON(probe); err != nil {
+		return fmt.Errorf("渠道配置非法: %w", err)
+	}
+	var ch map[string]any
+	if err := json.Unmarshal(data, &ch); err != nil {
+		return fmt.Errorf("渠道必须是 JSON 对象: %w", err)
+	}
+
+	notifyRaw, err := loadNotifyRaw()
+	if err != nil {
+		return err
+	}
+	chans, _ := notifyRaw["channels"].([]any)
+	notifyRaw["channels"] = append(chans, ch)
+	// 添加渠道即视为启用；仅补齐缺失的全局默认值，不覆盖用户已改过的值。
+	notifyRaw["enabled"] = true
+	if _, ok := notifyRaw["interval_minutes"]; !ok {
+		notifyRaw["interval_minutes"] = json.Number("30")
+	}
+	if _, ok := notifyRaw["daily_at"]; !ok {
+		notifyRaw["daily_at"] = "00:05"
+	}
+
+	name, _ := ch["name"].(string)
+	typ, _ := ch["type"].(string)
+	if err := saveNotifyRaw(notifyRaw); err != nil {
+		return err
+	}
+	if name != "" {
+		fmt.Printf("已添加渠道: %s (%s)\n", name, typ)
+	} else {
+		fmt.Printf("已添加渠道: %s\n", typ)
+	}
+	return nil
+}
+
+// notifyRemoveChannel 按序号或渠道名删除一个渠道。
+func notifyRemoveChannel(key string) error {
+	cfg, err := config.LoadStrict()
+	if err != nil {
+		return err
+	}
+	nc := cfg.Notify
+	if nc == nil || len(nc.Channels) == 0 {
+		return fmt.Errorf("当前没有任何渠道")
+	}
+	idx := -1
+	if n, aerr := strconv.Atoi(key); aerr == nil {
+		if n >= 0 && n < len(nc.Channels) {
+			idx = n
+		}
+	} else {
+		for i := range nc.Channels {
+			if nc.Channels[i].Name == key {
+				idx = i
+				break
+			}
+		}
+	}
+	if idx < 0 {
+		return fmt.Errorf("找不到渠道 %q（可用序号 0-%d，或渠道名）", key, len(nc.Channels)-1)
+	}
+	removed := nc.Channels[idx].Name
+
+	notifyRaw, err := loadNotifyRaw()
+	if err != nil {
+		return err
+	}
+	chans, _ := notifyRaw["channels"].([]any)
+	if idx >= len(chans) {
+		return fmt.Errorf("渠道列表已变化，请重新查看后重试")
+	}
+	notifyRaw["channels"] = append(chans[:idx], chans[idx+1:]...)
+	// 删空了就自动关闭：否则会因为"enabled=true 但 channels 为空"而写不进去。
+	if len(notifyRaw["channels"].([]any)) == 0 {
+		notifyRaw["enabled"] = false
+	}
+	if err := saveNotifyRaw(notifyRaw); err != nil {
+		return err
+	}
+	fmt.Printf("已删除渠道: %s\n", removed)
+	return nil
+}
+
+// notifySetOption 修改 notify 段的全局选项。
+func notifySetOption(key, value string) error {
+	notifyRaw, err := loadNotifyRaw()
+	if err != nil {
+		return err
+	}
+	switch key {
+	case "enabled":
+		notifyRaw["enabled"] = value == "true" || value == "1" || value == "yes"
+	case "interval_minutes", "timeout_seconds":
+		n, perr := strconv.Atoi(value)
+		if perr != nil {
+			return fmt.Errorf("%s 必须是整数: %q", key, value)
+		}
+		notifyRaw[key] = json.Number(strconv.Itoa(n))
+	case "daily_at", "heartbeat_url":
+		notifyRaw[key] = value
+	default:
+		return fmt.Errorf("不支持的键 %q（可选 enabled / interval_minutes / daily_at / timeout_seconds / heartbeat_url）", key)
+	}
+	return saveNotifyRaw(notifyRaw)
+}
+
+// loadNotifyRaw 读出 panel.json 的 notify 段（不存在时返回空对象，便于增量构造）。
+func loadNotifyRaw() (map[string]any, error) {
+	cfg, err := config.LoadStrict()
+	if err != nil {
+		return nil, err
+	}
+	raw := cfg.Raw()
+	if m, ok := raw["notify"].(map[string]any); ok && m != nil {
+		return m, nil
+	}
+	return map[string]any{}, nil
+}
+
+// saveNotifyRaw 走 config.SetNotify（完整校验 + 原子写 0600），非法配置绝不落盘。
+func saveNotifyRaw(notifyRaw map[string]any) error {
+	out, err := fsx.MarshalCompact(notifyRaw)
+	if err != nil {
+		return err
+	}
+	if err := config.SetNotify(out); err != nil {
+		return err
+	}
+	fmt.Println("已写入: " + config.ConfPath())
+	fmt.Println("需重启面板生效: systemctl restart sbx-panel")
+	return nil
+}
 func loadNotify() (*config.NotifyConfig, error) {
 	cfg, err := config.LoadStrict()
 	if err != nil {
