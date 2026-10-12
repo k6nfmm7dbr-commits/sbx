@@ -1,6 +1,20 @@
 package connection
 
-import "testing"
+import (
+	"testing"
+	"unsafe"
+)
+
+func TestOwnedStringIsZeroCopyReadOnlyView(t *testing.T) {
+	buf := []byte("conntrack-sample")
+	view := ownedString(buf)
+	if unsafe.StringData(view) != unsafe.SliceData(buf) {
+		t.Fatal("ownedString 应复用输入缓冲区，而不是产生整份复制")
+	}
+	if view != "conntrack-sample" {
+		t.Fatalf("ownedString 内容错误: %q", view)
+	}
+}
 
 func TestParseConntrack(t *testing.T) {
 	sample := "" +

@@ -1,14 +1,22 @@
 package api
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/k6nfmm7dbr-commits/sbx/internal/config"
+	"github.com/k6nfmm7dbr-commits/sbx/internal/database"
+	"github.com/k6nfmm7dbr-commits/sbx/internal/policy"
 )
 
 // getBody 发起 GET 并返回 (状态码, 响应头, 响应体)。
@@ -87,6 +95,74 @@ func TestPolicyUnavailableHidesInternalDetails(t *testing.T) {
 	}
 	if !strings.Contains(body, codeNodesFileUnavailable) {
 		t.Errorf("503 应带 error_code=%s, got %s", codeNodesFileUnavailable, body)
+	}
+}
+
+// healthz 免鉴权故障探针只暴露布尔状态，不得回显 nodes.json 绝对路径、文件权限或 nft 错误。
+// 原始错误仍应在结构化服务端日志中带 request_id 与稳定 error_code，供维护者排障。
+func TestAuditHealthzHidesInternalErrors(t *testing.T) {
+	dir := t.TempDir()
+	nodesFile := filepath.Join(dir, "nodes.json")
+	writeTemp(t, nodesFile, `{broken`)
+	db, err := database.Open(filepath.Join(dir, "traffic.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	pol := policy.New(db.DB, dir, filepath.Join(dir, "policy.nft"))
+	pol.SetNodesFile(nodesFile)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { pol.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	deadline := time.Now().Add(2 * time.Second)
+	for pol.LastError() == "" && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if pol.LastError() == "" {
+		t.Fatal("测试策略服务未进入故障状态")
+	}
+
+	cfg := &config.Config{
+		DB: db.Path(), NodesFile: nodesFile, NftConf: filepath.Join(dir, "nft.conf"),
+		Listen: "127.0.0.1", Port: 8080, Token: testToken, Interval: 2, TZ: "UTC",
+	}
+	secret := "nodes.json 读取失败: open /etc/sbx/nodes.json: permission denied"
+	srv, _ := New(cfg, db, &fakeSource{backend: "nft", err: secret, lastOK: time.Now().Unix() - 30}, pol)
+
+	var logs bytes.Buffer
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(oldLogger)
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	// 未提供 Bearer/Cookie：探活端点仍免鉴权且返回 200。
+	code, hdr, body := getBody(t, ts.URL+"/healthz")
+	if code != http.StatusOK {
+		t.Fatalf("/healthz 故障时仍须 200，got %d: %s", code, body)
+	}
+	for _, want := range []string{`"ok":true`, `"collector_ok":false`, `"policy_ok":false`, `"sample_age_s"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("healthz 缺少 %s: %s", want, body)
+		}
+	}
+	for _, leak := range []string{"/etc/", "nodes.json", "permission", "nft 读取失败"} {
+		if strings.Contains(body, leak) {
+			t.Errorf("healthz 响应泄漏内部细节 %q: %s", leak, body)
+		}
+	}
+	rid := hdr.Get("X-Request-Id")
+	if rid == "" {
+		t.Fatal("healthz 响应缺少 request id")
+	}
+	logText := logs.String()
+	for _, want := range []string{rid, codeCollectorDegraded, codePolicyDegraded, "/etc/sbx/nodes.json", "permission denied"} {
+		if !strings.Contains(logText, want) {
+			t.Errorf("服务端降级日志缺少 %q: %s", want, logText)
+		}
 	}
 }
 

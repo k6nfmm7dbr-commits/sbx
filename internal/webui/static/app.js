@@ -483,7 +483,7 @@ document.getElementById('node-select').addEventListener('change', function (e) {
     if (!valid[name]) name = 'home';
     positions[current] = window.scrollY || 0; current = name; activeView = name;
     document.querySelectorAll('.view').forEach(function (v) { v.classList.toggle('on', v.id === 'view-' + name); });
-    document.querySelectorAll('.tab').forEach(function (b) { b.classList.toggle('on', b.dataset.view === name); });
+    document.querySelectorAll('.tab[data-view]').forEach(function (b) { b.classList.toggle('on', b.dataset.view === name); });
     if (push && location.hash !== '#' + name) history.pushState(null, '', '#' + name);
     requestAnimationFrame(function () { window.scrollTo(0, positions[name] || 0); });
     if (name === 'home') {
@@ -496,12 +496,22 @@ document.getElementById('node-select').addEventListener('change', function (e) {
     if (name === 'node') loadNodeDaily();
     if (name === 'manage') loadManageNodes();
   }
-  document.querySelectorAll('.tab').forEach(function (b) {
+  document.querySelectorAll('.tab[data-view]').forEach(function (b) {
     b.addEventListener('click', function () { show(b.dataset.view, true); });
   });
   window.addEventListener('popstate', function () { show((location.hash || '#home').slice(1), false); });
   show(current, false);
 })();
+
+document.getElementById('logout-button').addEventListener('click', function () {
+  fetch('/api/logout', { method: 'POST', cache: 'no-store', credentials: 'same-origin' })
+    .then(function (r) {
+      if (r.status === 401) { location.replace('/login'); return; }
+      if (!r.ok) throw new Error('登出失败 ' + r.status);
+      location.replace('/login');
+    })
+    .catch(function (e) { toast(e.message); });
+});
 
 /* ---------- 启动与轮询 ---------- */
 function loadSummary() { return api('/api/summary').then(renderSummary).catch(function (e) { if (e.message !== '未登录') toast(e.message); }); }

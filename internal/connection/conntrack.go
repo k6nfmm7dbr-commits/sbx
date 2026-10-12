@@ -54,6 +54,11 @@ type ConntrackResult struct {
 	Inactive bool
 }
 
+// ownedString 返回只读零拷贝视图：调用方必须保证 b 在该字符串及其子串的整个生命期内不被修改；
+// 返回字符串的子串仍共享 b 的底层存储，写入任何长期存活 map/cache/snapshot 前必须显式 Clone。
+// 违反此契约会同时造成数据竞争和把整份 conntrack 文件缓冲区长期保活。
+func ownedString(b []byte) string { return unsafe.String(unsafe.SliceData(b), len(b)) }
+
 const defaultConntrackPath = "/proc/net/nf_conntrack"
 
 // ReadConntrack 读取并解析 conntrack 的 TCP/UDP 已建立流。
@@ -69,11 +74,8 @@ func ReadConntrack(path string) ConntrackResult {
 		}
 		return ConntrackResult{Available: false, Partial: true, Err: err}
 	}
-	// 零拷贝转 string：text 的生命周期由 ParseConntrack 返回的子串引用维持
-	// （流字段共享底层存储），b 在本函数返回后不会被修改。
-	// 繁忙服务器上这张表可达数 MB，且本函数每秒执行一次——旧的 string(b)
-	// 隐式拷贝是纯浪费的分配与 GC 压力。
-	text := unsafe.String(unsafe.SliceData(b), len(b))
+	// b 只读视图的约束由 ownedString 文档明确说明：解析期间不可修改，长期存储子串前需 Clone。
+	text := ownedString(b)
 	entries := countEntries(text)
 	if entries == 0 {
 		// 文件存在可读却一条都没有：内核未真正跟踪连接（缺少引用 ct 的规则）。

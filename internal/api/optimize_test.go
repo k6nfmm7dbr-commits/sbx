@@ -14,7 +14,7 @@ import (
 	"github.com/k6nfmm7dbr-commits/sbx/internal/policy"
 )
 
-// ---- /healthz 降级详情（v3.0.12） ------------------------------------------
+// 降级状态：只返回布尔健康位与采样年龄，原始错误留在服务端日志中；探针仍 200 + ok:true。
 
 // 干净状态：输出必须与旧版完全一致（既有探活脚本依赖 {"ok":true}）。
 func TestHealthzCleanMatchesLegacy(t *testing.T) {
@@ -38,11 +38,13 @@ func TestHealthzDegradedFields(t *testing.T) {
 		t.Fatalf("降级状态仍应 200, got %d", resp.StatusCode)
 	}
 	got := body(t, resp)
-	if !strings.Contains(got, `"ok":true`) {
-		t.Fatalf("缺少 ok:true: %s", got)
+	if !strings.Contains(got, `"ok":true`) || !strings.Contains(got, `"collector_ok":false`) {
+		t.Fatalf("应包含存活位和 collector_ok=false: %s", got)
 	}
-	if !strings.Contains(got, `"collector_error":"nft 读取失败: permission denied"`) {
-		t.Fatalf("缺少 collector_error: %s", got)
+	for _, secret := range []string{"permission denied", "/etc/", "nodes.json", "nft 读取失败"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("healthz 泄漏内部错误内容 %q: %s", secret, got)
+		}
 	}
 	var health map[string]any
 	if err := json.Unmarshal([]byte(got), &health); err != nil {

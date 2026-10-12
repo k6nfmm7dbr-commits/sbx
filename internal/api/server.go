@@ -205,19 +205,17 @@ func (s *Server) serveRoutes(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, route string) {
 	switch route {
 	case "/healthz":
-		// 存活探针：语义保持不变（HTTP 200 + ok:true，任何异常都算"进程活着"，
-		// 供 systemd/外部监控用），只**追加**降级详情字段。这样既不破坏既有
-		// 探活脚本，又能让人/监控一眼区分「活着」与「健康」：
-		//   collector_error —— 采集器最近一次错误（nft 缺失/权限/规则被删…）
-		//   policy_error    —— 策略 enforcement 最近一次错误（nft 应用失败…）
-		//   sample_age_s    —— 距上次成功采样的秒数（超过若干个 interval 即停摆）
-		// 三个字段全部 omitempty：一切正常时输出与旧版完全一致。
+		// 存活探针必须始终免鉴权、HTTP 200 且 ok:true：systemd/外部监控只据此判断
+		// 进程是否活着。错误原文只能写结构化服务端日志，不能回显绝对路径、nft stderr
+		// 等内部细节；客户端只拿布尔降级位与采样年龄，干净态仍精确为 {"ok":true}。
 		resp := map[string]any{"ok": true}
 		if s.src != nil {
-			// 探针只读标量字段：用 StatusLite 避免为每次探活深拷贝连接数 map。
 			st := s.src.StatusLite()
 			if st.Error != "" {
-				resp["collector_error"] = st.Error
+				resp["collector_ok"] = false
+				slog.Error("healthz collector degraded",
+					"request_id", requestID(r), "error_code", codeCollectorDegraded,
+					"method", r.Method, "path", r.URL.Path, "err", st.Error)
 			}
 			if st.LastOK > 0 {
 				resp["sample_age_s"] = time.Now().Unix() - st.LastOK
@@ -225,7 +223,10 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, route string)
 		}
 		if s.policy != nil {
 			if perr := s.policy.LastError(); perr != "" {
-				resp["policy_error"] = perr
+				resp["policy_ok"] = false
+				slog.Error("healthz policy degraded",
+					"request_id", requestID(r), "error_code", codePolicyDegraded,
+					"method", r.Method, "path", r.URL.Path, "err", perr)
 			}
 		}
 		s.sendJSON(w, r, http.StatusOK, resp)

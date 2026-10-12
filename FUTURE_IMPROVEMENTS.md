@@ -808,3 +808,14 @@ CSV 流式导出、nodes/config JSON 读取、策略 no-op enforcement 与 recon
 - `/api/nodes` 返回 `port_conflict_with` 节点 ID，管理页标红并提示编辑端口或删除冲突节点。冲突节点分享路由返回 409，不生成误导性分享链接。
 - CLI add/sync/最终候选继续校验所有端口唯一；编辑或删除只有在最终列表完全无冲突时才可应用，未解决的候选不会覆盖原文件或重启服务。
 - 回归测试覆盖两条重复端口记录的诊断、编辑/删除恢复、严格 loader/enforcement 仍拒绝重复端口、添加重复端口失败，以及管理列表不泄露节点凭据。
+
+
+## 31. v3.0.30 后续审计问题（H/M/L/I）
+
+- **H-1/H-2**：`SBX_GH_PROXY` / `SBX_RAW_BASE` 只可影响大文件字节源。`SHA256SUMS` 与 `sbx.sh.sha256` 使用固定官方 RAW 基址；在线升级的 `sbx.sh` 本体也直连固定官方 URL，下载后在覆盖前校验官方哈希；官方哈希暂不可达则 fail-closed，只有用户显式提供 `SBX_SCRIPT_SHA256` 才允许以独立锚重试。镜像投毒行为由模板提取式 PoC 测试覆盖。
+- **M-1**：免鉴权 `/healthz` 仍恒为 200，干净态严格保持 `{"ok":true}`；故障只加 `collector_ok:false` / `policy_ok:false`，原始错误通过 request_id/error_code 进服务端日志，不回显路径和 nft stderr。
+- **M-2 A**：默认 listen 改为 `127.0.0.1`；显式非回环 HTTP 监听且未启用 secure_cookie 时启动警告。secure_cookie 模式增加 HSTS，所有普通、gzip、SSE、CSV 响应共享 Permissions-Policy 与已有安全头。`POST /api/logout` 仅删除本机 token Cookie；当前静态 token 设计下不会撤销已复制的 Bearer token。阶段 B 服务端可撤销 session 尚未实现，须经用户确认设计后再做。
+- **L-1/L-2**：状态变更 API 检查 Origin/Referer（无头脚本客户端仍放行；安全 GET/SSE、healthz、静态资源跳过）；API 按 RemoteAddr IP 限速 50 req/s、burst 100，表限 8192 并周期 GC。结构化审计覆盖登录、节点 mutation、策略、CSV、CSRF 与限速，日志禁止凭据字段。
+- **L-3**：`/api/daily` scope 只允许空字符串或正整数 `node:<id>`，非法输入在产生缓存键/查询前返回 400。
+- **I-1**：保留 Go 1.27.1 / x/sys v0.48.0；项目声明、CI、README 与 Debian 真机 Go 1.27.1 环境一致。iSH Go 1.23.9 是工具环境限制，不作为下调生产目标工具链的依据。
+- **I-2**：`ownedString` 文档化零拷贝只读生命周期；长期保存 conntrack IP 统一经 `cloneForPersist`，flow tracker 保存 canonical cloned key，避免 Go map key 更新时再次挂住每轮输入 buffer；新增重复解析/修改输入缓冲区的回归测试。

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/k6nfmm7dbr-commits/sbx/internal/connection"
@@ -444,20 +443,21 @@ func (s *Service) buildActivity(nodeList []nodes.Node, cr connection.ConntrackRe
 			// 将整个 conntrack 文件缓冲区一并保活。
 			fkey := flowKey{nodeID: nodeID, srcIP: f.SrcIP, srcPort: f.SrcPort}
 			prev, had := s.flows[fkey]
+			if had && prev.srcIP != "" {
+				// 命中时不能沿用本轮输入子串：map 对既有 key 更新时可能覆盖 key header，
+				// 会让长期状态重新引用本轮整份 conntrack 文本。
+				fkey.srcIP = prev.srcIP
+			} else {
+				fkey.srcIP = cloneForPersist(f.SrcIP)
+			}
 			traffic := false
 			switch {
 			case f.Bytes == 0:
 				// 无字节计费：conntrack 仍跟踪就视为活跃，并刷新 LastSeen。
-				if !had {
-					fkey.srcIP = strings.Clone(f.SrcIP)
-				}
-				s.flows[fkey] = flowState{Bytes: f.Bytes, LastSeen: now, SeenEpoch: flowEpoch}
+				s.flows[fkey] = flowState{Bytes: f.Bytes, LastSeen: now, SeenEpoch: flowEpoch, srcIP: fkey.srcIP}
 				traffic = true
 			case !had || f.Bytes != prev.Bytes:
-				if !had {
-					fkey.srcIP = strings.Clone(f.SrcIP)
-				}
-				s.flows[fkey] = flowState{Bytes: f.Bytes, LastSeen: now, SeenEpoch: flowEpoch}
+				s.flows[fkey] = flowState{Bytes: f.Bytes, LastSeen: now, SeenEpoch: flowEpoch, srcIP: fkey.srcIP}
 				traffic = true
 			case now.Sub(prev.LastSeen) <= s.ipIdle:
 				// 静默但仍在 grace → 活跃，沿用原始 LastSeen（不刷新 grace）。

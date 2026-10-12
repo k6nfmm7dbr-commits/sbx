@@ -48,6 +48,9 @@ func Serve() int {
 	if cfg.Token == "" {
 		slog.Warn("警告: 面板监听在本机回环地址且未设置 token, 仅本机可访问")
 	}
+	if cfg.Token != "" && listenIsPublic(cfg.Listen) && !cfg.SecureCookie {
+		slog.Warn("面板正以明文 HTTP 对非本机地址提供服务，Cookie 将以明文传输；请置于 HTTPS 反代之后并设置 secure_cookie")
+	}
 
 	db, err := database.Open(cfg.DB)
 	if err != nil {

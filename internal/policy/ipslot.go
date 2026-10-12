@@ -6,6 +6,11 @@ import (
 	"time"
 )
 
+// cloneForPersist 是唯一允许把 conntrack 字符串存入长期状态的入口：解析器返回的
+// IP 可能只是整张 /proc 文件的子串，直接持久化会让大缓冲区存活到 idle GC；
+// 每个持久化新 key 只复制 IP 本身的少量字节，后续 lookup 仍按内容匹配。
+func cloneForPersist(s string) string { return strings.Clone(s) }
+
 // IPActivity 是单轮采集得到的某个客户端 IP 的活动摘要（TCP/UDP 合并）。
 type IPActivity struct {
 	IP          string
@@ -300,7 +305,7 @@ func (st *NodeIPState) touchObserved(ip string, a IPActivity, now time.Time) str
 		// IP 字符串常来自 conntrack 的 unsafe.String 子串；持久 map key 若直接
 		// 保存它，会把整张 conntrack 文件缓冲区保活到 IP idle GC。只在新 IP
 		// 首次落入长期状态时克隆这几字节，避免每 tick 保留整份大文件。
-		ip = strings.Clone(ip)
+		ip = cloneForPersist(ip)
 		o = &ObservedIP{IP: ip, FirstSeen: now}
 		st.Observed[ip] = o
 	}

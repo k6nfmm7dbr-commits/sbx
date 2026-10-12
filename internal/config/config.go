@@ -42,11 +42,12 @@ func defaultConf() map[string]any {
 		"nodes_file": filepath.Join(dir, "nodes.json"),
 		"nft_conf":   filepath.Join(dir, "nft.conf"),
 		"web_root":   filepath.Join(dir, "web"),
-		"listen":     "0.0.0.0",
-		"port":       json.Number("8080"),
-		"token":      "",
-		"interval":   json.Number("2"),
-		"tz":         "Asia/Shanghai",
+		// 默认仅本机可访问；需要外网时显式配置 listen，并建议置于 HTTPS 反代之后。
+		"listen":   "127.0.0.1",
+		"port":     json.Number("8080"),
+		"token":    "",
+		"interval": json.Number("2"),
+		"tz":       "Asia/Shanghai",
 	}
 }
 

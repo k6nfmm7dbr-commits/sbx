@@ -361,6 +361,9 @@ type flowState struct {
 	Bytes     int64
 	LastSeen  time.Time
 	SeenEpoch uint64 // 最近一次在 conntrack 快照里出现的轮次
+	// srcIP 保存 map key 使用的独立字符串。Go map 对相等 key 的更新可能重写 key header，
+	// 因而每轮把输入子串直接写回都会重新引用整张 conntrack buffer；更新前必须恢复此 canonical key。
+	srcIP string
 }
 
 func (s *Service) signalNotify() {

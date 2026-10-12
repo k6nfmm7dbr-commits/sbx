@@ -22,6 +22,26 @@ func qsGet(r *http.Request, key string) string {
 	return ""
 }
 
+func validDailyScope(scope string) bool {
+	if scope == "" {
+		return true
+	}
+	if !strings.HasPrefix(scope, "node:") {
+		return false
+	}
+	rawID := strings.TrimPrefix(scope, "node:")
+	if len(rawID) == 0 || len(rawID) > 18 {
+		return false
+	}
+	for i := 0; i < len(rawID); i++ {
+		if rawID[i] < '0' || rawID[i] > '9' {
+			return false
+		}
+	}
+	id, err := strconv.ParseUint(rawID, 10, 64)
+	return err == nil && id > 0
+}
+
 // handleAPI 处理 /api/* 路由（统一鉴权）。
 func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request, route string) {
 	if !s.authorized(r) {
@@ -90,6 +110,13 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request, route string)
 			days = 365
 		}
 		scope := qsGet(r, "scope")
+		if !validDailyScope(scope) {
+			s.sendJSON(w, r, http.StatusBadRequest, map[string]any{
+				"error":      "scope must be empty or node:<positive integer>",
+				"error_code": codeInvalidScope, "request_id": requestID(r),
+			})
+			return
+		}
 		s.serveCachedJSON(w, r, codeDailyFailed,
 			s.cacheKey("daily", strconv.Itoa(days), scope), func() (any, error) {
 				rows, err := traffic.QDaily(s.db.DB, days, scope)

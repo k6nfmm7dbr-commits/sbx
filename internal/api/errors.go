@@ -32,6 +32,10 @@ const (
 	codePolicySave    = "policy_save_failed"
 	codePolicyApply   = "policy_apply_failed"
 
+	// 降级型健康状态（/healthz 始终 200，只把这些码写入服务端日志）
+	codeCollectorDegraded = "collector_degraded"
+	codePolicyDegraded    = "policy_degraded"
+
 	// 503 类
 	codeNodesFileUnavailable = "nodes_file_unavailable"
 )
