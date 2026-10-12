@@ -80,3 +80,24 @@ func TestAPIRateLimiterUsesRemoteAddrNotForwardedHeader(t *testing.T) {
 		t.Fatalf("限速 key 应只记录 RemoteAddr，size=%d", limiter.size())
 	}
 }
+
+func TestAPIRateLimitDoesNotAffectHealthOrStaticResources(t *testing.T) {
+	srv := &Server{cfg: &config.Config{Token: ""}}
+	now := time.Now()
+	srv.apiLimiter.clients = make(map[string]apiRateBucket, apiRateMaxIPs)
+	for i := 0; i < apiRateMaxIPs; i++ {
+		srv.apiLimiter.clients["198.51."+itoa(i/256)+"."+itoa(i%256)] = apiRateBucket{tokens: 0, last: now}
+	}
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+	for _, path := range []string{"/healthz", "/"} {
+		resp, err := http.Get(ts.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("非 API 路径 %s 不应受 API 限速影响，got %d", path, resp.StatusCode)
+		}
+	}
+}

@@ -62,7 +62,7 @@ func TestAuditLogsLoginFailureAndNodeDeletionWithoutSecrets(t *testing.T) {
 	}
 
 	text := logs.String()
-	for _, field := range []string{"event=login_failure", "result=failure", "event=node_delete", "result=success", "node_id=1", "request_id=", "source_ip="} {
+	for _, field := range []string{"event=login_failure", "event=login_success", "result=failure", "event=node_create", "event=node_delete", "result=success", "node_id=1", "request_id=", "source_ip="} {
 		if !strings.Contains(text, field) {
 			t.Errorf("审计日志缺少字段 %q: %s", field, text)
 		}
