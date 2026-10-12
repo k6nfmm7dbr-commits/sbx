@@ -395,6 +395,12 @@ sbx-core notify-test
       "events": ["daily"]
     },
     {
+      // WxPusher 极简:扫码拿 SPT 即可,建议配合独立 App 接收
+      "type": "wxpusher",
+      "spt": "SPT...",
+      "events": ["heartbeat", "daily"]
+    },
+    {
       "type": "webhook",
       "url": "https://example.com/sbx-hook",
       "secret": "shared-secret",
@@ -422,8 +428,31 @@ sbx-core notify-test
 | Telegram | 4096 字符 | 收全部事件;聊天记录可导出,最适合做备份载体 |
 | 企业微信 | 2048 字节(`text`)/ 4096(`markdown`) | 建议只收 `daily`;超长会自动降级 |
 | Server酱 | 较宽松 | **免费额度很小(个位数/天)**,务必只订阅 `daily`——半小时心跳一天 48 条必然超额 |
-| PushPlus | 较宽松 | 同上 |
+| PushPlus | 较宽松 | 推到微信;**2024-08 起未实名无法调用**,实名后 200 条/天 |
+| WxPusher | 60000 字节 | 极简(SPT)扫码即得,免注册免实名;**建议用独立 App 接收**,微信通道 24 小时仅 10 条(见下) |
 | 通用 Webhook | 默认 8192 字节(`max_bytes`) | 接收 JSON,含 `text` / `nodes` / `replay` 字段;可配 `secret` 做 HMAC 签名 |
+
+#### WxPusher 的两种模式与接收端选择
+
+```jsonc
+// 极简模式:扫码拿到 SPT 即可,不需要注册账号或创建应用
+{"type": "wxpusher", "spt": "SPT_xxx", "events": ["heartbeat", "daily"]}
+
+// 标准模式:能力更全,需要 app_token 与 uids(或 topic_ids)
+{"type": "wxpusher", "app_token": "AT_xxx", "uids": ["UID_xxx"]}
+```
+
+填了 `spt` 走极简端点,否则走标准端点。两者的凭据前缀不同(`SPT_` 与 `AT_`),
+填错会在写入配置时被直接拦住并提示。
+
+**接收端务必注意**:WxPusher 主推的是**独立全平台客户端**(Android / iOS / 鸿蒙 /
+桌面端),走厂商推送与 APNs,单日约 3000 条后才不提醒——**心跳应走这条通道**。
+它的微信通道(ClawBot/iLink)**24 小时内最多收 10 条**,且用尽后需用户手动回复才能
+继续接收,因此**不适合半小时心跳**。根源在微信官方:其 iLink 协议本身不支持主动
+推送,必须由用户先发消息激活。
+
+> 若你坚持在微信里直接收较多推送,只能用走公众号模板消息的 PushPlus(需实名,
+> 200 条/天)或 Server酱(5 条/天),没有别的路。
 
 **每个渠道独立渲染**:容量不够时正文逐级降级(折叠节点明细 → 去掉明细 → 只留一句提示),但 `SBX1` 数据行**永不截断**;实在装不下就分片发送,每片都是独立可解析的完整记录。
 
