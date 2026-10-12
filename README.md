@@ -34,6 +34,7 @@ netfilter 后端是 **nftables-only**:流量统计、节点暂停、在线 IP �
 - [命令参考](#命令参考)
 - [配置与文件布局](#配置与文件布局)
 - [安全性](#安全性)
+- [流量推送与异地留痕](#流量推送与异地留痕)
 - [升级、版本化下载与回退](#升级版本化下载与回退)
 - [构建与开发](#构建与开发)
 - [分发机制](#分发机制)
@@ -345,6 +346,149 @@ sbx-core node list|links|add|edit|remove|sync   # 节点管理
 - **供应链**: `sbx-core` 大文件可经 `SBX_GH_PROXY` / `SBX_RAW_BASE` 加速下载，但**信任决策依据一律不经镜像**：`SHA256SUMS` 与 `sbx.sh.sha256` 固定从官方 RAW 源直连获取，防止自定义镜像同时投毒二进制和清单形成自证式校验。在线升级固定直连官方脚本 URL 并用官方 `sbx.sh.sha256` 校验，校验失败或取不到可信哈希时 fail-closed，不覆盖现有安装。用 `curl | bash` / `bash <(curl ...)` 一键安装时，需要重新落盘的那份安装器副本同样直连官方源并在校验通过后才写入（它随后会成为常驻的 `sbx` 命令）；校验不通过或官方源不可达时只告警并跳过落盘，不会装入未经验证的脚本。显式 `SBX_SCRIPT_SHA256` 可作为独立哈希锚。此校验仍信任 GitHub 官方仓库/账号，官方源被攻破不在哈希清单本身的防护范围内；后续可增加独立签名密钥。CI 用 `govulncheck` 扫描依赖漏洞，GitHub Actions 全部 pin 到完整 commit SHA。
 
 > ⚠️ 面板默认只监听 `127.0.0.1:8080`,仅本机可访问。需外网访问时必须显式配置 `listen` 为 `0.0.0.0` 或具体地址；如启用公网监听,请设置强 token 并强烈建议置于 HTTPS 反代之后、启用 `secure_cookie=true`。
+
+---
+
+## 流量推送与异地留痕
+
+服务器整机损毁时,磁盘上的 `traffic.db` 会一起消失。这一节的功能把每日流量记录**推送到 IM / Webhook,并在每条消息里内嵌可回放数据**,让聊天记录本身成为一份可恢复的备份。
+
+两个前提认识值得先说清楚:
+
+- **推送 ≠ 备份**。每半小时推一条给人看的消息,只能让你知道"出事了";真正让数据不丢的是消息里内嵌的 `SBX1` 数据行——它可以被脚本解析并写回数据库。
+- **`T-1` 的数据天然不可变**。`daily` 表按面板时区归属到某一天,跨天之后那天的行不再被改写。因此**每天只要成功送出一次前一日的数据,日流量就永不丢失**,不需要任何增量同步。
+
+### 快速上手
+
+```bash
+# 1. 写一份配置(见下方示例)保存为 notify.json
+# 2. 写入 panel.json 的 notify 段(写入前完整校验,非法即拒绝)
+sbx-core notify-config set notify.json
+
+# 3. 重启面板生效
+systemctl restart sbx-core
+
+# 4. 确认每个渠道都能收到
+sbx-core notify-test
+```
+
+```json
+{
+  "enabled": true,
+  "interval_minutes": 30,
+  "daily_at": "00:05",
+  "channels": [
+    {
+      "type": "telegram",
+      "bot_token": "123456789:AAH...",
+      "chat_id": "-1001234567890",
+      "events": ["heartbeat", "daily"]
+    },
+    {
+      "type": "wxwork",
+      "webhook": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...",
+      "events": ["daily"]
+    },
+    {
+      "type": "serverchan",
+      "sendkey": "SCT...",
+      "events": ["daily"]
+    },
+    {
+      "type": "webhook",
+      "url": "https://example.com/sbx-hook",
+      "secret": "shared-secret",
+      "events": ["heartbeat", "daily"]
+    }
+  ]
+}
+```
+
+`notify` 是可选项,不在默认配置里——**不配置就完全关闭**(不启动 goroutine、不新建文件),行为与未引入该功能时完全一致。
+
+### 推送什么
+
+| 事件 | 触发时机 | 内容 |
+|---|---|---|
+| `heartbeat` | 每 `interval_minutes`(对齐整点/半点) | 当日进行中的合计 + 实时速率 + 采集状态;**同时携带当日总可回放行** |
+| `daily` | 每日 `daily_at`(面板时区) | 前一日的节点级终值(已冻结) + 累计 |
+
+心跳的意义不只是"看看流量":若服务器在某天中途损毁,它就是那天**唯一**的数据来源(半小时心跳 = 最坏丢 30 分钟)。节点级终值由日结提供。
+
+### 渠道差异(重要)
+
+| 渠道 | 单条上限 | 说明 |
+|---|---|---|
+| Telegram | 4096 字符 | 收全部事件;聊天记录可导出,最适合做备份载体 |
+| 企业微信 | 2048 字节(`text`)/ 4096(`markdown`) | 建议只收 `daily`;超长会自动降级 |
+| Server酱 | 较宽松 | **免费额度很小(个位数/天)**,务必只订阅 `daily`——半小时心跳一天 48 条必然超额 |
+| PushPlus | 较宽松 | 同上 |
+| 通用 Webhook | 默认 8192 字节(`max_bytes`) | 接收 JSON,含 `text` / `nodes` / `replay` 字段;可配 `secret` 做 HMAC 签名 |
+
+**每个渠道独立渲染**:容量不够时正文逐级降级(折叠节点明细 → 去掉明细 → 只留一句提示),但 `SBX1` 数据行**永不截断**;实在装不下就分片发送,每片都是独立可解析的完整记录。
+
+### 可回放数据格式
+
+每条消息末尾(必要时分片)带一行:
+
+```
+SBX1:{"v":1,"k":"daily","d":"2026-10-11","i":0,"n":1,"r":[["node:hk01",12990000000,8610000000,111,222]]}
+```
+
+- `k`:`daily`(终值)或 `hb`(进行中值);`d`:日期;`i`/`n`:分片序号与总数
+- `r`:每行是 `[scope, rx, tx, rx_pkts, tx_pkts]`
+- 心跳的 `scope` 固定为保留字面量 `"total"`,**绝不使用 `node:` 前缀**——否则恢复入库时会被面板的 `node:%` 聚合误计,让日总量凭空翻倍
+
+用 JSON 而不是自定义分隔符是刻意选择:节点 id 允许是任意字符串,任何分隔符方案遇到含 `|`、`,`、`"` 的 id 都会损坏。
+
+### 灾后恢复
+
+```bash
+# 从 Telegram Desktop「导出聊天记录 → JSON」
+sbx-core notify-replay --telegram-export result.json
+
+# 或者直接用从聊天窗口复制出来的文本
+sbx-core notify-replay chat_dump.txt
+cat chat_dump.txt | sbx-core notify-replay
+
+# 先干跑,确认能恢复什么
+sbx-core notify-replay --dry-run chat_dump.txt
+```
+
+写入模式:默认**取 `MAX(旧值, 新值)`**(推送的计数单调递增,取较大者更安全);`--overwrite` 强制覆盖;`--only-missing` 只填充不存在的日期(最保守)。
+
+恢复时的三条规则:
+
+- 同一天优先用 `daily`(终值);只有缺失日结时才用该日**时刻最新的心跳**,且只写入 `recovered:total`,不会伪装成节点数据;
+- **绝不写 `totals`**——累计无法从日数据反推,伪造一个"看起来对"的累计比留空更危险,工具会明确提示这一点;
+- 输入若是 webhook 落盘的 JSONL(`SBX1` 行被 JSON 转义),同样会被正确识别。
+
+### 可靠性行为
+
+- **推送失败绝不影响采集、策略与面板**:推送是独立 goroutine,任何失败只写日志;
+- **不积压、不重试风暴**:单渠道重试 2 次(1s/4s 退避)后放弃;心跳失败**不补发**(下个槽位会自然覆盖最新数据);连续失败 5 次的渠道静默 30 分钟;
+- **日结会补偿**:日结承载不可再生的终值,失败后进入补偿队列,由后续调度补发(上限 7 天);停机重启后也会补齐缺失日期(最多 3 天,避免长期停机后刷屏);
+- **重启不重复推送**:槽位与已发日期记录在 `meta` 表,进程重启不会重发同一条;
+- **推送组件对 `daily`/`totals`/`samples`/`counter_state` 只读**,只写 `meta` 表的 `notify_*` 键。
+
+### 可选:死手开关(真正解决"我不知情")
+
+半小时推送只是**弱心跳**,需要你自己注意到"该来没来"。配置 `heartbeat_url`(如 healthchecks.io)后,每次成功推送都会 ping 该地址,超时未 ping 由第三方通知你——这是唯一能在服务器整机损毁后仍然报警的机制,因为服务器自己炸了没法自己报警。
+
+```json
+"heartbeat_url": "https://hc-ping.com/your-uuid"
+```
+
+全渠道失败时会 ping `<url>/fail`;ping 本身失败只记 debug 日志,不影响主流程。
+
+### 安全
+
+- 凭据保存在 `panel.json`(`0600`),不在默认配置里,不配置就完全关闭;
+- 日志、错误信息与 `notify-config get` 的输出**一律脱敏**(含 HTTP 层 `*url.Error` 携带完整 URL 的情形);查看明文需显式执行 `notify-config show --unsafe`;
+- 非法配置在 `LoadStrict` 阶段 **fail-closed 拒绝启动**——"配了却没生效"比"配置错误"更难排查;`notify-config set` 同样在写盘前完整校验,不会把一个能正常启动的实例改成启动失败;
+- 企业微信的 webhook 域名被强制限定为 `qyapi.weixin.qq.com`;Telegram、Server酱、PushPlus 的端点均为代码内固定 host,杜绝凭据被改写到第三方。
+
+> ⚠️ **推送内容会留在第三方服务器上**。采集异常时只发送状态位与滞后时长,不写内部错误细节;节点显示名会出现在消息中,请自行评估是否可接受。
 
 ---
 
