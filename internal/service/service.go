@@ -18,6 +18,7 @@ import (
 	"github.com/k6nfmm7dbr-commits/sbx/internal/config"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/database"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/firewall"
+	"github.com/k6nfmm7dbr-commits/sbx/internal/notify"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/policy"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/traffic"
 )
@@ -106,6 +107,25 @@ func Serve() int {
 	defer polCancel()
 	go policySvc.Run(polCtx)
 
+	// 流量外推（可选）：未配置 notify 时 NewManager 返回 nil，不启动任何 goroutine，
+	// 行为与改动前完全一致。构造失败即拒绝启动——推送配错却静默失效，
+	// 会让人误以为已有异地备份。
+	notifier, nerr := notify.NewManager(cfg, db, collector)
+	if nerr != nil {
+		slog.Error("推送配置无效, 拒绝启动", "err", nerr)
+		return 1
+	}
+	var notifierDone <-chan struct{}
+	// 默认 no-op：任何提前 return 的路径都不会泄漏 context（无推送时也成立）。
+	notifyCancel := func() {}
+	if notifier != nil {
+		nctx, cancel := context.WithCancel(context.Background())
+		notifyCancel = cancel
+		go notifier.Run(nctx)
+		notifierDone = notifier.Done()
+	}
+	defer notifyCancel()
+
 	slog.Info("面板已启动 http://" + addr + "  后端=" + collector.BackendName() +
 		"  采集间隔=" + fmt.Sprint(cfg.Interval) + "s")
 
@@ -121,8 +141,16 @@ func Serve() int {
 		}
 	}
 
-	// 收尾顺序（不可暴力中断）：先停采集并等它在途事务落库，
+	// 收尾顺序（不可暴力中断）：先停推送与采集并等它们收尾，
 	// 再排空 HTTP，最后关闭数据库。
+	if notifierDone != nil {
+		notifyCancel()
+		select {
+		case <-notifierDone:
+		case <-time.After(10 * time.Second):
+			slog.Warn("等待推送管理器退出超时，继续收尾")
+		}
+	}
 	polCancel()
 	collCancel()
 	select {

@@ -121,6 +121,18 @@ func main() {
 		} else {
 			fmt.Println("配置无需迁移")
 		}
+	case "notify-config":
+		if err := service.NotifyConfigCmd(args[1:]); err != nil {
+			fail(err)
+		}
+	case "notify-test":
+		if err := service.NotifyTestCmd(args[1:]); err != nil {
+			fail(err)
+		}
+	case "notify-replay":
+		if err := service.NotifyReplayCmd(args[1:]); err != nil {
+			fail(err)
+		}
 	case "version", "--version", "-v":
 		fmt.Printf("sbx-core v%s\n", version.Version)
 	case "help", "-h", "--help":
@@ -168,6 +180,9 @@ func printUsage() {
   sbx-core config-set <key> <value>       写配置项
   sbx-core config-ensure-token            保证访问令牌存在
   sbx-core config-migrate                 清理废弃配置键(backend/ipt_script)
+  sbx-core notify-config <set|get|show>   流量推送配置(set <file> / get / show --unsafe)
+  sbx-core notify-test [--event E] [--day D]  向所有渠道发送测试推送
+  sbx-core notify-replay [--dry-run] [file]   从聊天记录恢复 daily 表
   sbx-core node <sub-command> [...]       节点管理（add/edit/remove/...）
   sbx-core secret <hex|base64> <n>         生成随机 secret（crypto/rand）
   sbx-core version                        版本信息
