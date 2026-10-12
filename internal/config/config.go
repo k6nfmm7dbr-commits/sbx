@@ -8,9 +8,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -87,6 +89,12 @@ type Config struct {
 	Interval     int
 	TZ           string
 	SecureCookie bool
+	// TrustedOrigin 是显式声明的"浏览器实际访问面板的公开地址"，已规范化为
+	// "scheme://host[:port]"。空值 = 关闭（默认按 host:port 严格比较 Origin）。
+	// 仅用于反向代理改写了 Host 的部署：浏览器看到 https://panel.example.com，
+	// 而转发到后端时 Host 变成 panel.example.com:8080，此时严格比较会拒绝请求。
+	// 与 secure_cookie 一样，它不在 defaultConf 里——不配置就没有这个键。
+	TrustedOrigin string
 }
 
 // Load 读取配置。文件不存在或损坏时使用默认值并记日志（与 Python 行为一致）。
@@ -208,6 +216,13 @@ func (c *Config) Validate() error {
 			return err
 		}
 	}
+	// trusted_origin：非法取值必须拒绝启动，否则用户会以为 CSRF 兜底已按预期放宽，
+	// 实际仍在严格模式——"配置了但没生效"比"配置错误"更难排查。
+	if c.TrustedOrigin != "" {
+		if _, err := CanonicalOrigin(c.TrustedOrigin); err != nil {
+			return fmt.Errorf("trusted_origin 非法（应为形如 https://panel.example.com 的绝对 URL）: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -245,6 +260,61 @@ func (c *Config) normalize() {
 	}
 	c.TZ = c.Str("tz")
 	c.SecureCookie = c.Bool("secure_cookie")
+	// trusted_origin：规范化成功就采用规范形式，失败则保留原值交给 Validate 报错，
+	// 绝不静默忽略非法配置（那会让用户以为已经生效）。
+	c.TrustedOrigin = strings.TrimSpace(c.Str("trusted_origin"))
+	if norm, err := CanonicalOrigin(c.TrustedOrigin); err == nil {
+		c.TrustedOrigin = norm
+	}
+}
+
+// CanonicalOrigin 把绝对 URL（Origin / Referer / trusted_origin 的取值）规范化为
+// "scheme://host[:port]"：scheme 与 host 转小写,去掉主机名末尾的点,丢掉路径、查询与
+// fragment,并省略与 scheme 默认端口相同的端口（http=80 / https=443）。
+//
+// 为什么需要统一规范化：浏览器发出的 Origin 对默认端口是省略的（https://a 而不是
+// https://a:443），而 Host 是否带端口取决于反代怎么转发（$host vs $http_host）。
+// 不做规范化会让"逐字比较"在等价地址上误判——这是 CSRF 兜底最容易出错的地方。
+//
+// 拒绝：非绝对 URL、缺 host、带 userinfo、scheme 不是 http/https。
+func CanonicalOrigin(raw string) (string, error) {
+	r := strings.TrimSpace(raw)
+	if r == "" {
+		return "", errors.New("空值")
+	}
+	u, err := url.Parse(r)
+	if err != nil {
+		return "", fmt.Errorf("无法解析: %w", err)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", fmt.Errorf("scheme 必须是 http 或 https: %q", u.Scheme)
+	}
+	if !u.IsAbs() || u.Host == "" {
+		return "", fmt.Errorf("必须是带 host 的绝对 URL: %q", raw)
+	}
+	if u.User != nil {
+		return "", fmt.Errorf("不得包含 userinfo: %q", raw)
+	}
+	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	if host == "" {
+		return "", fmt.Errorf("host 为空: %q", raw)
+	}
+	if strings.Contains(host, ":") { // IPv6 字面量需要方括号
+		host = "[" + host + "]"
+	}
+	authority := host
+	if port := u.Port(); port != "" && port != defaultPort(scheme) {
+		authority += ":" + port
+	}
+	return scheme + "://" + authority, nil
+}
+
+func defaultPort(scheme string) string {
+	if scheme == "http" {
+		return "80"
+	}
+	return "443"
 }
 
 // Bool 读取布尔值；仅接受明确的 true（字符串 "true"/"1"/"yes"，或 JSON true）。

@@ -353,3 +353,94 @@ func TestValidateRequiresNftConf(t *testing.T) {
 		t.Fatalf("合法 nft_conf 不应报错: %v", err)
 	}
 }
+
+// ---- trusted_origin（反代改写了 Host 时显式声明公开地址） ----
+
+// CanonicalOrigin 的规范化是 Origin 比较的唯一基准，必须覆盖等价形式与非法形式。
+func TestCanonicalOriginNormalization(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{"https://panel.example.com", "https://panel.example.com", true},
+		{"HTTPS://PANEL.Example.COM", "https://panel.example.com", true},
+		{"https://panel.example.com:443", "https://panel.example.com", true},
+		{"http://panel.example.com:80", "http://panel.example.com", true},
+		{"http://panel.example.com:8080", "http://panel.example.com:8080", true},
+		{"https://panel.example.com/", "https://panel.example.com", true},
+		{"https://panel.example.com/path?x=1#frag", "https://panel.example.com", true},
+		{"https://panel.example.com.", "https://panel.example.com", true},
+		{"http://[::1]:8080", "http://[::1]:8080", true},
+		{"  https://panel.example.com  ", "https://panel.example.com", true},
+
+		{"", "", false},
+		{"panel.example.com", "", false},
+		{"ftp://panel.example.com", "", false},
+		{"https://user:pass@panel.example.com", "", false},
+		{"https://", "", false},
+		{"://panel.example.com", "", false},
+	}
+	for _, c := range cases {
+		got, err := CanonicalOrigin(c.in)
+		if c.ok {
+			if err != nil {
+				t.Errorf("CanonicalOrigin(%q) 应成功, 得到错误: %v", c.in, err)
+				continue
+			}
+			if got != c.want {
+				t.Errorf("CanonicalOrigin(%q) = %q, 期望 %q", c.in, got, c.want)
+			}
+			continue
+		}
+		if err == nil {
+			t.Errorf("CanonicalOrigin(%q) 应失败, 得到 %q", c.in, got)
+		}
+	}
+}
+
+// trusted_origin 非法时必须在启动前 fail-closed：配置了却没生效比配置错误更难排查。
+func TestValidateTrustedOrigin(t *testing.T) {
+	base := `{"listen":"127.0.0.1","port":9999,"token":"t","nft_conf":"/etc/sbx/nft.conf"`
+	for _, bad := range []string{
+		"panel.example.com",              // 缺 scheme
+		"ftp://panel.example.com",        // scheme 不支持
+		"https://user@panel.example.com", // 带 userinfo
+		"https://",                       // 缺 host
+		"not a url",
+	} {
+		path := strictEnv(t)
+		mustWrite(t, path, base+`,"trusted_origin":`+mustJSON(bad)+`}`)
+		if _, err := LoadStrict(); err == nil {
+			t.Errorf("trusted_origin=%q 必须校验失败", bad)
+		}
+	}
+	// 合法值：LoadStrict 通过，且被规范化为规范形式
+	path := strictEnv(t)
+	mustWrite(t, path, base+`,"trusted_origin":"https://Panel.Example.COM:443/"}`)
+	c, err := LoadStrict()
+	if err != nil {
+		t.Fatalf("合法 trusted_origin 不应报错: %v", err)
+	}
+	if c.TrustedOrigin != "https://panel.example.com" {
+		t.Errorf("trusted_origin 应被规范化, 得到 %q", c.TrustedOrigin)
+	}
+	// 未配置时为空（默认严格模式），且不得因缺失而报错
+	path = strictEnv(t)
+	mustWrite(t, path, base+`}`)
+	c, err = LoadStrict()
+	if err != nil {
+		t.Fatalf("未配置 trusted_origin 不应报错: %v", err)
+	}
+	if c.TrustedOrigin != "" {
+		t.Errorf("未配置时 TrustedOrigin 应为空, 得到 %q", c.TrustedOrigin)
+	}
+}
+
+func mustJSON(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
