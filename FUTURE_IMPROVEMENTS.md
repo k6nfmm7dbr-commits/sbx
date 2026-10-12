@@ -817,5 +817,5 @@ CSV 流式导出、nodes/config JSON 读取、策略 no-op enforcement 与 recon
 - **M-2 A**：默认 listen 改为 `127.0.0.1`；显式非回环 HTTP 监听且未启用 secure_cookie 时启动警告。secure_cookie 模式增加 HSTS，所有普通、gzip、SSE、CSV 响应共享 Permissions-Policy 与已有安全头。`POST /api/logout` 仅删除本机 token Cookie；当前静态 token 设计下不会撤销已复制的 Bearer token。阶段 B 服务端可撤销 session 尚未实现，须经用户确认设计后再做。
 - **L-1/L-2**：状态变更 API 检查 Origin/Referer（无头脚本客户端仍放行；安全 GET/SSE、healthz、静态资源跳过）；API 按 RemoteAddr IP 限速 50 req/s、burst 100，表限 8192 并周期 GC。结构化审计覆盖登录、节点 mutation、策略、CSV、CSRF 与限速，日志禁止凭据字段。
 - **L-3**：`/api/daily` scope 只允许空字符串或正整数 `node:<id>`，非法输入在产生缓存键/查询前返回 400。
-- **I-1**：保留 Go 1.27.1 / x/sys v0.48.0；项目声明、CI、README 与 Debian 真机 Go 1.27.1 环境一致。iSH Go 1.23.9 是工具环境限制，不作为下调生产目标工具链的依据。
+- **I-1**：因维护者目标工具链已由真机/CI 确认为 Go 1.27.x，未采纳旧审计环境的 1.24 降级建议。随后 CI `govulncheck` 在 Go 1.27.1 上报告 5 个可达标准库 HTTP/HTTP2 漏洞（固定版本 1.27.2 修复）；因此将 go.mod、CI/release 与 README 一次同步升级至 1.27.2，`x/sys v0.48.0` 无需改动。
 - **I-2**：`ownedString` 文档化零拷贝只读生命周期；长期保存 conntrack IP 统一经 `cloneForPersist`，flow tracker 保存 canonical cloned key，避免 Go map key 更新时再次挂住每轮输入 buffer；新增重复解析/修改输入缓冲区的回归测试。

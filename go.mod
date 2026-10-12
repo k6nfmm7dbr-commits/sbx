@@ -1,6 +1,6 @@
 module github.com/k6nfmm7dbr-commits/sbx
 
-go 1.27.1
+go 1.27.2
 
 require modernc.org/sqlite v1.34.5
 

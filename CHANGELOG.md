@@ -12,7 +12,7 @@
 
 增加节点层和面板 API 回归测试，覆盖严格 enforcement 不放宽、冲突诊断不泄露密钥、编辑/删除恢复、以及冲突节点不能生成分享链接。
 
-增加安全审计后续修复（不改版本号）：安装/在线升级的信任清单和脚本哈希固定走官方 RAW，GH/RAW 镜像只承载大文件；healthz 降级只回健康布尔位与采样年龄，错误详情改记服务端日志。默认面板监听收紧为回环地址，显式公网 HTTP 会给出警告，HTTPS 反代模式追加 HSTS/Permissions-Policy 与登出入口；状态变更 API 增加 Origin/Referer 兜底、按 RemoteAddr 的有界 50 req/s API 限速及无凭据审计字段。`/api/daily` scope 只接受空值或 `node:<正整数>`；conntrack 的零拷贝字符串契约和长期 map key Clone 入口得到显式注释与重复解析回归测试。Go 版本声明保持 1.27.1，未按旧审计环境的 1.24 建议降级。
+增加安全审计后续修复（不改版本号）：安装/在线升级的信任清单和脚本哈希固定走官方 RAW，GH/RAW 镜像只承载大文件；healthz 降级只回健康布尔位与采样年龄，错误详情改记服务端日志。默认面板监听收紧为回环地址，显式公网 HTTP 会给出警告，HTTPS 反代模式追加 HSTS/Permissions-Policy 与登出入口；状态变更 API 增加 Origin/Referer 兜底、按 RemoteAddr 的有界 50 req/s API 限速及无凭据审计字段。`/api/daily` scope 只接受空值或 `node:<正整数>`；conntrack 的零拷贝字符串契约和长期 map key Clone 入口得到显式注释与重复解析回归测试。Go 工具链最低版本提升到 1.27.2：main CI 的 `govulncheck` 报告 Go 1.27.1 的 `net/http`/HTTP2 有 5 条可达漏洞路径，均由 Go 1.27.2 修复；同步更新 go.mod、CI 与 release workflow、README 徽章和构建要求，不调整 x/sys 依赖版本。
 
 ## v3.0.29 — 热路径分配削减（第四轮审计）
 
