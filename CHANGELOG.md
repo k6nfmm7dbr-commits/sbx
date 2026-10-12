@@ -14,6 +14,12 @@
 
 增加安全审计后续修复（不改版本号）：安装/在线升级的信任清单和脚本哈希固定走官方 RAW，GH/RAW 镜像只承载大文件；healthz 降级只回健康布尔位与采样年龄，错误详情改记服务端日志。默认面板监听收紧为回环地址，显式公网 HTTP 会给出警告，HTTPS 反代模式追加 HSTS/Permissions-Policy 与登出入口；状态变更 API 增加 Origin/Referer 兜底、按 RemoteAddr 的有界 50 req/s API 限速及无凭据审计字段。`/api/daily` scope 只接受空值或 `node:<正整数>`；conntrack 的零拷贝字符串契约和长期 map key Clone 入口得到显式注释与重复解析回归测试。Go 工具链最低版本提升到 1.27.2：main CI 的 `govulncheck` 报告 Go 1.27.1 的 `net/http`/HTTP2 有 5 条可达漏洞路径，均由 Go 1.27.2 修复；同步更新 go.mod、CI 与 release workflow、README 徽章和构建要求，不调整 x/sys 依赖版本。
 
+复审修复（不改版本号）：**安装器现在真的默认只监听回环**——上一轮只改了 Go 的 `defaultConf()`，但 `ensure_panel_conf` 生成全新 `panel.json` 时仍写 `0.0.0.0`，而 `do_install` 必然先经过它，所以真实安装依然是公网明文监听，与 README 的承诺相反。本次把安装器写入值改为 `127.0.0.1`，并同步安装完成提示与 `panel_url`（默认为回环时不再显示公网地址，也不再提示放行面板端口）；`tests/installer_flow_test.sh` 增加「安装器生成值 / Go defaultConf / README 描述」三方一致性断言，防止再次漂移。
+
+一键安装（`bash <(curl ...)`）需要重新落盘的安装器副本此前经 `SBX_GH_PROXY` 获取且完全不校验，而这份副本会成为常驻的 `sbx` 命令；现在改为直连官方脚本 URL，并用官方 `sbx.sh.sha256` 校验后才写入，校验不通过或官方源不可达时只告警并跳过落盘（不再留下指向不存在文件的 `sbx` 命令）。
+
+状态变更接口的 CSRF 来源校验由默认「端口无关」收紧为**默认要求 host 与端口都一致**：浏览器判定 same-site 时忽略端口，端口回退会让同主机名其它端口上的页面绕过这层兜底。反向代理改写 Host 的部署改用显式 `trusted_origin`（panel.json 可选键，非法取值 fail-closed 拒绝启动），不再隐式放宽。另在 README 补充：API 限速与登录节流都只按 `RemoteAddr` 计算来源，反代之后所有客户端共享同一限速桶与失败节流（刻意不采信可伪造的 `X-Forwarded-For`）。
+
 ## v3.0.29 — 热路径分配削减（第四轮审计）
 
 消除稳态下每请求/每轮采集的重复解析与无谓深拷贝：
