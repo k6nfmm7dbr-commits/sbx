@@ -780,13 +780,18 @@ ensure_panel_conf() {
   port=$(pick_port)
   # 先以 0600 预创建（不受 umask 影响），避免含 token 的内容出现短暂暴露窗口
   install -m 0600 /dev/null "$PANEL_CONF"
+  # listen 必须是 127.0.0.1：必须与 internal/config 的 defaultConf() 和 README 保持一致。
+  # 这里若写 0.0.0.0，全新安装会把面板直接暴露到公网（明文 HTTP + Cookie 携带 token），
+  # 而 README/安全性章节宣称"默认仅本机可访问"——文档与实现不符比默认值本身更危险。
+  # 需要外网访问时由用户在「面板设置」中显式切换（menu_panel_settings 的第 3 项），
+  # 并应同时配置 HTTPS 反代或 secure_cookie。
   cat > "$PANEL_CONF" <<EOF
 {
   "db": "$APP_DIR/traffic.db",
   "nodes_file": "$NODES_JSON",
   "nft_conf": "$APP_DIR/nft.conf",
   "web_root": "$WEB_DIR",
-  "listen": "0.0.0.0",
+  "listen": "127.0.0.1",
   "port": $port,
   "token": "$token",
   "interval": 2,
@@ -1507,9 +1512,16 @@ start_all() {
 
 # ---------------------------------------------------------------- 面板信息
 panel_url() {
-  local host port
-  host=$(core_node get-host); [[ -z "$host" ]] && host="$(public_ip)"
+  local host port listen
   port=$(panel_get port)
+  listen=$(panel_get listen)
+  # 默认只监听回环：此时用公网 IP 拼地址是错的（用户点开必然连不上），
+  # 必须显示 127.0.0.1，并让用户知道外网访问需要在「面板设置」里显式切换。
+  if [[ "$listen" == "127.0.0.1" || "$listen" == "localhost" || "$listen" == "::1" ]]; then
+    echo "http://127.0.0.1:$port/"
+    return 0
+  fi
+  host=$(core_node get-host); [[ -z "$host" ]] && host="$(public_ip)"
   echo "http://$(host_for_uri "$host"):$port/"
 }
 
@@ -1916,15 +1928,40 @@ install_self() {
   if [[ -f "${BASH_SOURCE[0]}" ]]; then
     install -m 0755 "${BASH_SOURCE[0]}" "$SELF_PATH" 2>/dev/null || true
   fi
+  # 管道 / 进程替换方式下（`curl | bash`、`bash <(curl ...)`，后者是 README 推荐的一键
+  # 安装方式）BASH_SOURCE[0] 是 /dev/fd/NN 而不是普通文件，无法回读自身，需要重新下载
+  # 一份持久化到 $SELF_PATH——它随后会成为常驻的 `sbx` 命令，被菜单与 systemd 反复执行。
+  #
+  # 因此这里必须与 do_update 遵守同一原则：脚本本体直连官方 URL（不经 SBX_GH_PROXY），
+  # 且在落盘前用官方 sbx.sh.sha256 校验。旧实现是 `gh_url "$RAW_URL"` 且完全不校验，
+  # 等于把"本机今后执行的 sbx 命令内容"交给第三方镜像决定。
   if [[ ! -f "$SELF_PATH" ]]; then
-    curl -fsSL -m 60 -o "$SELF_PATH" "$(gh_url "$RAW_URL")" 2>/dev/null || true
-    chmod +x "$SELF_PATH" 2>/dev/null || true
+    local tself tsum want cnt
+    tself=$(mktemp); tsum=$(mktemp)
+    if curl -fsSL -m 60 -o "$tself" "$OFFICIAL_SCRIPT_URL" \
+       && curl -fsSL -m 60 -o "$tsum" "$OFFICIAL_RAW_BASE/sbx.sh.sha256"; then
+      cnt=$(awk '$2=="sbx.sh"{c++} END{print c+0}' "$tsum")
+      want=$(awk '$2=="sbx.sh"{print $1}' "$tsum")
+      if [[ "$cnt" == "1" ]] && verify_remote_script "$tself" "$want" "官方 sbx.sh.sha256"; then
+        install -m 0755 "$tself" "$SELF_PATH"
+      else
+        warn "安装器脚本未通过官方校验，已跳过落盘；本次安装本身已完成，但 sbx 管理命令不可用"
+        warn "  如需 sbx 命令，请改用「先下载 sbx.sh 与 sbx.sh.sha256、校验通过后再执行」的安装方式"
+      fi
+    else
+      warn "无法从官方源获取安装器脚本或其校验和，已跳过落盘；sbx 管理命令不可用"
+    fi
+    rm -f "$tself" "$tsum"
   fi
-  cat > "$CMD_PATH" <<EOF
+  # 只有脚本确实存在时才写包裹命令，避免留下一个指向不存在文件的 sbx 命令
+  # （旧实现在下载失败时也会写 $CMD_PATH，用户敲 sbx 才报错，且报错信息无从下手）。
+  if [[ -f "$SELF_PATH" ]]; then
+    cat > "$CMD_PATH" <<EOF
 #!/usr/bin/env bash
 exec bash "$SELF_PATH" "\$@"
 EOF
-  chmod +x "$CMD_PATH"
+    chmod +x "$CMD_PATH"
+  fi
 }
 
 # ---------------------------------------------------------------- 在线升级
@@ -2217,8 +2254,15 @@ do_install() {
   if [[ -n "$host6" ]]; then
     printf '  · 本机支持 IPv6，添加节点后会同时给出 IPv4 与 IPv6 两条分享链接\n'
   fi
-  printf '  · 面板需要令牌访问；如需仅本机访问，可在「面板设置」中切换\n'
-  printf '  · 若服务器有云防火墙/安全组，请放行节点端口与面板端口 %s\n' "$(panel_get port)"
+  # 默认回环，因此这里不能暗示"公网是默认"。外网访问必须由用户显式切换监听地址，
+  # 切换时应同时配置 HTTPS 反代或 secure_cookie——否则 Cookie 会以明文跨网络传输。
+  if [[ "$(panel_get listen)" == "127.0.0.1" || "$(panel_get listen)" == "localhost" || "$(panel_get listen)" == "::1" ]]; then
+    printf '  · 面板默认仅本机可访问（127.0.0.1）；如需外网访问，请在「面板设置」中切换监听地址，并配置 HTTPS 反代或 secure_cookie\n'
+    printf '  · 若服务器有云防火墙/安全组，只需放行节点端口；面板端口 %s 无需对公网放行\n' "$(panel_get port)"
+  else
+    printf '  · 面板已配置为对外监听（%s）；请确保已设置强令牌，并建议置于 HTTPS 反代之后或启用 secure_cookie\n' "$(panel_get listen)"
+    printf '  · 若服务器有云防火墙/安全组，请放行节点端口与面板端口 %s\n' "$(panel_get port)"
+  fi
   echo
   if [[ ! -t 0 ]]; then
     printf '%s管道运行模式下不进入交互菜单，安装已完成。运行 sbx 打开菜单设置运维，添加节点请打开面板「配置」页。%s\n' "$C_DIM" "$C_RESET"
