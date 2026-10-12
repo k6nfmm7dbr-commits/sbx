@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # hardening_flow_test.sh — 安装器加固测试（审计项「Shell 注入」+「sbx.sh 远程脚本
 # 执行风险」）：
-#   1) 提取真实的 env-validation 区块，验证 SBX_GH_PROXY / SBX_ROOT /
+#   1) 提取真实的 env-validation 区块，验证 SBX_GH_PROXY / SBX_RAW_BASE / SBX_ROOT /
 #      SBX_SCRIPT_SHA256 / SBX_SB_VERSION 的格式白名单
 #   2) 端到端跑真实安装器（--version，无副作用），验证 SBX_SCRIPT_SHA256 自校验的
 #      通过 / 不匹配 / 被篡改 三条路径确实会拦截
@@ -53,6 +53,10 @@ chk_env "含空格 → 拒绝"                     1 SBX_GH_PROXY "https://a b/"
 chk_env "含反引号 → 拒绝"                   1 SBX_GH_PROXY 'https://a/`id`'
 chk_env "含命令替换 → 拒绝"                 1 SBX_GH_PROXY 'https://a/$(id)'
 chk_env "含分号 → 拒绝"                     1 SBX_GH_PROXY "https://a/;rm -rf /"
+
+chk_env "合法 RAW artifact 镜像 → 通过"     0 SBX_RAW_BASE "https://mirror.example/sbx/dist"
+chk_env "RAW 镜像缺 scheme → 拒绝"           1 SBX_RAW_BASE "mirror.example/sbx/dist"
+chk_env "RAW 镜像含控制/引号字符 → 拒绝"     1 SBX_RAW_BASE 'https://mirror.example/$(id)'
 
 chk_env "合法沙箱前缀 → 通过"               0 SBX_ROOT "/tmp/sbx-sandbox"
 chk_env "相对路径 → 拒绝"                   1 SBX_ROOT "tmp/sandbox"

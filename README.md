@@ -105,16 +105,18 @@ bash <(curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/
 SBX_SCRIPT_SHA256=<官方公布的 sha256> bash <(curl -fsSL <RAW_URL>)
 ```
 
-- 未提供 `SBX_SCRIPT_SHA256` 时保持便捷行为(不校验)。
-- 一旦提供,校验失败会明确报出**期望值与实得值**并中止。
-- 注意:`curl | bash`(管道)方式下脚本无法回读自身,此时会**明确报错**而不是静默跳过校验。
+- 未提供 `SBX_SCRIPT_SHA256` 时，首次启动脚本保持便捷行为；正式在线升级不受此设置影响，升级器会先从官方 RAW 源下载 `sbx.sh.sha256` 校验新脚本，再覆盖安装器本体。
+- 若官方哈希端点暂不可达，升级 fail-closed 中止；可从可信渠道取得官方哈希后用 `SBX_SCRIPT_SHA256=<官方哈希> sbx --update` 显式重试。
+- 在线升级仍可通过 `SBX_GH_PROXY` 加速脚本字节下载，但该代理不会用于获取信任哈希；官方哈希和镜像下载内容不一致时升级会中止。
+- 一键启动脚本的显式 `SBX_SCRIPT_SHA256` 校验仍适用；`curl | bash` 管道方式无法回读自身，会明确报错而不静默跳过。
 
 安装器识别的环境变量(均做格式白名单校验,非法取值在任何改动前中止):
 
 | 变量 | 作用 |
 |---|---|
 | `SBX_SCRIPT_SHA256` | 脚本自校验哈希 |
-| `SBX_GH_PROXY` | GitHub 下载代理前缀(网络受限环境) |
+| `SBX_GH_PROXY` | GitHub 下载代理前缀(网络受限环境,仅大文件请求使用) |
+| `SBX_RAW_BASE` | 可选大文件 RAW 下载镜像；校验清单与脚本哈希仍固定从官方源读取 |
 | `SBX_ROOT` | 安装根目录(默认 `/etc/sbx` 等标准路径) |
 | `SBX_SB_VERSION` | 固定 sing-box 版本(留空取最新稳定版) |
 | `SBX_NO_SERVICE` | 只装不起服务(沙箱/测试用) |
@@ -125,7 +127,7 @@ SBX_SCRIPT_SHA256=<官方公布的 sha256> bash <(curl -fsSL <RAW_URL>)
 
 1. **检测系统与 init** — Debian/Ubuntu、RHEL 系、Alpine;systemd / OpenRC。
 2. **确认/安装 nftables** — 缺失或不可用即中止(这是硬性前置条件,见下)。
-3. **下载 `sbx-core`** — 按架构从 `dist` 分支拉取,并用 `SHA256SUMS` 校验;不符即中止,**不影响已有安装**。
+3. **下载 `sbx-core`** — 二进制可走 `SBX_GH_PROXY` 镜像加速，但其 `SHA256SUMS` 从官方 RAW 源直连获取；校验不符即中止，**不影响已有安装**。二进制与校验清单不再同源于可控镜像。
 4. **安装 sing-box** — 按需升级内核(如 Snell 需要 ≥ 1.14)。
 5. **生成计数规则** — 写 `nft.conf` 并应用 `sbx_traffic` 表。
 6. **注册并启动三个服务** — `sbx-firewall`(计数规则)、`sing-box`(代理)、`sbx-panel`(面板)。
@@ -221,12 +223,13 @@ sudo apt-get update
 
 | 路由 | 方法 | 说明 |
 |---|---|---|
-| `/healthz` | GET | 健康检查,免鉴权,恒为 HTTP 200 + `{"ok":true}`;降级时**追加** `collector_error` / `policy_error` / `sample_age_s`(距上次成功采样的秒数),便于外部监控区分"进程活着"与"采集/策略在报错" |
+| `/healthz` | GET | 健康检查,免鉴权,恒为 HTTP 200 + `{"ok":true}`;降级时仅追加 `collector_ok:false` / `policy_ok:false` 与 `sample_age_s`,错误原文只写日志 |
 | `/api/summary` | GET | 汇总:节点列表 + KPI + 策略状态(短 TTL 缓存) |
 | `/api/live` | GET | 轻量实时:速率 + 连接数(短 TTL 缓存) |
 | `/api/events` | GET | SSE,推送在线 IP 增量 |
-| `/api/daily?days=N&scope=` | GET | 每日流量表(默认 30,钳制 `[1,365]`) |
+| `/api/daily?days=N&scope=` | GET | 每日流量表(默认 30,钳制 `[1,365]`); `scope` 仅允许空值或 `node:<正整数>` |
 | `/api/nodes` | GET / POST | 脱敏节点列表 / 新增节点（服务器生成节点密钥） |
+| `/api/logout` | POST | 需鉴权;使当前浏览器端的 `sbx_token` Cookie 过期 |
 | `/api/export` | GET | CSV 导出全量流量 |
 | `/api/nodes/<id>` | PUT / DELETE | 修改节点可编辑项 / 删除节点（累计 `totals` 保留，默认清理 `daily/samples`；`clear_history=0` 可保留） |
 | `/api/nodes/<id>/links` | GET | 获取该节点分享链接（及 Snell Surge 配置） |
@@ -321,21 +324,24 @@ sbx-core node list|links|add|edit|remove|sync   # 节点管理
 /etc/systemd/system/sbx-{panel,firewall}.service
 ```
 
-`panel.json` 主要键:`listen`(默认 `0.0.0.0`)、`port`(默认 `8080`)、`token`、`interval`(采集秒数,默认 `2`)、`tz`(默认 `Asia/Shanghai`)、`db`、`nodes_file`、`nft_conf`。路径类键在 `LoadStrict` 阶段强校验:必须为绝对路径、不含 `..`、不位于 `/proc` `/sys` `/dev`,非法配置 fail-closed。
+`panel.json` 主要键:`listen`(默认 `127.0.0.1`,仅本机可访问)、`port`(默认 `8080`)、`token`、`interval`(采集秒数,默认 `2`)、`tz`(默认 `Asia/Shanghai`)、`db`、`nodes_file`、`nft_conf`。需从外网访问时，显式将 `listen` 配为 `0.0.0.0` 或具体网卡地址，并强烈建议置于 HTTPS 反代之后、设置 `secure_cookie=true`。路径类键在 `LoadStrict` 阶段强校验:必须为绝对路径、不含 `..`、不位于 `/proc` `/sys` `/dev`,非法配置 fail-closed。
 
 ---
 
 ## 安全性
 
-- **令牌鉴权**:优先 `Authorization: Bearer <token>`,其次 HttpOnly Cookie `sbx_token`;**不再接受** `?token=` 查询参数(会泄漏进日志/Referer)。服务端未配置 token 时视为完全开放(仅建议内网/本机场景)。
+- **令牌鉴权**:优先 `Authorization: Bearer <token>`,其次 HttpOnly Cookie `sbx_token`;**不再接受** `?token=` 查询参数(会泄漏进日志/Referer)。面板提供 `POST /api/logout` 清除当前浏览器的 Cookie；阶段 A 不维护服务端会话，已复制的 Bearer/token 仍有效，改 token 后原凭据才会失效。服务端未配置 token 时视为完全开放(仅建议内网/本机场景)。
 - **登录节流**:同一来源 IP 连续失败 5 次后,后续每次失败强制等待 2 秒(5 分钟窗口累计,只惩罚失败、输对立即放行),挡住凭据喷洒与日志刷屏。来源只取 `RemoteAddr`,不信任可伪造的 `X-Forwarded-For`。
-- **内部错误不外泄**:500/503 只返回稳定的 `error_code` + 通用文案 + `request_id`(响应头 `X-Request-Id`),完整错误只写服务端日志,不泄漏文件路径 / SQL 片段 / nft 报错。报障时把 `request_id` 提供给运维即可对齐日志。
+- **CSRF 来源校验**:只对已鉴权 API 的 POST/PUT/DELETE/PATCH 检查 Origin/Referer；来源 host 不匹配返回 403。没有这两个浏览器头的 curl/自动化客户端仍可使用；GET/HEAD、`/healthz`、登录页与静态资源不受影响。
+- **API 限速**:`/api/*` 按 `RemoteAddr` IP 执行 50 req/s、burst 100 的宽松令牌桶，支持正常多标签页轮询；追踪状态最多 8192 个来源并定期回收，满表时拒绝新的来源，不信任 `X-Forwarded-For`。
+- **安全审计日志**:记录登录成败、节点创建/编辑/删除、策略修改、CSV 导出、CSRF 拦截与限速拦截，含 request_id、来源 IP、路径和结果；日志明确禁止记录 token、节点密码、PSK、UUID 与私钥。
+- **内部错误不外泄**:500/503 只返回稳定的 `error_code` + 通用文案 + `request_id`(响应头 `X-Request-Id`),健康探针降级时只回布尔状态、采样年龄，完整错误只写服务端日志,不泄漏文件路径 / SQL 片段 / nft 报错。报障时把 `request_id` 提供给运维即可对齐日志。
 - **敏感文件权限**:`nodes.json` / `state.json` / sing-box config 创建即 `0600`,已存在的宽权限文件会被收紧(即使 `umask 000` 也不留暴露窗口)。
 - **最小能力**:面板服务 capability 收敛为 `CAP_NET_ADMIN`(nft 走 netlink)+ `CAP_NET_BIND_SERVICE`(绑定端口)。
-- **HTTPS**:面板本身跑 HTTP;若套了 HTTPS 反代,设置 `secure_cookie` 让 Cookie 带 `Secure` 标记。
-- **供应链**:CI 用 `govulncheck` 扫描依赖漏洞;GitHub Actions 全部 pin 到完整 commit SHA,防 action 被替换。
+- **HTTPS**:面板本身跑 HTTP。默认只监听 `127.0.0.1`,通过本机或 SSH 隧道访问；需要外网访问时显式把 `listen` 改为 `0.0.0.0` 或具体地址，并强烈建议置于 HTTPS 反代之后、设置 `secure_cookie=true`。设置后 Cookie 带 `Secure` 与 HSTS 响应头；不设置时 HTTP Cookie 会以明文传输。
+- **供应链**: `sbx-core` 大文件可经 `SBX_GH_PROXY` / `SBX_RAW_BASE` 加速下载，但信任锚 `SHA256SUMS` 与 `sbx.sh.sha256` 固定从官方 RAW 源直连获取，防止自定义镜像同时投毒二进制和清单形成自证式校验。在线升级也固定直连官方 `sbx.sh.sha256` 校验下载的安装器脚本，校验失败或取不到可信哈希时 fail-closed，不覆盖现有安装。首次 `curl | bash` 仍应优先采用「先下载、校验 `sbx.sh.sha256`、再执行」方式；显式 `SBX_SCRIPT_SHA256` 可作为独立哈希锚。此校验仍信任 GitHub 官方仓库/账号，官方源被攻破不在哈希清单本身的防护范围内；后续可增加独立签名密钥。CI 用 `govulncheck` 扫描依赖漏洞，GitHub Actions 全部 pin 到完整 commit SHA。
 
-> ⚠️ 面板默认监听 `0.0.0.0:8080`。若配置了 `token` 则有鉴权保护;若把 token 置空,面板将**完全开放**——请仅在受信网络或配合防火墙使用,并优先设置强 token。
+> ⚠️ 面板默认只监听 `127.0.0.1:8080`,仅本机可访问。需外网访问时必须显式配置 `listen` 为 `0.0.0.0` 或具体地址；如启用公网监听,请设置强 token 并强烈建议置于 HTTPS 反代之后、启用 `secure_cookie=true`。
 
 ---
 

@@ -18,7 +18,7 @@ trap 'rm -rf "$TMPD"' EXIT
 sed -n '/^# >>> checksum-helpers/,/^# <<< checksum-helpers/p' "$TPL" > "$TMPD/helpers.sh"
 grep -q 'verify_core_checksum()' "$TMPD/helpers.sh" || { echo "未找到 verify_core_checksum（模板标记被破坏？）"; exit 1; }
 # warn 在隔离环境下重定向到 stdout 便于断言
-echo 'warn() { echo "[warn] $*" >&2; }' > "$TMPD/prelude.sh"
+printf '%s\n' 'warn() { echo "[warn] $*" >&2; }' 'ok() { echo "[ok] $*"; }' > "$TMPD/prelude.sh"
 cat "$TMPD/prelude.sh" "$TMPD/helpers.sh" > "$TMPD/lib.sh"
 # shellcheck disable=SC1090
 source "$TMPD/lib.sh"
@@ -71,6 +71,15 @@ printf 'tampered' >> "$TMPD/dist/sbx-core-linux-386"
 TAMPER=0
 verify_core_checksum "$TMPD/dist/sbx-core-linux-386" "$TMPD/dist/SHA256SUMS" "sbx-core-linux-386" 2>/dev/null || TAMPER=1
 ck "篡改产物 → 被检出" 1 $TAMPER
+
+# 7. 在线升级脚本校验 helper：哈希缺失/不匹配 fail-closed，匹配才成功
+SCRIPT="$TMPD/remote-sbx.sh"
+printf '#!/usr/bin/env bash\nAPP_VERSION="3.0.30"\n' > "$SCRIPT"
+SCRIPT_HASH=$(sha256_of "$SCRIPT")
+verify_remote_script "$SCRIPT" "" "测试空锚" 2>/dev/null; ck "脚本哈希为空 → 失败" 1 $?
+verify_remote_script "$SCRIPT" "$(printf 'b%.0s' {1..64})" "测试错误锚" 2>/dev/null; ck "脚本哈希不匹配 → 失败" 1 $?
+verify_remote_script "$SCRIPT" "$SCRIPT_HASH" "测试正确锚" >/dev/null 2>&1; ck "脚本哈希匹配 → 成功" 0 $?
+verify_remote_script "$TMPD/not-exist" "$SCRIPT_HASH" "测试缺失脚本" 2>/dev/null; ck "脚本文件缺失 → 失败" 1 $?
 
 echo "== 结果: PASS=$PASS FAIL=$FAIL =="
 [[ "$FAIL" -eq 0 ]] || exit 1

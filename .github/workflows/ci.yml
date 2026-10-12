@@ -66,6 +66,9 @@ jobs:
       - name: 安装器 checksum 流程测试（提取模板真实逻辑）
         run: bash tests/checksum_flow_test.sh
 
+      - name: 在线升级脚本完整性测试（镜像不承载信任锚）
+        run: bash tests/update_integrity_test.sh
+
       - name: 安装器 commit/rollback 流程测试（提取模板真实逻辑）
         run: bash tests/commit_flow_test.sh
 

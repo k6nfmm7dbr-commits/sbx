@@ -35,7 +35,10 @@ GH_PROXY="${SBX_GH_PROXY:-}"             # 例: https://ghfast.top/
 # 二进制分发走仓库 dist 分支（rolling latest，与 Git Tag 无关）：
 # raw.githubusercontent 对同一路径始终返回最新提交的产物，安装器无需感知版本号。
 # 项目不使用 Git Tag / 版本 Release，因此不存在会失效的版本化下载链接。
-RAW_BASE="${SBX_RAW_BASE:-https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/dist}"
+# 官方 RAW 地址是唯一信任锚。SBX_RAW_BASE 只可改大文件字节流地址，不可改校验清单来源。
+OFFICIAL_RAW_BASE="https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/dist"
+OFFICIAL_SCRIPT_URL="https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh"
+RAW_BASE="${SBX_RAW_BASE:-$OFFICIAL_RAW_BASE}"
 
 OS_FAMILY="unknown"
 INIT_SYS="unknown"
@@ -49,8 +52,10 @@ PKG=""
 # 白名单校验——目的不是"防 shell 注入"（没有那个入口），而是：
 #   - 让配置错误立刻失败并说清原因，而不是中途以奇怪方式出错；
 #   - 阻止控制字符/引号/反引号/换行这类会让日志与下游命令困惑的取值；
-#   - SBX_GH_PROXY 指向的镜像即使被投毒，也因 SHA256 校验 fail-closed 而无法
-#     装入错误二进制（见 verify_core_checksum / sb_expected_sha）。
+#   - SBX_GH_PROXY 仅加速大文件下载，不承载信任锚；SHA256SUMS 与升级脚本哈希
+#     均直连官方 RAW 源，避免镜像同时替换文件与清单形成自证式校验。
+#   - 这仍依赖 GitHub 官方仓库与账号安全；若官方源被攻破，哈希校验本身无法识别，
+#     后续可通过独立签名密钥增加第二层信任锚。
 validate_env() {
   local bad=0
 
@@ -63,6 +68,19 @@ validate_env() {
     esac
     if [[ "$bad" == 0 && ! "${SBX_GH_PROXY}" =~ ^https?://[^[:space:]]+$ ]]; then
       err "SBX_GH_PROXY 必须以 http:// 或 https:// 开头，例如 https://ghfast.top/"
+      bad=1
+    fi
+  fi
+
+  # SBX_RAW_BASE 仅用于大文件字节流（binary），绝不作为 SHA256SUMS / sbx.sh.sha256 信任源。
+  if [[ -n "${SBX_RAW_BASE:-}" ]]; then
+    case "$SBX_RAW_BASE" in
+      *[[:space:]]*|*[\`\$\"\'\\]*|*\;*|*\|*|*\<*\>*)
+        err "SBX_RAW_BASE 含非法字符"
+        bad=1 ;;
+    esac
+    if [[ "$bad" == 0 && ! "$SBX_RAW_BASE" =~ ^https?://[^[:space:]]+$ ]]; then
+      err "SBX_RAW_BASE 必须是 http(s) URL"
       bad=1
     fi
   fi
@@ -390,6 +408,23 @@ verify_core_checksum() {  # <binary_file> <SHA256SUMS_file> <binary_name>
   fi
   return 0
 }
+
+verify_remote_script() {  # <script_file> <expected_sha256> <source_description>
+  local f="$1" expect="$2" source="$3" got
+  [[ -s "$f" ]] || { warn "待校验脚本为空或不存在($source)"; return 1; }
+  if [[ ! "$expect" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    warn "脚本校验哈希缺失或格式异常($source)"
+    return 1
+  fi
+  expect=$(printf '%s' "$expect" | tr 'A-F' 'a-f')
+  got=$(sha256_of "$f") || { warn "计算脚本 sha256 失败($source)"; return 1; }
+  if [[ "$expect" != "$got" ]]; then
+    warn "脚本完整性校验失败($source): 期望 $expect 实得 $got"
+    return 1
+  fi
+  ok "脚本完整性校验通过($source)"
+  return 0
+}
 # <<< checksum-helpers
 
 # core_version_of <binary> —— 解析 sbx-core version 输出中的纯版本号（机器可读）。
@@ -606,10 +641,10 @@ install_sbx_core() {
   dl="$BIN_DIR/.sbx-core.dl.$$"
   cleanup() { rm -rf "$tmp" "$dl" 2>/dev/null || true; }
 
-  # 解析 dist 分支当前 commit sha，用 immutable revision 下载 binary 与 SHA256SUMS，
-  # 避免两次下载之间 dist force-push 导致版本错位。解析失败回退 RAW_BASE
-  # （仍有 SHA256 校验 fail-closed 兜底，错位只会失败、不会装错）。
-  local base dist_sha
+  # 解析 dist 分支当前 commit sha，用不可变官方 revision 下载 binary 与 SHA256SUMS，
+  # 避免两次下载之间 dist force-push 导致版本错位。解析失败时大文件可回退 RAW_BASE，
+  # 但 SHA256SUMS 仍只从 OFFICIAL_RAW_BASE 获取，镜像投毒会导致校验失败而不是装入。
+  local base trust_base dist_sha
   dist_sha=""
   if command -v git >/dev/null 2>&1; then
     dist_sha=$(git ls-remote "https://github.com/k6nfmm7dbr-commits/sbx.git" refs/heads/dist 2>/dev/null | awk '{print $1}')
@@ -622,14 +657,19 @@ install_sbx_core() {
     dist_sha=$(grep -m1 '"sha"' <<< "$refs_json" | sed -E 's/.*"sha"[[:space:]]*:[[:space:]]*"([0-9a-f]+)".*/\1/')
   fi
   if [[ -n "$dist_sha" ]]; then
-    base="https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/$dist_sha"
+    # commit sha 来自官方 GitHub API/git ls-remote；不可变 revision 保证 binary 与清单同代。
+    base="${OFFICIAL_RAW_BASE%/dist}/$dist_sha"
+    trust_base="$base"
   else
+    # git/API 不可用时，大文件仍可走用户指定的镜像；信任清单永远只取官方 rolling dist。
     base="$RAW_BASE"
+    trust_base="$OFFICIAL_RAW_BASE"
   fi
 
-  # 先下载 SHA256SUMS（小文件），与本地二进制做内容比较
-  curl -fsSL -m 60 -o "$tmp/SHA256SUMS" "$(gh_url "$base/SHA256SUMS")" \
-    || { cleanup; die "下载 SHA256SUMS 失败；现有安装未被改动"; }
+  # 校验清单是信任决策依据，必须直连 trust_base，不能经过 SBX_GH_PROXY 或自定义 RAW 镜像：
+  # 若镜像同时替换二进制与 SHA256SUMS，自证式校验仍会通过，无法防止镜像投毒。
+  curl -fsSL -m 60 -o "$tmp/SHA256SUMS" "$trust_base/SHA256SUMS" \
+    || { cleanup; die "从官方源下载 SHA256SUMS 失败；现有安装未被改动"; }
   if [[ -x "$CORE_BIN" ]]; then
     local local_sum expect_sum
     local_sum=$(sha256_of "$CORE_BIN" 2>/dev/null || true)
@@ -1914,25 +1954,54 @@ do_update() {
   require_root
   detect_platform
 
-  local tmp new_ver current_sha remote_sha
+  local tmp new_ver current_sha remote_sha sum_tmp official_count official_sha
   tmp=$(mktemp)
-  info "从 GitHub 拉取最新版本..."
-  if ! curl -fsSL -m 60 -o "$tmp" "$(gh_url "$RAW_URL")"; then
-    rm -f "$tmp"; die "下载失败，可设置 SBX_GH_PROXY 使用镜像后重试"
+  sum_tmp=$(mktemp)
+  # 在线升级的脚本本体是可执行信任对象：必须从官方 URL 直连，不能经 GH_PROXY/RAW 镜像。
+  # 即使后续哈希验证会拦截投毒，也不应让自定义镜像承载 root 将执行的脚本字节流。
+  info "从官方 GitHub 源拉取升级脚本..."
+  if ! curl -fsSL -m 60 -o "$tmp" "$OFFICIAL_SCRIPT_URL"; then
+    rm -f "$tmp" "$sum_tmp"; die "从官方源下载升级脚本失败；可稍后重试或使用 SBX_SCRIPT_SHA256 显式校验的本地副本"
   fi
-  # 基本完整性校验：语法 + 版本标记
+  # 语法和版本标记只能检查可执行性，不能证明脚本来自可信发布源。
   if ! bash -n "$tmp" 2>/dev/null; then
-    rm -f "$tmp"; die "下载的脚本语法校验失败，已放弃升级（未改动现有安装）"
+    rm -f "$tmp" "$sum_tmp"; die "下载的脚本语法校验失败，已放弃升级（未改动现有安装）"
   fi
   if ! grep -q '^APP_VERSION=' "$tmp"; then
-    rm -f "$tmp"; die "下载的脚本缺少版本标记，可能不是发布版，已放弃升级"
+    rm -f "$tmp" "$sum_tmp"; die "下载的脚本缺少版本标记，可能不是发布版，已放弃升级"
   fi
+
+  # RAW_BASE 可被配置成大文件镜像；脚本校验哈希必须固定直连官方 dist RAW 源。
+  if curl -fsSL -m 60 -o "$sum_tmp" "$OFFICIAL_RAW_BASE/sbx.sh.sha256"; then
+    official_count=$(awk '$2=="sbx.sh"{c++} END{print c+0}' "$sum_tmp")
+    official_sha=$(awk '$2=="sbx.sh"{print $1}' "$sum_tmp")
+    if [[ "$official_count" != "1" ]] || ! verify_remote_script "$tmp" "$official_sha" "官方 sbx.sh.sha256"; then
+      rm -f "$tmp" "$sum_tmp"
+      die "在线升级脚本校验失败：脚本可能被篡改、镜像投毒或 dist 分支尚未同步，请稍后重试或改用先校验再执行"
+    fi
+    # 用户显式提供的官方哈希是第二个独立锚；两者都必须匹配。
+    if [[ -n "${SBX_SCRIPT_SHA256:-}" ]] && ! verify_remote_script "$tmp" "$SBX_SCRIPT_SHA256" "SBX_SCRIPT_SHA256 显式锚"; then
+      rm -f "$tmp" "$sum_tmp"
+      die "在线升级脚本与显式 SBX_SCRIPT_SHA256 不匹配，已中止且未覆盖当前脚本"
+    fi
+  elif [[ -n "${SBX_SCRIPT_SHA256:-}" ]]; then
+    # 官方端点暂不可达时，仅允许用户显式提供并核验官方哈希后重试；绝不改走镜像取信任锚。
+    warn "无法获取官方 sbx.sh.sha256；本次改用你显式提供的 SBX_SCRIPT_SHA256 校验"
+    if ! verify_remote_script "$tmp" "$SBX_SCRIPT_SHA256" "SBX_SCRIPT_SHA256 显式锚"; then
+      rm -f "$tmp" "$sum_tmp"
+      die "在线升级脚本完整性校验失败，已中止且未覆盖当前脚本"
+    fi
+  else
+    rm -f "$tmp" "$sum_tmp"
+    die "无法从官方源获取 sbx.sh.sha256，已中止升级；也可用 SBX_SCRIPT_SHA256=<官方哈希> 显式指定后重试"
+  fi
+  rm -f "$sum_tmp"
 
   new_ver=$(remote_version "$tmp")
   [[ -z "$new_ver" ]] && new_ver="unknown"
   # 版本号相同时，再用 sha256 比较脚本内容，避免开发者忘记升版本导致更新被误跳过。
   current_sha=$(sha256sum "$SELF_PATH" 2>/dev/null | awk '{print $1}')
-  remote_sha=$(sha256sum "$tmp" 2>/dev/null | awk '{print $1}')
+  remote_sha=$(sha256_of "$tmp" 2>/dev/null || true)
   local same_content="no"
   [[ -n "$current_sha" && "$current_sha" == "$remote_sha" ]] && same_content="yes"
   info "当前版本: $APP_VERSION    最新版本: $new_ver"

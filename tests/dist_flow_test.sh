@@ -16,15 +16,15 @@ echo "== dist_flow_test =="
 
 # ---- 1. 下载基址：必须是 dist 分支 raw 地址，且不得含版本化 release 路径 ----
 BASE_LINE=$(grep -m1 '^RAW_BASE=' "$TPL")
+OFFICIAL_LINE=$(grep -m1 '^OFFICIAL_RAW_BASE=' "$TPL")
 ck "安装器定义 RAW_BASE 下载基址" 0 "$([ -n "$BASE_LINE" ] && echo 0 || echo 1)"
-printf '%s\n' "$BASE_LINE" | grep -q '/dist'; B=$?; [[ $B -ne 0 ]] && B=1 || B=0
-ck "下载基址指向 dist 分支" 0 "$B"
+printf '%s\n' "$OFFICIAL_LINE" | grep -q '/dist'; B=$?; [[ $B -ne 0 ]] && B=1 || B=0
+ck "官方信任基址指向 dist 分支" 0 "$B"
 # 只检查本仓库的下载路径；sing-box 上游的 releases/latest API 属其官方发布渠道，不算残留
 grep 'github.com/k6nfmm7dbr-commits/sbx/releases' "$TPL" | grep -vc '^\s*#' | grep -qx '0'; ck "本仓库无任何 Release 版本化下载路径残留" 0 $?
-printf '%s\n' "$BASE_LINE" | grep -q 'v\${APP_VERSION}'; [[ $? -ne 0 ]]; ck "下载 URL 不拼接版本 Tag" 0 $?
-
-DL_URL=$(printf '%s\n' "$BASE_LINE" | sed 's/^RAW_BASE="\${SBX_RAW_BASE:-\(.*\)}"/\1/')
-ck "下载基址为 raw.githubusercontent 固定地址" 0 "$(printf '%s' "$DL_URL" | grep -q '^https://raw.githubusercontent.com/' && echo 0 || echo 1)"
+printf '%s\n' "$BASE_LINE" | grep -Fq 'SBX_RAW_BASE:-$OFFICIAL_RAW_BASE'; ck "大文件下载基址可由 SBX_RAW_BASE 覆盖" 0 $?
+DL_URL=$(printf '%s\n' "$OFFICIAL_LINE" | sed -E 's/^OFFICIAL_RAW_BASE="(.*)"/\1/')
+ck "官方信任基址为 raw.githubusercontent 固定地址" 0 "$(printf '%s' "$DL_URL" | grep -q '^https://raw.githubusercontent.com/' && echo 0 || echo 1)"
 
 # ---- 2. 架构映射与 dist 分支产物清单一致（本地仓库清单为准） ----
 # 安装器 sb_arch 的映射
@@ -47,7 +47,9 @@ done
 
 # ---- 3. 安装器下载函数确实使用 base + 架构名 + SHA256SUMS ----
 grep -q '\$base/\${name}' "$TPL"; ck "binary 下载使用 base/架构文件名" 0 $?
-grep -q '\$base/SHA256SUMS' "$TPL"; ck "校验文件下载使用 base/SHA256SUMS" 0 $?
+grep -q '\$trust_base/SHA256SUMS' "$TPL"; ck "校验文件下载使用独立 trust_base" 0 $?
+grep -q 'trust_base="\$OFFICIAL_RAW_BASE"' "$TPL"; ck "RAW 镜像回退时校验清单仍直连官方" 0 $?
+grep -q 'trust_base="\$base"' "$TPL"; ck "固定官方 commit 下载时 binary 与清单同代" 0 $?
 grep -q 'dist_sha\|RAW_BASE' "$TPL"; ck "安装器解析 dist commit 或回退 RAW_BASE" 0 $?
 
 # ---- 3b. rolling 分发：不得因「已装版本号==APP_VERSION」跳过下载（防 stale 二进制）----
