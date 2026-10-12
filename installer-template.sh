@@ -1901,6 +1901,227 @@ main_menu() {
   done
 }
 
+# ---------------------------------------------------------------- 流量推送
+
+# notify_safe_value 拒绝会破坏 JSON 拼接的输入（双引号、反斜杠、控制字符）。
+# 值本身仍会由 sbx-core 做格式白名单校验，这里只是避免拼出坏 JSON。
+notify_safe_value() {
+  if [[ "$1" == *'"'* || "$1" == *'\'* || "$1" =~ [[:cntrl:]] ]]; then
+    return 1
+  fi
+  return 0
+}
+
+# notify_pick_events 让用户选择订阅哪些事件，输出 JSON 数组字面量。
+#
+# 提示必须走 stderr：调用方用 $(...) 捕获本函数的输出拼进 JSON，
+# 提示若走 stdout 会被一并捕获，拼出带中文的非法 JSON。
+notify_pick_events() {
+  printf '推送哪些事件? 1) 全部(心跳+日结) 2) 只要日结 3) 只要心跳 [1]: ' >&2
+  local e; read -r e || true
+  case "$e" in
+    2) printf '["daily"]' ;;
+    3) printf '["heartbeat"]' ;;
+    *) printf '["heartbeat","daily"]' ;;
+  esac
+}
+
+menu_notify_add() {
+  banner
+  printf '%s添加推送渠道%s\n\n' "$C_B" "$C_RESET"
+  echo "  1) WxPusher（推荐：扫码即用，免注册免实名）"
+  echo "  2) Telegram"
+  echo "  3) 通用 Webhook（可对接 ntfy / Bark / 自建服务）"
+  echo "  4) 企业微信群机器人"
+  echo "  5) Server酱"
+  echo "  6) PushPlus"
+  echo "  0) 返回"
+  echo
+  printf '请选择渠道类型: '
+  local t; read -r t || true
+  case "$t" in
+    1|2|3|4|5|6) ;;
+    *) return 0 ;;
+  esac
+
+  local v u m body=""
+  case "$t" in
+    1) echo
+       echo "  1) 极简模式（SPT，扫码即得，推荐）"
+       echo "  2) 标准模式（appToken + UID）"
+       printf '  请选择 [1]: '; read -r m || true
+       if [[ "$m" != "2" ]]; then
+         printf 'SPT（形如 SPT_xxxx）: '; read -r v || true
+         notify_safe_value "$v" || { warn "输入含非法字符（引号/反斜杠），已取消"; return 0; }
+         [[ -n "$v" ]] || { warn "不能为空"; return 0; }
+         body=$(printf '{"type":"wxpusher","name":"wxpusher-spt","spt":"%s"}' "$v")
+       else
+         printf 'appToken（形如 AT_xxxx）: '; read -r v || true
+         notify_safe_value "$v" || { warn "输入含非法字符，已取消"; return 0; }
+         printf 'UID（形如 UID_xxxx）: '; read -r u || true
+         notify_safe_value "$u" || { warn "输入含非法字符，已取消"; return 0; }
+         [[ -n "$v" && -n "$u" ]] || { warn "不能为空"; return 0; }
+         body=$(printf '{"type":"wxpusher","name":"wxpusher","app_token":"%s","uids":["%s"]}' "$v" "$u")
+       fi ;;
+    2) echo
+       printf 'bot_token（形如 123456789:AA...）: '; read -r v || true
+       notify_safe_value "$v" || { warn "输入含非法字符，已取消"; return 0; }
+       printf 'chat_id（形如 -1001234567890）: '; read -r u || true
+       notify_safe_value "$u" || { warn "输入含非法字符，已取消"; return 0; }
+       [[ -n "$v" && -n "$u" ]] || { warn "不能为空"; return 0; }
+       body=$(printf '{"type":"telegram","name":"telegram","bot_token":"%s","chat_id":"%s"}' "$v" "$u") ;;
+    3) echo
+       printf 'Webhook URL（http/https）: '; read -r v || true
+       notify_safe_value "$v" || { warn "输入含非法字符，已取消"; return 0; }
+       [[ -n "$v" ]] || { warn "不能为空"; return 0; }
+       printf '签名密钥 secret（可留空）: '; read -r u || true
+       notify_safe_value "$u" || { warn "输入含非法字符，已取消"; return 0; }
+       if [[ -n "$u" ]]; then
+         body=$(printf '{"type":"webhook","name":"webhook","url":"%s","secret":"%s"}' "$v" "$u")
+       else
+         body=$(printf '{"type":"webhook","name":"webhook","url":"%s"}' "$v")
+       fi ;;
+    4) echo
+       printf '群机器人 Webhook URL: '; read -r v || true
+       notify_safe_value "$v" || { warn "输入含非法字符，已取消"; return 0; }
+       [[ -n "$v" ]] || { warn "不能为空"; return 0; }
+       body=$(printf '{"type":"wxwork","name":"wxwork","webhook":"%s"}' "$v") ;;
+    5) echo
+       printf 'SendKey（形如 SCTxxxx）: '; read -r v || true
+       notify_safe_value "$v" || { warn "输入含非法字符，已取消"; return 0; }
+       [[ -n "$v" ]] || { warn "不能为空"; return 0; }
+       body=$(printf '{"type":"serverchan","name":"serverchan","sendkey":"%s"}' "$v") ;;
+    6) echo
+       printf 'pushplus token（32 位）: '; read -r v || true
+       notify_safe_value "$v" || { warn "输入含非法字符，已取消"; return 0; }
+       [[ -n "$v" ]] || { warn "不能为空"; return 0; }
+       body=$(printf '{"type":"pushplus","name":"pushplus","sendkey":"%s"}' "$v") ;;
+  esac
+
+  # 把 events 注入渠道对象（去掉结尾的 } 再补上）。
+  local ev; ev=$(notify_pick_events)
+  body="${body%?},\"events\":$ev}"
+
+  local tmp rc
+  tmp=$(mktemp)
+  printf '%s' "$body" > "$tmp"
+  rc=0
+  # 用 || 捕获退出码：既避免 set -e 因校验失败而把整个菜单带崩，
+  # 也避免 `local rc=$?` 触发 SC2155。
+  "$CORE_BIN" notify-config add-channel "$tmp" || rc=$?
+  rm -f "$tmp"
+  [[ $rc -eq 0 ]] || return 0
+
+  echo
+  case "$t" in
+    1) printf '%s重要%s: WxPusher 建议用独立 App 接收。\n' "$C_YEL" "$C_RESET"
+       echo "      它的微信通道 24 小时只能收 10 条，装不下每 30 分钟一次的心跳。"
+       echo "      在手机装 WxPusher 客户端并登录，即走无条数限制的 App 通道。" ;;
+    5) printf '%s提示%s: Server酱免费版每天只有个位数条数，建议只勾「只要日结」。\n' "$C_YEL" "$C_RESET" ;;
+    2) echo "提示: Telegram 需要服务器能直连 api.telegram.org，否则收不到。" ;;
+  esac
+  echo "接着执行「发送测试推送」确认能收到。"
+}
+
+menu_notify_del() {
+  banner
+  printf '%s删除推送渠道%s\n\n' "$C_B" "$C_RESET"
+  "$CORE_BIN" notify-config status 2>/dev/null | sed 's/^/  /'
+  echo
+  printf '输入要删除的序号或渠道名（回车取消）: '
+  local k; read -r k || true
+  [[ -z "$k" ]] && { echo "已取消"; return 0; }
+  printf '确认删除 %s ? [y/N] ' "$k"
+  local yn; read -r yn || true
+  [[ "${yn,,}" == "y" ]] || { echo "已取消"; return 0; }
+  "$CORE_BIN" notify-config remove-channel "$k"
+}
+
+menu_notify_options() {
+  banner
+  printf '%s推送全局选项%s\n\n' "$C_B" "$C_RESET"
+  "$CORE_BIN" notify-config status 2>/dev/null | sed 's/^/  /'
+  echo
+  echo "  1) 启用 / 关闭推送"
+  echo "  2) 修改心跳间隔（分钟）"
+  echo "  3) 修改日结时刻（HH:MM）"
+  echo "  4) 设置死手开关 URL（可选）"
+  echo "  0) 返回"
+  echo
+  printf '请选择: '
+  local c n t u; read -r c || true
+  case "$c" in
+    1) if "$CORE_BIN" notify-config status 2>/dev/null | head -1 | grep -q "已启用"; then
+         "$CORE_BIN" notify-config set-option enabled false
+       else
+         "$CORE_BIN" notify-config set-option enabled true
+       fi ;;
+    2) printf '心跳间隔分钟数 (1-1440): '; read -r n || true
+       if [[ "$n" =~ ^[0-9]+$ ]] && ((n >= 1 && n <= 1440)); then
+         "$CORE_BIN" notify-config set-option interval_minutes "$n"
+       else
+         warn "无效数值"
+       fi ;;
+    3) printf '日结时刻 HH:MM（如 00:05）: '; read -r t || true
+       [[ -n "$t" ]] && "$CORE_BIN" notify-config set-option daily_at "$t" ;;
+    4) printf '死手开关 URL（如 https://hc-ping.com/uuid，留空则清除）: '; read -r u || true
+       "$CORE_BIN" notify-config set-option heartbeat_url "$u" ;;
+    0|"") return 0 ;;
+    *) warn "无效选择" ;;
+  esac
+}
+
+menu_notify_help() {
+  banner
+  printf '%s怎么选推送渠道%s\n\n' "$C_B" "$C_RESET"
+  echo "  WxPusher      扫码即得 SPT，免注册免实名。用独立 App 接收，"
+  echo "                单日约 3000 条后才不提醒 —— 最适合心跳。"
+  echo "                （注意：微信通道 24 小时只能收 10 条，别指望它跑心跳）"
+  echo
+  echo "  Telegram      收全部事件最省心，消息可导出、最适合当备份载体。"
+  echo "                需要服务器能直连 api.telegram.org。"
+  echo
+  echo "  PushPlus      推到你微信里。但自 2024-08 起未实名无法调用；"
+  echo "                实名后 200 条/天，够用。"
+  echo
+  echo "  Server酱      推到你微信里。免费版每天只有个位数条数，只够日结。"
+  echo
+  echo "  通用 Webhook  自建服务 / ntfy / Bark 等都能对接；"
+  echo "                接收 JSON，含 text、nodes、replay 字段，可配 HMAC 签名。"
+  echo
+  printf '%s接收端提醒%s: 微信没有开放给个人的主动推送接口，任何"推到微信"\n' "$C_YEL" "$C_RESET"
+  echo "  都受限。要高频收推送，优先选 WxPusher App 或 Telegram。"
+}
+
+menu_notify() {
+  while :; do
+    banner
+    printf '%s流量推送配置%s\n\n' "$C_B" "$C_RESET"
+    "$CORE_BIN" notify-config status 2>/dev/null | sed 's/^/  /'
+    echo
+    echo "  1) 添加推送渠道"
+    echo "  2) 删除推送渠道"
+    echo "  3) 全局选项（启用/关闭、频率、日结时刻、死手开关）"
+    echo "  4) 查看当前配置（凭据脱敏）"
+    echo "  5) 发送测试推送"
+    echo "  6) 怎么选渠道 / 说明"
+    echo "  0) 返回"
+    echo
+    printf '请选择: '
+    local c; read -r c || true
+    case "$c" in
+      1) menu_notify_add; pause ;;
+      2) menu_notify_del; pause ;;
+      3) menu_notify_options; pause ;;
+      4) hr; "$CORE_BIN" notify-config get; hr; pause ;;
+      5) hr; "$CORE_BIN" notify-test; hr; pause ;;
+      6) menu_notify_help; pause ;;
+      0|"") return 0 ;;
+      *) warn "无效选择"; sleep 1 ;;
+    esac
+  done
+}
+
 menu_settings() {
   while :; do
     banner
@@ -1908,6 +2129,7 @@ menu_settings() {
     echo "  1) 面板设置与统计维护（端口 / 间隔 / 监听 / 自检 / 清空）"
     echo "  2) 分享地址（域名 / IP）"
     echo "  3) 服务管理（重启 / 停止 / 日志）"
+    echo "  4) 流量推送配置（Telegram / WxPusher / 微信等）"
     echo "  0) 返回"
     echo
     printf '请选择: '
@@ -1916,6 +2138,7 @@ menu_settings() {
       1) menu_panel_settings ;;
       2) menu_host ;;
       3) menu_service ;;
+      4) menu_notify ;;
       0|"") return 0 ;;
       *) warn "无效选择" ;;
     esac
