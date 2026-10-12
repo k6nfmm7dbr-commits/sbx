@@ -180,7 +180,7 @@ func printUsage() {
   sbx-core config-set <key> <value>       写配置项
   sbx-core config-ensure-token            保证访问令牌存在
   sbx-core config-migrate                 清理废弃配置键(backend/ipt_script)
-  sbx-core notify-config <set|get|show>   流量推送配置(set <file> / get / show --unsafe)
+  sbx-core notify-config <sub>            推送配置(set/get/show/status/add-channel/remove-channel/set-option)
   sbx-core notify-test [--event E] [--day D]  向所有渠道发送测试推送
   sbx-core notify-replay [--dry-run] [file]   从聊天记录恢复 daily 表
   sbx-core node <sub-command> [...]       节点管理（add/edit/remove/...）
