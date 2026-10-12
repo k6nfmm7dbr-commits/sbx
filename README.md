@@ -360,16 +360,50 @@ sbx-core node list|links|add|edit|remove|sync   # 节点管理
 
 ### 快速上手
 
+**方式一：管理菜单（推荐）**
+
+```bash
+sbx            # 打开管理菜单
+# 系统设置与运维 → 4) 流量推送配置
+```
+
+里面有引导式向导：添加渠道（选类型 → 填凭据 → 选订阅事件）、删除渠道、改频率与日结时刻、
+查看配置、发送测试推送。凭据会在写入前由后端做格式校验（例如把 `AT_` 开头的密钥填进 `spt`
+会被直接拦住并提示应填哪个字段）。
+
+**方式二：命令行**
+
 ```bash
 # 1. 写一份配置(见下方示例)保存为 notify.json
+cat > /root/notify.json <<'EOF'
+{
+  "enabled": true,
+  "interval_minutes": 30,
+  "daily_at": "00:05",
+  "channels": [
+    {"type": "wxpusher", "spt": "SPT_xxx", "events": ["heartbeat", "daily"]}
+  ]
+}
+EOF
+
 # 2. 写入 panel.json 的 notify 段(写入前完整校验,非法即拒绝)
-sbx-core notify-config set notify.json
+sbx-core notify-config set /root/notify.json
 
 # 3. 重启面板生效
-systemctl restart sbx-core
+systemctl restart sbx-panel
 
 # 4. 确认每个渠道都能收到
 sbx-core notify-test
+```
+
+也可以增量维护，不必手写整份配置：
+
+```bash
+sbx-core notify-config status                       # 摘要（状态/频率/渠道列表）
+sbx-core notify-config add-channel channel.json     # 追加一个渠道（保留其余配置）
+sbx-core notify-config remove-channel 0             # 按序号或渠道名删除
+sbx-core notify-config set-option interval_minutes 15
+sbx-core notify-config get                          # 当前配置（凭据脱敏）
 ```
 
 ```json
