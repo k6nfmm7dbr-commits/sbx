@@ -88,6 +88,15 @@ func NewChannel(ch config.NotifyChannel, client *http.Client) (Channel, error) {
 		return &pushPlusChannel{
 			channelBase: base, endpoint: pushPlusEndpoint, token: ch.SendKey, client: client,
 		}, nil
+	case config.ChannelWxPusher:
+		// 填了 spt 走极简端点；否则走标准端点（校验已保证 app_token/uids 完备）。
+		return &wxPusherChannel{
+			channelBase: base, baseURL: wxPusherBaseURL,
+			simple:   strings.TrimSpace(ch.SPT) != "",
+			spt:      ch.SPT,
+			appToken: ch.AppToken, uids: ch.UIDs, topicIDs: ch.TopicIDs,
+			client: client,
+		}, nil
 	case config.ChannelWebhook:
 		return &webhookChannel{
 			channelBase: base, url: ch.URL, secret: ch.Secret,

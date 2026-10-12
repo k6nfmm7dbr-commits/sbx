@@ -20,6 +20,9 @@ func TestParseNotifyJSONAccepts(t *testing.T) {
 		{"企业微信markdown", `{"enabled":true,"channels":[{"type":"wxwork","webhook":"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abcd","msgtype":"markdown"}]}`},
 		{"Server酱", `{"enabled":true,"channels":[{"type":"serverchan","sendkey":"SCTabc123"}]}`},
 		{"PushPlus", `{"enabled":true,"channels":[{"type":"pushplus","sendkey":"abcdef1234567890abcdef1234567890"}]}`},
+		{"WxPusher 极简", `{"enabled":true,"channels":[{"type":"wxpusher","spt":"SPT_abc123"}]}`},
+		{"WxPusher 标准", `{"enabled":true,"channels":[{"type":"wxpusher","app_token":"AT_abc123","uids":["UID_xyz"]}]}`},
+		{"WxPusher 主题", `{"enabled":true,"channels":[{"type":"wxpusher","app_token":"AT_abc123","topic_ids":[123]}]}`},
 		{"通用webhook", `{"enabled":true,"channels":[{"type":"webhook","url":"https://example.com/hook","secret":"s3cret"}]}`},
 		{"自定义间隔与日结时刻", `{"enabled":true,"interval_minutes":5,"daily_at":"00:01","timeout_seconds":15,"channels":[{"type":"webhook","url":"http://127.0.0.1:9000/hook"}]}`},
 		{"带心跳地址", `{"enabled":true,"heartbeat_url":"https://hc-ping.com/uuid","channels":[{"type":"webhook","url":"https://e.com/h"}]}`},
@@ -70,6 +73,12 @@ func TestParseNotifyJSONRejects(t *testing.T) {
 		{"企业微信msgtype非法", `{"enabled":true,"channels":[{"type":"wxwork","webhook":"https://qyapi.weixin.qq.com/x?key=a","msgtype":"card"}]}`},
 		{"Server酱sendkey格式错", `{"enabled":true,"channels":[{"type":"serverchan","sendkey":"abc"}]}`},
 		{"PushPlus token过短", `{"enabled":true,"channels":[{"type":"pushplus","sendkey":"short"}]}`},
+		// 把 AT_ 开头的 appToken 误填进 spt 是最容易犯的错：
+		// 不拦住的话会请求到错误的端点并失败，且报错很不直观。
+		{"WxPusher 把 appToken 填进 spt", `{"enabled":true,"channels":[{"type":"wxpusher","spt":"AT_abc123"}]}`},
+		{"WxPusher 缺凭据", `{"enabled":true,"channels":[{"type":"wxpusher"}]}`},
+		{"WxPusher 标准缺 uids", `{"enabled":true,"channels":[{"type":"wxpusher","app_token":"AT_abc123"}]}`},
+		{"WxPusher uids 含空值", `{"enabled":true,"channels":[{"type":"wxpusher","app_token":"AT_abc123","uids":[""]}]}`},
 		{"webhook非http", `{"enabled":true,"channels":[{"type":"webhook","url":"ftp://example.com/x"}]}`},
 		{"webhook缺host", `{"enabled":true,"channels":[{"type":"webhook","url":"https://"}]}`},
 		{"webhook max_bytes过小", `{"enabled":true,"channels":[{"type":"webhook","url":"https://e.com/h","max_bytes":10}]}`},

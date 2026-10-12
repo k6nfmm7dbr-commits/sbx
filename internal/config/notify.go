@@ -24,6 +24,7 @@ const (
 	ChannelWxWork     = "wxwork"
 	ChannelServerChan = "serverchan"
 	ChannelPushPlus   = "pushplus"
+	ChannelWxPusher   = "wxpusher"
 	ChannelWebhook    = "webhook"
 )
 
@@ -65,8 +66,14 @@ type NotifyChannel struct {
 	Webhook string `json:"webhook"`
 	MsgType string `json:"msgtype"`
 
-	// serverchan
+	// serverchan / pushplus
 	SendKey string `json:"sendkey"`
+
+	// wxpusher：极简(SPT) 与 标准(app_token + uids) 二选一，按填了哪个自动识别。
+	SPT      string   `json:"spt"`
+	AppToken string   `json:"app_token"`
+	UIDs     []string `json:"uids"`
+	TopicIDs []int64  `json:"topic_ids"`
 
 	// webhook
 	URL      string `json:"url"`
@@ -79,6 +86,7 @@ var validChannelTypes = map[string]bool{
 	ChannelWxWork:     true,
 	ChannelServerChan: true,
 	ChannelPushPlus:   true,
+	ChannelWxPusher:   true,
 	ChannelWebhook:    true,
 }
 
@@ -89,6 +97,18 @@ var (
 	reBotToken      = regexp.MustCompile(`^[0-9]{5,}:[A-Za-z0-9_-]{20,}$`)
 	reSendKey       = regexp.MustCompile(`^SCT[A-Za-z0-9]+$`)
 	rePushPlusToken = regexp.MustCompile(`^[A-Za-z0-9]{16,64}$`)
+	// WxPusher 的两种凭据前缀不同（SPT_ 与 AT_）。明确区分可以拦住"把 appToken
+	// 填进 spt"这类错误——那会请求到错误的端点并失败，且报错信息很不直观。
+	reWxPusherSPT   = regexp.MustCompile(`^SPT[_A-Za-z0-9-]{6,}$`)
+	reWxPusherToken = regexp.MustCompile(`^AT[_A-Za-z0-9-]{6,}$`)
+)
+
+// WxPusher 的官方上限（见 https://wxpusher.zjiecode.com/docs/#/?id=limit）。
+const (
+	// wxPusherMaxUIDs 是单次请求 uids 的上限。
+	wxPusherMaxUIDs = 2000
+	// wxPusherMaxTopics 是单次请求 topicIds 的上限。
+	wxPusherMaxTopics = 5
 )
 
 // HasEvent 判断该渠道是否订阅了某事件。
@@ -234,6 +254,31 @@ func (ch *NotifyChannel) validate(i int) error {
 		// PushPlus 的 token 是一个普通密钥串（无固定前缀），只做长度与字符集约束。
 		if !rePushPlusToken.MatchString(ch.SendKey) {
 			return fmt.Errorf("%s: sendkey 格式非法（应为 PushPlus 的 32 位 token）", where)
+		}
+	case ChannelWxPusher:
+		// 极简模式（SPT）：扫个码就能拿到，不需要注册账号或创建应用。
+		if strings.TrimSpace(ch.SPT) != "" {
+			if !reWxPusherSPT.MatchString(ch.SPT) {
+				return fmt.Errorf("%s: spt 格式非法（应以 SPT_ 开头；若你手里是 AT_ 开头的密钥, 应填 app_token 而不是 spt）", where)
+			}
+			return nil
+		}
+		if !reWxPusherToken.MatchString(ch.AppToken) {
+			return fmt.Errorf("%s: 需要 spt（SPT_ 开头）或 app_token（AT_ 开头）", where)
+		}
+		if len(ch.UIDs) == 0 && len(ch.TopicIDs) == 0 {
+			return fmt.Errorf("%s: 标准模式需要 uids 或 topic_ids 至少一项", where)
+		}
+		if len(ch.UIDs) > wxPusherMaxUIDs {
+			return fmt.Errorf("%s: uids 最多 %d 个, 实得 %d", where, wxPusherMaxUIDs, len(ch.UIDs))
+		}
+		if len(ch.TopicIDs) > wxPusherMaxTopics {
+			return fmt.Errorf("%s: topic_ids 最多 %d 个, 实得 %d", where, wxPusherMaxTopics, len(ch.TopicIDs))
+		}
+		for _, u := range ch.UIDs {
+			if strings.TrimSpace(u) == "" {
+				return fmt.Errorf("%s: uids 含空值", where)
+			}
 		}
 	case ChannelWebhook:
 		if err := validateHTTPURL(where+".url", ch.URL); err != nil {
