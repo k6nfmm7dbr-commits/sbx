@@ -104,6 +104,21 @@ grep -q '"backend"' "$PANEL_CONF"; [[ $? -ne 0 ]]; ck "新 panel.json 不含 bac
 for k in db nodes_file listen port token interval tz; do
   grep -q "\"$k\"" "$PANEL_CONF"; ck "新 panel.json 保留字段 $k" 0 $?
 done
+
+# ---- 默认监听地址必须三方一致：安装器生成值 / Go defaultConf / README 描述 ----
+# 回归背景（v3.0.30 复审 R-1）：Go 侧 defaultConf() 改成了 127.0.0.1，但安装器仍在生成
+# 全新的 panel.json 时写入 0.0.0.0——由于 do_install 必然先走 ensure_panel_conf，
+# 真实安装的默认监听依然是公网，而 README 却宣称"默认仅本机可访问"，
+# 文档与实现不符比默认值本身更危险（用户会据此以为面板没有对外暴露）。
+# 这三处只要再次漂移，本测试必须变红。
+gen_listen=$(sed -nE 's/.*"listen":[[:space:]]*"([^"]*)".*/\1/p' "$PANEL_CONF" | head -1)
+ck "安装器生成的 listen 必须是回环（防默认公网暴露）" "127.0.0.1" "$gen_listen"
+go_listen=$(grep -oE '"listen":[[:space:]]*"[^"]*"' "$ROOT/internal/config/config.go" | head -1 \
+              | sed -E 's/.*"listen":[[:space:]]*"([^"]*)"/\1/')
+ck "安装器 listen 与 internal/config defaultConf 一致" "$go_listen" "$gen_listen"
+readme_listen=$(grep -oE '`listen`\(默认 `[^`]+`' "$ROOT/README.md" | head -1 \
+                  | sed -E 's/.*默认 `([^`]+)`.*/\1/')
+ck "README 描述的 listen 默认值与实现一致" "$gen_listen" "$readme_listen"
 # 已存在的配置：ensure_panel_conf 必须调用 config-migrate 摘掉废弃键
 : > "$TMPD/core.calls"
 printf '{"token":"t","backend":"iptables","ipt_script":"/etc/sbx/iptables.sh"}' > "$PANEL_CONF"
