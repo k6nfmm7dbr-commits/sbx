@@ -160,7 +160,7 @@ func BuildSummary(cfg *config.Config, db *sql.DB, src LiveSource) (*Summary, err
 		return nil, err
 	}
 	today := TodayAt(cfg.TZ, nowT)
-	todayRows, err := qDailyByDay(db, today)
+	todayRows, err := QDailyByDay(db, today)
 	if err != nil {
 		return nil, err
 	}
@@ -284,8 +284,11 @@ func BuildLive(cfg *config.Config, db *sql.DB, src LiveSource) (*Live, error) {
 	return l, nil
 }
 
-// qDailyByDay 返回某天所有 scope 的行。
-func qDailyByDay(db *sql.DB, day string) (map[string]TotalsRow, error) {
+// QDailyByDay 返回某天所有 scope 的行。
+//
+// 导出供 notify 包复用：推送需要在只读路径上取同一天的原始行，
+// 若各写一份查询，"面板显示"与"异地留痕"就可能在口径上悄悄分叉。
+func QDailyByDay(db *sql.DB, day string) (map[string]TotalsRow, error) {
 	rows, err := db.Query(
 		"SELECT scope,rx,tx,rx_pkts,tx_pkts FROM daily WHERE day=?", day)
 	if err != nil {
