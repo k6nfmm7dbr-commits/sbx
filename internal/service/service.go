@@ -107,10 +107,10 @@ func Serve() int {
 	defer polCancel()
 	go policySvc.Run(polCtx)
 
-	// 流量外推（可选）：未配置 notify 时 NewManager 返回 nil，不启动任何 goroutine，
+	// 流量日报（可选）：未配置 notify 时 NewManager 返回 nil，不启动任何 goroutine，
 	// 行为与改动前完全一致。构造失败即拒绝启动——推送配错却静默失效，
-	// 会让人误以为已有异地备份。
-	notifier, nerr := notify.NewManager(cfg, db, collector)
+	// 会让人误以为日报还在。
+	notifier, nerr := notify.NewManager(cfg, db)
 	if nerr != nil {
 		slog.Error("推送配置无效, 拒绝启动", "err", nerr)
 		return 1

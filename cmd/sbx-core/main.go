@@ -129,10 +129,6 @@ func main() {
 		if err := service.NotifyTestCmd(args[1:]); err != nil {
 			fail(err)
 		}
-	case "notify-replay":
-		if err := service.NotifyReplayCmd(args[1:]); err != nil {
-			fail(err)
-		}
 	case "version", "--version", "-v":
 		fmt.Printf("sbx-core v%s\n", version.Version)
 	case "help", "-h", "--help":
@@ -180,9 +176,8 @@ func printUsage() {
   sbx-core config-set <key> <value>       写配置项
   sbx-core config-ensure-token            保证访问令牌存在
   sbx-core config-migrate                 清理废弃配置键(backend/ipt_script)
-  sbx-core notify-config <sub>            推送配置(set/get/show/status/add-channel/remove-channel/set-option)
-  sbx-core notify-test [--event E] [--day D]  向所有渠道发送测试推送
-  sbx-core notify-replay [--dry-run] [file]   从聊天记录恢复 daily 表
+  sbx-core notify-config <sub>            推送配置(show/status/enable/set-time/disable/set)
+  sbx-core notify-test                    向飞书群发送一条测试卡片
   sbx-core node <sub-command> [...]       节点管理（add/edit/remove/...）
   sbx-core secret <hex|base64> <n>         生成随机 secret（crypto/rand）
   sbx-core version                        版本信息

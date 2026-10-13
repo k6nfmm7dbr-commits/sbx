@@ -2,12 +2,9 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/k6nfmm7dbr-commits/sbx/internal/config"
@@ -18,13 +15,61 @@ import (
 
 // NotifyConfigCmd 处理 notify-config 子命令。
 //
-// 写入走 config.SetNotify（LoadStrict → 完整校验 → 原子写 0600），
+// 写入一律走 config.SetNotify（LoadStrict → 完整校验 → 原子写 0600），
 // 非法配置绝不落盘——否则会把一个能正常启动的实例改成启动失败。
+//
+// 刻意提供 enable/set-time/disable 这类"按值写"的子命令，而不是让安装器在
+// shell 里拼 JSON：shell 里做 JSON 拼装极易写出坏结构，而且报错极其难查。
 func NotifyConfigCmd(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("用法: sbx-core notify-config <set|get|show> [...]")
+		return fmt.Errorf("用法: sbx-core notify-config <show|status|enable|set-time|set-enabled|set> [...]")
 	}
 	switch args[0] {
+	case "show":
+		return notifyShow()
+	case "status":
+		return notifyStatus()
+	case "enable":
+		// 参数按位置传：webhook、secret、daily_at。secret 传空串表示不使用签名。
+		if len(args) < 4 {
+			return fmt.Errorf("用法: sbx-core notify-config enable <webhook> <secret> <daily_at>\n" +
+				"  例: sbx-core notify-config enable 'https://open.feishu.cn/open-apis/bot/v2/hook/xxx' '' 00:05")
+		}
+		nc := &config.NotifyConfig{
+			Enabled: true,
+			Type:    config.ChannelFeishu,
+			Webhook: args[1],
+			Secret:  args[2],
+			DailyAt: args[3],
+		}
+		return writeNotify(nc)
+	case "set-time":
+		if len(args) < 2 {
+			return fmt.Errorf("用法: sbx-core notify-config set-time <HH:MM>")
+		}
+		raw, err := loadNotifyRaw()
+		if err != nil {
+			return err
+		}
+		raw["daily_at"] = args[1]
+		return saveNotifyRaw(raw)
+	case "set-enabled":
+		// 翻启停状态而不动其余字段：停用后再启用不需要重新粘贴 webhook。
+		// 若配置本身不完整（例如只有 enabled 键），Validate 会拒绝，给出可读原因。
+		if len(args) < 2 {
+			return fmt.Errorf("用法: sbx-core notify-config set-enabled <true|false>")
+		}
+		v, err := strconv.ParseBool(args[1])
+		if err != nil {
+			return fmt.Errorf("取值只能是 true 或 false: %q", args[1])
+		}
+		raw, err := loadNotifyRaw()
+		if err != nil {
+			return err
+		}
+		raw["enabled"] = v
+		raw["type"] = config.ChannelFeishu
+		return saveNotifyRaw(raw)
 	case "set":
 		if len(args) < 2 {
 			return fmt.Errorf("用法: sbx-core notify-config set <配置文件.json>")
@@ -36,76 +81,51 @@ func NotifyConfigCmd(args []string) error {
 		if err := config.SetNotify(data); err != nil {
 			return err
 		}
-		fmt.Printf("已写入 notify 配置: %s\n", config.ConfPath())
-		fmt.Println("需重启面板生效: systemctl restart sbx-panel")
-		fmt.Println("建议随后执行: sbx-core notify-test")
+		printRestartHint()
 		return nil
-
-	case "get":
-		nc, err := loadNotify()
-		if err != nil {
-			return err
-		}
-		if nc == nil {
-			fmt.Println("（未配置 notify，推送处于关闭状态）")
-			return nil
-		}
-		out, err := fsx.MarshalIndent(redactNotify(nc))
-		if err != nil {
-			return err
-		}
-		fmt.Println(string(out))
-		fmt.Println("（凭据已脱敏；查看明文请用 notify-config show --unsafe）")
-		return nil
-
-	case "show":
-		// 明文凭据需要显式确认：避免误敲时把 token 打到终端历史或 CI 日志里。
-		if len(args) < 2 || args[1] != "--unsafe" {
-			return fmt.Errorf("show 会打印明文凭据；确认请使用: sbx-core notify-config show --unsafe")
-		}
-		nc, err := loadNotify()
-		if err != nil {
-			return err
-		}
-		if nc == nil {
-			fmt.Println("（未配置 notify）")
-			return nil
-		}
-		out, err := fsx.MarshalIndent(nc)
-		if err != nil {
-			return err
-		}
-		fmt.Println(string(out))
-		return nil
-
-	case "status":
-		return notifyStatus()
-
-	case "add-channel":
-		if len(args) < 2 {
-			return fmt.Errorf("用法: sbx-core notify-config add-channel <渠道.json>")
-		}
-		return notifyAddChannel(args[1])
-
-	case "remove-channel":
-		if len(args) < 2 {
-			return fmt.Errorf("用法: sbx-core notify-config remove-channel <渠道名|序号>")
-		}
-		return notifyRemoveChannel(args[1])
-
-	case "set-option":
-		if len(args) < 3 {
-			return fmt.Errorf("用法: sbx-core notify-config set-option <key> <value>")
-		}
-		return notifySetOption(args[1], args[2])
 	}
-	return fmt.Errorf("未知子命令 %q（可选 set/get/show/status/add-channel/remove-channel/set-option）", args[0])
+	return fmt.Errorf("未知子命令 %q（可选 show/status/enable/set-time/set-enabled/set）", args[0])
 }
 
-// notifyStatus 打印推送配置摘要（凭据不出现）。
+// writeNotify 把一份完整配置写入 panel.json。
+func writeNotify(nc *config.NotifyConfig) error {
+	out, err := fsx.MarshalIndent(nc)
+	if err != nil {
+		return err
+	}
+	if err := config.SetNotify(out); err != nil {
+		return err
+	}
+	printRestartHint()
+	return nil
+}
+
+// notifyShow 打印凭据已脱敏的当前配置。
 //
-// 供安装器菜单展示用：菜单需要的是"启用没有、有几个渠道、频率多少"，
-// 而不是一份需要自己解析的 JSON。
+// 没有 --unsafe：签名密钥与 hook token 都不该出现在终端历史或 CI 日志里，
+// 而排查问题只需要看到"哪个 host、路径结构对不对、有没有配密钥"。
+func notifyShow() error {
+	cfg, err := config.LoadStrict()
+	if err != nil {
+		return err
+	}
+	if cfg.Notify == nil {
+		fmt.Println("（未配置推送）")
+		return nil
+	}
+	cp := *cfg.Notify
+	cp.Webhook = notify.RedactURL(cp.Webhook)
+	cp.Secret = notify.RedactSecret(cp.Secret)
+	out, err := fsx.MarshalIndent(&cp)
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(out))
+	fmt.Println("（凭据已脱敏）")
+	return nil
+}
+
+// notifyStatus 打印摘要（凭据不出现），供安装器菜单展示。
 func notifyStatus() error {
 	cfg, err := config.LoadStrict()
 	if err != nil {
@@ -118,140 +138,30 @@ func notifyStatus() error {
 	}
 	if !nc.Enabled {
 		fmt.Println("状态: 未启用")
-		if len(nc.Channels) > 0 {
-			fmt.Printf("（已配置 %d 个渠道，但 enabled=false）\n", len(nc.Channels))
-		}
 		return nil
 	}
 	fmt.Println("状态: 已启用")
-	fmt.Printf("频率: 每 %d 分钟\n", nc.IntervalMinutes)
-	fmt.Printf("日结: 每日 %s\n", nc.DailyAt)
-	if nc.HeartbeatURL != "" {
-		fmt.Printf("死手开关: %s\n", notify.RedactURL(nc.HeartbeatURL))
-	}
-	fmt.Println("渠道:")
-	for i, ch := range nc.Channels {
-		fmt.Printf("  [%d] %s  events=%s\n", i, ch.Name, strings.Join(ch.Events, ","))
-	}
-	return nil
-}
-
-// notifyAddChannel 把一个渠道对象追加进 notify.channels，保留其余配置。
-//
-// 刻意做成"增量添加"而不是让菜单重新生成整份配置：菜单无法安全地合并既有 JSON
-// （shell 里做 JSON 增删很容易写坏），把这件事交给 Go 侧最稳妥。
-func notifyAddChannel(path string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("读取 %s 失败: %w", path, err)
-	}
-	// 先单独校验这一个渠道，避免把非法值写进正式配置。
-	probe := []byte(`{"enabled":true,"channels":[` + string(data) + `]}`)
-	if _, err := config.ParseNotifyJSON(probe); err != nil {
-		return fmt.Errorf("渠道配置非法: %w", err)
-	}
-	var ch map[string]any
-	if err := json.Unmarshal(data, &ch); err != nil {
-		return fmt.Errorf("渠道必须是 JSON 对象: %w", err)
-	}
-
-	notifyRaw, err := loadNotifyRaw()
-	if err != nil {
-		return err
-	}
-	chans, _ := notifyRaw["channels"].([]any)
-	notifyRaw["channels"] = append(chans, ch)
-	// 添加渠道即视为启用；仅补齐缺失的全局默认值，不覆盖用户已改过的值。
-	notifyRaw["enabled"] = true
-	if _, ok := notifyRaw["interval_minutes"]; !ok {
-		notifyRaw["interval_minutes"] = json.Number("30")
-	}
-	if _, ok := notifyRaw["daily_at"]; !ok {
-		notifyRaw["daily_at"] = "00:05"
-	}
-
-	name, _ := ch["name"].(string)
-	typ, _ := ch["type"].(string)
-	if err := saveNotifyRaw(notifyRaw); err != nil {
-		return err
-	}
-	if name != "" {
-		fmt.Printf("已添加渠道: %s (%s)\n", name, typ)
+	fmt.Printf("渠道: 飞书群机器人（%s）\n", notify.RedactURL(nc.Webhook))
+	if nc.Secret == "" {
+		fmt.Println("签名: 未启用（建议在飞书机器人设置里开启签名校验后再填入密钥）")
 	} else {
-		fmt.Printf("已添加渠道: %s\n", typ)
+		fmt.Println("签名: 已启用")
+	}
+	fmt.Printf("日报时刻: 每日 %s（时区 %s）\n", nc.DailyAt, cfg.TZ)
+	if days, bytes, err := historyStats(cfg); err == nil && days > 0 {
+		fmt.Printf("历史: %d 天，累计 %s\n", days, traffic.Human(bytes))
 	}
 	return nil
 }
 
-// notifyRemoveChannel 按序号或渠道名删除一个渠道。
-func notifyRemoveChannel(key string) error {
-	cfg, err := config.LoadStrict()
+// historyStats 尽力给出历史规模，失败时静默跳过（摘要不该因为读库失败而报错）。
+func historyStats(cfg *config.Config) (int, int64, error) {
+	db, closer, err := openDB(cfg)
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
-	nc := cfg.Notify
-	if nc == nil || len(nc.Channels) == 0 {
-		return fmt.Errorf("当前没有任何渠道")
-	}
-	idx := -1
-	if n, aerr := strconv.Atoi(key); aerr == nil {
-		if n >= 0 && n < len(nc.Channels) {
-			idx = n
-		}
-	} else {
-		for i := range nc.Channels {
-			if nc.Channels[i].Name == key {
-				idx = i
-				break
-			}
-		}
-	}
-	if idx < 0 {
-		return fmt.Errorf("找不到渠道 %q（可用序号 0-%d，或渠道名）", key, len(nc.Channels)-1)
-	}
-	removed := nc.Channels[idx].Name
-
-	notifyRaw, err := loadNotifyRaw()
-	if err != nil {
-		return err
-	}
-	chans, _ := notifyRaw["channels"].([]any)
-	if idx >= len(chans) {
-		return fmt.Errorf("渠道列表已变化，请重新查看后重试")
-	}
-	notifyRaw["channels"] = append(chans[:idx], chans[idx+1:]...)
-	// 删空了就自动关闭：否则会因为"enabled=true 但 channels 为空"而写不进去。
-	if len(notifyRaw["channels"].([]any)) == 0 {
-		notifyRaw["enabled"] = false
-	}
-	if err := saveNotifyRaw(notifyRaw); err != nil {
-		return err
-	}
-	fmt.Printf("已删除渠道: %s\n", removed)
-	return nil
-}
-
-// notifySetOption 修改 notify 段的全局选项。
-func notifySetOption(key, value string) error {
-	notifyRaw, err := loadNotifyRaw()
-	if err != nil {
-		return err
-	}
-	switch key {
-	case "enabled":
-		notifyRaw["enabled"] = value == "true" || value == "1" || value == "yes"
-	case "interval_minutes", "timeout_seconds":
-		n, perr := strconv.Atoi(value)
-		if perr != nil {
-			return fmt.Errorf("%s 必须是整数: %q", key, value)
-		}
-		notifyRaw[key] = json.Number(strconv.Itoa(n))
-	case "daily_at", "heartbeat_url":
-		notifyRaw[key] = value
-	default:
-		return fmt.Errorf("不支持的键 %q（可选 enabled / interval_minutes / daily_at / timeout_seconds / heartbeat_url）", key)
-	}
-	return saveNotifyRaw(notifyRaw)
+	defer closer()
+	return notify.HistoryStats(db.DB)
 }
 
 // loadNotifyRaw 读出 panel.json 的 notify 段（不存在时返回空对象，便于增量构造）。
@@ -276,68 +186,27 @@ func saveNotifyRaw(notifyRaw map[string]any) error {
 	if err := config.SetNotify(out); err != nil {
 		return err
 	}
-	fmt.Println("已写入: " + config.ConfPath())
-	fmt.Println("需重启面板生效: systemctl restart sbx-panel")
+	printRestartHint()
 	return nil
 }
-func loadNotify() (*config.NotifyConfig, error) {
-	cfg, err := config.LoadStrict()
-	if err != nil {
-		return nil, err
-	}
-	return cfg.Notify, nil
+
+func printRestartHint() {
+	fmt.Println("已写入: " + config.ConfPath())
+	fmt.Println("需重启面板生效: systemctl restart sbx-panel")
+	fmt.Println("建议随后执行: sbx-core notify-test")
 }
 
-// redactNotify 返回凭据已脱敏的副本，供终端展示。
-func redactNotify(nc *config.NotifyConfig) *config.NotifyConfig {
-	cp := *nc
-	cp.Channels = make([]config.NotifyChannel, len(nc.Channels))
-	copy(cp.Channels, nc.Channels)
-	for i := range cp.Channels {
-		ch := &cp.Channels[i]
-		ch.BotToken = notify.RedactSecret(ch.BotToken)
-		ch.SendKey = notify.RedactSecret(ch.SendKey)
-		ch.Secret = notify.RedactSecret(ch.Secret)
-		ch.SPT = notify.RedactSecret(ch.SPT)
-		ch.AppToken = notify.RedactSecret(ch.AppToken)
-		ch.Webhook = notify.RedactURL(ch.Webhook)
-		ch.URL = notify.RedactURL(ch.URL)
-	}
-	return &cp
-}
-
-// NotifyTestCmd 向所有渠道发送一条测试消息。
+// NotifyTestCmd 立即发送一条测试卡片。
 func NotifyTestCmd(args []string) error {
-	event := config.EventHeartbeat
-	day := ""
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--event":
-			if i+1 >= len(args) {
-				return fmt.Errorf("--event 需要一个取值")
-			}
-			event = args[i+1]
-			i++
-		case "--day":
-			if i+1 >= len(args) {
-				return fmt.Errorf("--day 需要一个取值(YYYY-MM-DD)")
-			}
-			day = args[i+1]
-			i++
-		default:
-			return fmt.Errorf("未知参数: %s", args[i])
-		}
+	if len(args) > 0 {
+		return fmt.Errorf("notify-test 不接受参数")
 	}
-	if event != config.EventHeartbeat && event != config.EventDaily {
-		return fmt.Errorf("--event 只能是 heartbeat 或 daily")
-	}
-
 	cfg, err := config.LoadStrict()
 	if err != nil {
 		return err
 	}
 	if cfg.Notify == nil || !cfg.Notify.Enabled {
-		return fmt.Errorf("notify 未启用（panel.json 中需要 notify.enabled=true）")
+		return fmt.Errorf("推送未启用（请在管理菜单「系统设置与运维 → 流量推送配置」中配置）")
 	}
 	db, closer, err := openDB(cfg)
 	if err != nil {
@@ -345,186 +214,18 @@ func NotifyTestCmd(args []string) error {
 	}
 	defer closer()
 
-	// live 传 nil：测试消息不依赖采集器，避免在 nft 不可用的环境下无法自检。
-	mgr, err := notify.NewManager(cfg, db, nil)
+	mgr, err := notify.NewManager(cfg, db)
 	if err != nil {
 		return err
 	}
 	if mgr == nil {
-		return fmt.Errorf("notify 未启用")
+		return fmt.Errorf("推送未启用")
 	}
-	if day == "" {
-		loc := traffic.Location(cfg.TZ)
-		t := time.Now().In(loc)
-		if event == config.EventDaily {
-			t = t.AddDate(0, 0, -1)
-		}
-		day = t.Format("2006-01-02")
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-
-	results := mgr.SendTest(ctx, event, day)
-	okCount := 0
-	for _, r := range results {
-		if r.Err == nil {
-			fmt.Printf("  [成功] %s\n", r.Name)
-			okCount++
-			continue
-		}
-		fmt.Printf("  [失败] %s: %s\n", r.Name, notify.SafeErr(r.Err))
+	if err := mgr.SendTest(ctx); err != nil {
+		return fmt.Errorf("测试推送失败: %s", notify.SafeErr(err))
 	}
-	fmt.Printf("完成: %d/%d 个渠道成功（事件=%s，数据日=%s）\n", okCount, len(results), event, day)
-
-	for _, ch := range cfg.Notify.Channels {
-		// 免费版额度很小，而半小时心跳一天就有 48 条，几乎必然超额。
-		if ch.Type == config.ChannelServerChan && ch.HasEvent(config.EventHeartbeat) {
-			fmt.Println("提示: Server酱免费额度很小，建议改为 \"events\": [\"daily\"] 只收日结")
-		}
-	}
-	if okCount == 0 {
-		return fmt.Errorf("所有渠道均失败")
-	}
+	fmt.Println("测试推送已发出，请查看飞书群。")
 	return nil
-}
-
-// NotifyReplayCmd 从聊天记录（或 Telegram 导出文件）恢复 daily 表。
-func NotifyReplayCmd(args []string) error {
-	opt := notify.ReplayOptions{}
-	input := ""
-	exportPath := ""
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--dry-run":
-			opt.DryRun = true
-		case "--overwrite":
-			opt.Overwrite = true
-		case "--only-missing":
-			opt.OnlyMissing = true
-		case "--telegram-export":
-			if i+1 >= len(args) {
-				return fmt.Errorf("--telegram-export 需要文件路径")
-			}
-			exportPath = args[i+1]
-			i++
-		default:
-			if strings.HasPrefix(args[i], "-") {
-				return fmt.Errorf("未知参数: %s", args[i])
-			}
-			input = args[i]
-		}
-	}
-	if opt.Overwrite && opt.OnlyMissing {
-		return fmt.Errorf("--overwrite 与 --only-missing 不能同时使用")
-	}
-
-	var data []byte
-	var err error
-	switch {
-	case exportPath != "":
-		raw, rerr := os.ReadFile(exportPath)
-		if rerr != nil {
-			return fmt.Errorf("读取 %s 失败: %w", exportPath, rerr)
-		}
-		text, perr := extractTelegramExport(raw)
-		if perr != nil {
-			return perr
-		}
-		data = []byte(text)
-	case input != "":
-		data, err = os.ReadFile(input)
-		if err != nil {
-			return fmt.Errorf("读取 %s 失败: %w", input, err)
-		}
-	default:
-		data, err = io.ReadAll(os.Stdin)
-		if err != nil {
-			return fmt.Errorf("读取标准输入失败: %w", err)
-		}
-	}
-
-	cfg, err := config.LoadStrict()
-	if err != nil {
-		return err
-	}
-	db, closer, err := openDB(cfg)
-	if err != nil {
-		return err
-	}
-	defer closer()
-
-	res, err := notify.ReplayInto(db.DB, string(data), opt)
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("解析出 %d 天数据（日结 %d 天 / 心跳兜底 %d 天），跳过损坏片段 %d 处\n",
-		res.Days, res.FromDaily, res.FromHB, res.Skipped)
-	for _, d := range res.DayInfos {
-		src := "日结(节点级终值)"
-		if d.Source == "hb" {
-			src = "心跳(仅当日总量，无节点拆分)"
-		}
-		fmt.Printf("  %s  ← %s  %d 行\n", d.Day, src, d.Rows)
-	}
-	for _, e := range res.Errors {
-		fmt.Printf("  [警告] %s\n", e)
-	}
-	if opt.DryRun {
-		fmt.Println("--dry-run: 未写入数据库")
-		return nil
-	}
-	if res.Days == 0 {
-		fmt.Println("未找到可恢复的数据（输入里可能没有 SBX1 行）")
-		return nil
-	}
-	fmt.Println("已写入 daily 表。")
-	// 如实告知：累计无法从日数据反推，伪造一个"看起来对"的值比留空更危险。
-	fmt.Println("注意: totals（累计）未被恢复，需人工处理。")
-	return nil
-}
-
-// extractTelegramExport 从 Telegram Desktop 导出的 JSON 里抽取消息文本。
-//
-// 之所以解析导出文件而不是调 Bot API：getUpdates 只返回最近 24 小时且要求未
-// 设置 webhook，**拿不到频道完整历史**。导出聊天记录才是可取回历史的路径。
-func extractTelegramExport(data []byte) (string, error) {
-	var dump struct {
-		Messages []struct {
-			Text json.RawMessage `json:"text"`
-		} `json:"messages"`
-	}
-	if err := json.Unmarshal(data, &dump); err != nil {
-		return "", fmt.Errorf("不是有效的 Telegram 导出 JSON: %w", err)
-	}
-	if len(dump.Messages) == 0 {
-		return "", fmt.Errorf("导出文件里没有 messages 数组（请确认用的是「导出聊天记录 → JSON」）")
-	}
-	var sb strings.Builder
-	for _, m := range dump.Messages {
-		var s string
-		if err := json.Unmarshal(m.Text, &s); err == nil {
-			sb.WriteString(s)
-			sb.WriteByte('\n')
-			continue
-		}
-		// 富文本消息会被导出成数组：[{"type":"plain","text":"..."}, ...]
-		var parts []any
-		if err := json.Unmarshal(m.Text, &parts); err != nil {
-			continue
-		}
-		for _, p := range parts {
-			switch v := p.(type) {
-			case string:
-				sb.WriteString(v)
-			case map[string]any:
-				if t, ok := v["text"].(string); ok {
-					sb.WriteString(t)
-				}
-			}
-		}
-		sb.WriteByte('\n')
-	}
-	return sb.String(), nil
 }

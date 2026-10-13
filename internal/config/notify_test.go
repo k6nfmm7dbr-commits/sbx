@@ -1,176 +1,145 @@
 package config
 
 import (
-	"errors"
+	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 )
 
-const okBotToken = "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw"
+const validFeishuHook = `https://open.feishu.cn/open-apis/bot/v2/hook/1111aaaa-2222-bbbb-3333-cccc4444dddd`
 
-// TestParseNotifyJSONAccepts 覆盖五种渠道的合法配置。
+// TestParseNotifyJSONAccepts 覆盖合法配置的多种写法。
 func TestParseNotifyJSONAccepts(t *testing.T) {
 	cases := []struct {
 		name string
 		in   string
 	}{
-		{"未启用", `{"enabled":false}`},
-		{"最小可用", `{"enabled":true,"channels":[{"type":"telegram","bot_token":"` + okBotToken + `","chat_id":"-1001234567890"}]}`},
-		{"企业微信", `{"enabled":true,"channels":[{"type":"wxwork","webhook":"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abcd-1234"}]}`},
-		{"企业微信markdown", `{"enabled":true,"channels":[{"type":"wxwork","webhook":"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abcd","msgtype":"markdown"}]}`},
-		{"Server酱", `{"enabled":true,"channels":[{"type":"serverchan","sendkey":"SCTabc123"}]}`},
-		{"PushPlus", `{"enabled":true,"channels":[{"type":"pushplus","sendkey":"abcdef1234567890abcdef1234567890"}]}`},
-		{"WxPusher 极简", `{"enabled":true,"channels":[{"type":"wxpusher","spt":"SPT_abc123"}]}`},
-		{"WxPusher 标准", `{"enabled":true,"channels":[{"type":"wxpusher","app_token":"AT_abc123","uids":["UID_xyz"]}]}`},
-		{"WxPusher 主题", `{"enabled":true,"channels":[{"type":"wxpusher","app_token":"AT_abc123","topic_ids":[123]}]}`},
-		{"通用webhook", `{"enabled":true,"channels":[{"type":"webhook","url":"https://example.com/hook","secret":"s3cret"}]}`},
-		{"自定义间隔与日结时刻", `{"enabled":true,"interval_minutes":5,"daily_at":"00:01","timeout_seconds":15,"channels":[{"type":"webhook","url":"http://127.0.0.1:9000/hook"}]}`},
-		{"带心跳地址", `{"enabled":true,"heartbeat_url":"https://hc-ping.com/uuid","channels":[{"type":"webhook","url":"https://e.com/h"}]}`},
+		{"最小配置", `{"enabled":true,"type":"feishu","webhook":"` + validFeishuHook + `","daily_at":"00:05"}`},
+		{"带签名密钥", `{"enabled":true,"type":"feishu","webhook":"` + validFeishuHook + `","secret":"s3cr3t","daily_at":"09:00"}`},
+		{"省略 type 时默认 feishu", `{"enabled":true,"webhook":"` + validFeishuHook + `","daily_at":"23:59"}`},
+		{"未启用时可留半配置", `{"enabled":false,"type":"feishu","daily_at":"00:05"}`},
+		{"空对象即显式关闭", `{}`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			nc, err := ParseNotifyJSON([]byte(c.in))
-			if err != nil {
-				t.Fatalf("应接受该配置: %v", err)
-			}
-			if nc == nil {
-				t.Fatal("不应返回 nil")
-			}
-			if nc.IntervalMinutes < 1 || nc.DailyAt == "" || nc.TimeoutSeconds < 3 {
-				t.Errorf("默认值未补齐: %+v", nc)
-			}
-			for i := range nc.Channels {
-				if len(nc.Channels[i].Events) == 0 {
-					t.Errorf("渠道 %d 的 events 应有默认值", i)
-				}
-				if nc.Channels[i].Name == "" {
-					t.Errorf("渠道 %d 应有默认 name", i)
-				}
+			if _, err := ParseNotifyJSON([]byte(c.in)); err != nil {
+				t.Fatalf("应通过，实得错误: %v", err)
 			}
 		})
 	}
 }
 
 // TestParseNotifyJSONRejects 逐条覆盖 fail-closed 规则。
-// 这些规则的意义在于"配了却没生效"比"配置错误"更难排查。
 func TestParseNotifyJSONRejects(t *testing.T) {
 	cases := []struct {
 		name string
 		in   string
 	}{
-		{"启用但无渠道", `{"enabled":true,"channels":[]}`},
-		{"间隔过大", `{"enabled":true,"interval_minutes":1441,"channels":[{"type":"webhook","url":"https://e.com/h"}]}`},
-		{"日结时刻非法", `{"enabled":true,"daily_at":"25:00","channels":[{"type":"webhook","url":"https://e.com/h"}]}`},
-		{"日结时刻格式错", `{"enabled":true,"daily_at":"1:5","channels":[{"type":"webhook","url":"https://e.com/h"}]}`},
-		{"超时过短", `{"enabled":true,"timeout_seconds":1,"channels":[{"type":"webhook","url":"https://e.com/h"}]}`},
-		{"心跳地址非http", `{"enabled":true,"heartbeat_url":"ftp://x/y","channels":[{"type":"webhook","url":"https://e.com/h"}]}`},
-		{"未知渠道类型", `{"enabled":true,"channels":[{"type":"slack"}]}`},
-		{"telegram缺token", `{"enabled":true,"channels":[{"type":"telegram","bot_token":"nope","chat_id":"1"}]}`},
-		{"telegram缺chatid", `{"enabled":true,"channels":[{"type":"telegram","bot_token":"` + okBotToken + `","chat_id":""}]}`},
-		{"企业微信非白名单域名", `{"enabled":true,"channels":[{"type":"wxwork","webhook":"https://evil.example.com/hook?key=abcd"}]}`},
-		{"企业微信非https", `{"enabled":true,"channels":[{"type":"wxwork","webhook":"http://qyapi.weixin.qq.com/x?key=abcd"}]}`},
-		{"企业微信缺key", `{"enabled":true,"channels":[{"type":"wxwork","webhook":"https://qyapi.weixin.qq.com/cgi-bin/webhook/send"}]}`},
-		{"企业微信msgtype非法", `{"enabled":true,"channels":[{"type":"wxwork","webhook":"https://qyapi.weixin.qq.com/x?key=a","msgtype":"card"}]}`},
-		{"Server酱sendkey格式错", `{"enabled":true,"channels":[{"type":"serverchan","sendkey":"abc"}]}`},
-		{"PushPlus token过短", `{"enabled":true,"channels":[{"type":"pushplus","sendkey":"short"}]}`},
-		// 把 AT_ 开头的 appToken 误填进 spt 是最容易犯的错：
-		// 不拦住的话会请求到错误的端点并失败，且报错很不直观。
-		{"WxPusher 把 appToken 填进 spt", `{"enabled":true,"channels":[{"type":"wxpusher","spt":"AT_abc123"}]}`},
-		{"WxPusher 缺凭据", `{"enabled":true,"channels":[{"type":"wxpusher"}]}`},
-		{"WxPusher 标准缺 uids", `{"enabled":true,"channels":[{"type":"wxpusher","app_token":"AT_abc123"}]}`},
-		{"WxPusher uids 含空值", `{"enabled":true,"channels":[{"type":"wxpusher","app_token":"AT_abc123","uids":[""]}]}`},
-		{"webhook非http", `{"enabled":true,"channels":[{"type":"webhook","url":"ftp://example.com/x"}]}`},
-		{"webhook缺host", `{"enabled":true,"channels":[{"type":"webhook","url":"https://"}]}`},
-		{"webhook max_bytes过小", `{"enabled":true,"channels":[{"type":"webhook","url":"https://e.com/h","max_bytes":10}]}`},
-		{"events含未知值", `{"enabled":true,"channels":[{"type":"webhook","url":"https://e.com/h","events":["hourly"]}]}`},
-		{"顶层不是对象", `"just a string"`},
-		{"非法JSON", `{`},
+		{"非对象", `"just a string"`},
+		{"类型不支持", `{"enabled":true,"type":"telegram","webhook":"` + validFeishuHook + `","daily_at":"00:05"}`},
+		{"webhook 为空", `{"enabled":true,"type":"feishu","webhook":"","daily_at":"00:05"}`},
+		{"webhook 用 http", `{"enabled":true,"type":"feishu","webhook":"http://open.feishu.cn/open-apis/bot/v2/hook/x","daily_at":"00:05"}`},
+		{"webhook 主机错误", `{"enabled":true,"type":"feishu","webhook":"https://evil.example.com/open-apis/bot/v2/hook/x","daily_at":"00:05"}`},
+		{"webhook 路径错误", `{"enabled":true,"type":"feishu","webhook":"https://open.feishu.cn/other/hook/x","daily_at":"00:05"}`},
+		{"webhook 缺 token", `{"enabled":true,"type":"feishu","webhook":"https://open.feishu.cn/open-apis/bot/v2/hook/","daily_at":"00:05"}`},
+		{"daily_at 非法", `{"enabled":true,"type":"feishu","webhook":"` + validFeishuHook + `","daily_at":"24:00"}`},
+		{"daily_at 非时刻", `{"enabled":true,"type":"feishu","webhook":"` + validFeishuHook + `","daily_at":"noon"}`},
+		{"timeout 越界", `{"enabled":true,"type":"feishu","webhook":"` + validFeishuHook + `","daily_at":"00:05","timeout_seconds":120}`},
+		{"secret 含控制字符", `{"enabled":true,"type":"feishu","webhook":"` + validFeishuHook + `","daily_at":"00:05","secret":"a\u0007b"}`},
+		{"secret 过长", `{"enabled":true,"type":"feishu","webhook":"` + validFeishuHook + `","daily_at":"00:05","secret":"` + strings.Repeat("x", 300) + `"}`},
+		{"尾部有多余内容", `{"enabled":false} {"x":1}`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			if nc, err := ParseNotifyJSON([]byte(c.in)); err == nil {
-				t.Fatalf("应拒绝该配置，实得 %+v", nc)
+				t.Fatalf("应被拒绝，却通过了: %+v", nc)
 			}
 		})
 	}
 }
 
-func TestNotifyEventsDefaultAndFilter(t *testing.T) {
-	nc, err := ParseNotifyJSON([]byte(`{"enabled":true,"channels":[{"type":"webhook","url":"https://e.com/h"}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	ch := &nc.Channels[0]
-	if !ch.HasEvent(EventHeartbeat) || !ch.HasEvent(EventDaily) {
-		t.Error("未声明 events 时应订阅全部事件")
-	}
-	if ch.HasEvent("weekly") {
-		t.Error("不应出现未声明的事件")
-	}
-
-	nc2, err := ParseNotifyJSON([]byte(`{"enabled":true,"channels":[{"type":"webhook","url":"https://e.com/h","events":["daily"]}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	ch2 := &nc2.Channels[0]
-	if ch2.HasEvent(EventHeartbeat) {
-		t.Error("显式限定 events 时应严格按声明过滤")
-	}
-	if !ch2.HasEvent(EventDaily) {
-		t.Error("声明的 daily 应生效")
-	}
-}
-
-// TestDisabledSkipsChannelValidation：允许保留半配置状态，
-// 这样用户可先禁用再慢慢调整渠道，而不必删掉整段配置。
-func TestDisabledSkipsChannelValidation(t *testing.T) {
-	nc, err := ParseNotifyJSON([]byte(`{"enabled":false,"channels":[{"type":"telegram","bot_token":"bad","chat_id":""}]}`))
-	if err != nil {
-		t.Fatalf("未启用时不应校验渠道: %v", err)
-	}
-	if nc == nil {
-		t.Fatal("应返回解析结果")
-	}
-}
-
+// TestNotifyDefaultsApplied 确认省略字段取默认值，而不是留成零值。
 func TestNotifyDefaultsApplied(t *testing.T) {
-	nc, err := ParseNotifyJSON([]byte(`{"enabled":true,"channels":[{"type":"webhook","url":"https://e.com/h"}]}`))
+	nc, err := ParseNotifyJSON([]byte(`{"enabled":true,"webhook":"` + validFeishuHook + `","daily_at":"00:05"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if nc.IntervalMinutes != defaultNotifyIntervalMinutes {
-		t.Errorf("默认间隔应为 %d, 实得 %d", defaultNotifyIntervalMinutes, nc.IntervalMinutes)
-	}
-	if nc.DailyAt != defaultNotifyDailyAt {
-		t.Errorf("默认日结时刻应为 %s, 实得 %s", defaultNotifyDailyAt, nc.DailyAt)
+	if nc.Type != ChannelFeishu {
+		t.Errorf("省略 type 应默认为 %q, 实得 %q", ChannelFeishu, nc.Type)
 	}
 	if nc.TimeoutSeconds != defaultNotifyTimeoutSeconds {
 		t.Errorf("默认超时应为 %d, 实得 %d", defaultNotifyTimeoutSeconds, nc.TimeoutSeconds)
 	}
-	if nc.Channels[0].MaxBytes != defaultWebhookMaxBytes {
-		t.Errorf("webhook 默认 max_bytes 应为 %d, 实得 %d", defaultWebhookMaxBytes, nc.Channels[0].MaxBytes)
+	nc2, err := ParseNotifyJSON([]byte(`{"enabled":true,"webhook":"` + validFeishuHook + `"}`))
+	if err != nil {
+		t.Fatal(err)
 	}
-	// 渠道名默认形如 webhook#1
-	if !strings.HasPrefix(nc.Channels[0].Name, "webhook") {
-		t.Errorf("默认渠道名不符合预期: %q", nc.Channels[0].Name)
+	if nc2.DailyAt != defaultNotifyDailyAt {
+		t.Errorf("默认日报时刻应为 %s, 实得 %s", defaultNotifyDailyAt, nc2.DailyAt)
 	}
 }
 
-// TestConfigValidateSurfacesNotifyErrors 确认 notify 的错误会经 LoadStrict 上抛，
-// 而不是被静默忽略。
-func TestConfigValidateSurfacesNotifyErrors(t *testing.T) {
-	c := &Config{raw: defaultConf()}
-	c.normalize()
-	c.Notify = nil
-	c.notifyErr = nil
-	if err := c.Validate(); err != nil {
-		t.Fatalf("无 notify 配置时不应报错: %v", err)
+// TestNotifyLegacyFormatTreatedAsUnconfigured 确认旧版多渠道配置不会导致启动失败。
+//
+// 这是刻意的例外：配置格式变更若让面板整体启动不了，代价远大于"暂时没有日报"。
+// 但必须降级为"未配置"（而不是半读半用），否则会出现难以理解的推送行为。
+func TestNotifyLegacyFormatTreatedAsUnconfigured(t *testing.T) {
+	legacy := []string{
+		`{"enabled":true,"interval_minutes":30,"channels":[{"type":"telegram","bot_token":"1:AAAA"}]}`,
+		`{"enabled":true,"channels":[]}`,
+		`{"enabled":false,"channels":[{"type":"webhook","url":"https://e.com/h"}]}`,
+	}
+	for _, in := range legacy {
+		v := decodeAny(t, in)
+		nc, err := parseNotify(v)
+		if err != nil {
+			t.Fatalf("旧格式不应报错（应降级为未配置）: %v", err)
+		}
+		if nc != nil {
+			t.Fatalf("旧格式必须按未配置处理, 实得 %+v", nc)
+		}
+	}
+}
+
+// TestNotifyViaLoadStrictFailClosed 确认非法配置会经 LoadStrict 上抛，拒绝启动。
+func TestNotifyViaLoadStrictFailClosed(t *testing.T) {
+	base := `{"listen":"127.0.0.1","port":9999,"token":"t","nft_conf":"/etc/sbx/nft.conf"`
+
+	// 未配置：正常
+	path := strictEnv(t)
+	mustWrite(t, path, base+`}`)
+	if _, err := LoadStrict(); err != nil {
+		t.Fatalf("无 notify 段不应报错: %v", err)
 	}
 
-	c2 := &Config{raw: defaultConf()}
-	c2.normalize()
-	c2.notifyErr = errors.New("fake")
-	if err := c2.Validate(); err == nil {
-		t.Error("notify 解析错误必须上抛（LoadStrict fail-closed）")
+	// 非法 notify：必须上抛
+	path = strictEnv(t)
+	mustWrite(t, path, base+`,"notify":{"enabled":true,"type":"feishu",`+
+		`"webhook":"https://evil.example.com/open-apis/bot/v2/hook/x","daily_at":"00:05"}}`)
+	if _, err := LoadStrict(); err == nil {
+		t.Error("非法 webhook 必须导致 LoadStrict 报错（fail-closed）")
 	}
+
+	// 合法 notify：正常，且被解析为已启用
+	path = strictEnv(t)
+	mustWrite(t, path, base+`,"notify":{"enabled":true,"type":"feishu","webhook":"`+validFeishuHook+`","daily_at":"00:05"}}`)
+	c, err := LoadStrict()
+	if err != nil {
+		t.Fatalf("合法 notify 不应报错: %v", err)
+	}
+	if c.Notify == nil || !c.Notify.Enabled {
+		t.Fatal("notify 应被解析为已启用")
+	}
+}
+
+func decodeAny(t *testing.T, s string) any {
+	t.Helper()
+	dec := json.NewDecoder(bytes.NewReader([]byte(s)))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		t.Fatalf("测试输入不是合法 JSON: %v", err)
+	}
+	return v
 }
