@@ -1901,219 +1901,109 @@ main_menu() {
   done
 }
 
-# ---------------------------------------------------------------- 流量推送
+# ---------------------------------------------------------------- 流量日报
 
-# notify_safe_value 拒绝会破坏 JSON 拼接的输入（双引号、反斜杠、控制字符）。
-# 值本身仍会由 sbx-core 做格式白名单校验，这里只是避免拼出坏 JSON。
+# notify_safe_value 拒绝会破坏参数传递的输入（控制字符，含换行）。
+# 值本身仍会由 sbx-core 做格式白名单校验（含 webhook 域名锁定），两层分工明确。
 notify_safe_value() {
-  if [[ "$1" == *'"'* || "$1" == *'\'* || "$1" =~ [[:cntrl:]] ]]; then
-    return 1
-  fi
+  [[ "$1" =~ [[:cntrl:]] ]] && return 1
   return 0
 }
 
-# notify_pick_events 让用户选择订阅哪些事件，输出 JSON 数组字面量。
+# menu_notify_setup 收集 webhook / 密钥 / 时刻并写入配置。
 #
-# 提示必须走 stderr：调用方用 $(...) 捕获本函数的输出拼进 JSON，
-# 提示若走 stdout 会被一并捕获，拼出带中文的非法 JSON。
-notify_pick_events() {
-  printf '推送哪些事件? 1) 全部(心跳+日结) 2) 只要日结 3) 只要心跳 [1]: ' >&2
-  local e; read -r e || true
-  case "$e" in
-    2) printf '["daily"]' ;;
-    3) printf '["heartbeat"]' ;;
-    *) printf '["heartbeat","daily"]' ;;
-  esac
-}
-
-menu_notify_add() {
+# 刻意把"拼配置"交给 sbx-core 的 notify-config enable（按位置收参数），
+# 而不是在 shell 里拼 JSON：shell 拼 JSON 极易写出坏结构，而且报错极难查。
+menu_notify_setup() {
   banner
-  printf '%s添加推送渠道%s\n\n' "$C_B" "$C_RESET"
-  echo "  1) WxPusher（推荐：扫码即用，免注册免实名）"
-  echo "  2) Telegram"
-  echo "  3) 通用 Webhook（可对接 ntfy / Bark / 自建服务）"
-  echo "  4) 企业微信群机器人"
-  echo "  5) Server酱"
-  echo "  6) PushPlus"
-  echo "  0) 返回"
-  echo
-  printf '请选择渠道类型: '
-  local t; read -r t || true
-  case "$t" in
-    1|2|3|4|5|6) ;;
-    *) return 0 ;;
-  esac
+  printf '%s配置飞书日报%s\n\n' "$C_B" "$C_RESET"
+  echo "在飞书群里添加「自定义机器人」后会得到一条 webhook 地址，形如:"
+  printf '  %shttps://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx%s\n\n' "$C_DIM" "$C_RESET"
 
-  local v u m body=""
-  case "$t" in
-    1) echo
-       echo "  1) 极简模式（SPT，扫码即得，推荐）"
-       echo "  2) 标准模式（appToken + UID）"
-       printf '  请选择 [1]: '; read -r m || true
-       if [[ "$m" != "2" ]]; then
-         printf 'SPT（形如 SPT_xxxx）: '; read -r v || true
-         notify_safe_value "$v" || { warn "输入含非法字符（引号/反斜杠），已取消"; return 0; }
-         [[ -n "$v" ]] || { warn "不能为空"; return 0; }
-         body=$(printf '{"type":"wxpusher","name":"wxpusher-spt","spt":"%s"}' "$v")
-       else
-         printf 'appToken（形如 AT_xxxx）: '; read -r v || true
-         notify_safe_value "$v" || { warn "输入含非法字符，已取消"; return 0; }
-         printf 'UID（形如 UID_xxxx）: '; read -r u || true
-         notify_safe_value "$u" || { warn "输入含非法字符，已取消"; return 0; }
-         [[ -n "$v" && -n "$u" ]] || { warn "不能为空"; return 0; }
-         body=$(printf '{"type":"wxpusher","name":"wxpusher","app_token":"%s","uids":["%s"]}' "$v" "$u")
-       fi ;;
-    2) echo
-       printf 'bot_token（形如 123456789:AA...）: '; read -r v || true
-       notify_safe_value "$v" || { warn "输入含非法字符，已取消"; return 0; }
-       printf 'chat_id（形如 -1001234567890）: '; read -r u || true
-       notify_safe_value "$u" || { warn "输入含非法字符，已取消"; return 0; }
-       [[ -n "$v" && -n "$u" ]] || { warn "不能为空"; return 0; }
-       body=$(printf '{"type":"telegram","name":"telegram","bot_token":"%s","chat_id":"%s"}' "$v" "$u") ;;
-    3) echo
-       printf 'Webhook URL（http/https）: '; read -r v || true
-       notify_safe_value "$v" || { warn "输入含非法字符，已取消"; return 0; }
-       [[ -n "$v" ]] || { warn "不能为空"; return 0; }
-       printf '签名密钥 secret（可留空）: '; read -r u || true
-       notify_safe_value "$u" || { warn "输入含非法字符，已取消"; return 0; }
-       if [[ -n "$u" ]]; then
-         body=$(printf '{"type":"webhook","name":"webhook","url":"%s","secret":"%s"}' "$v" "$u")
-       else
-         body=$(printf '{"type":"webhook","name":"webhook","url":"%s"}' "$v")
-       fi ;;
-    4) echo
-       printf '群机器人 Webhook URL: '; read -r v || true
-       notify_safe_value "$v" || { warn "输入含非法字符，已取消"; return 0; }
-       [[ -n "$v" ]] || { warn "不能为空"; return 0; }
-       body=$(printf '{"type":"wxwork","name":"wxwork","webhook":"%s"}' "$v") ;;
-    5) echo
-       printf 'SendKey（形如 SCTxxxx）: '; read -r v || true
-       notify_safe_value "$v" || { warn "输入含非法字符，已取消"; return 0; }
-       [[ -n "$v" ]] || { warn "不能为空"; return 0; }
-       body=$(printf '{"type":"serverchan","name":"serverchan","sendkey":"%s"}' "$v") ;;
-    6) echo
-       printf 'pushplus token（32 位）: '; read -r v || true
-       notify_safe_value "$v" || { warn "输入含非法字符，已取消"; return 0; }
-       [[ -n "$v" ]] || { warn "不能为空"; return 0; }
-       body=$(printf '{"type":"pushplus","name":"pushplus","sendkey":"%s"}' "$v") ;;
-  esac
+  local hook secret at
+  printf 'Webhook 地址: '
+  read -r hook || true
+  hook="${hook//[[:space:]]/}"
+  [[ -n "$hook" ]] || { warn "不能为空"; return 0; }
+  notify_safe_value "$hook" || { warn "输入含控制字符，已取消"; return 0; }
 
-  # 把 events 注入渠道对象（去掉结尾的 } 再补上）。
-  local ev; ev=$(notify_pick_events)
-  body="${body%?},\"events\":$ev}"
+  printf '签名密钥 secret（可选，直接回车表示不用签名）: '
+  read -r secret || true
+  notify_safe_value "$secret" || { warn "输入含控制字符，已取消"; return 0; }
 
-  local tmp rc
-  tmp=$(mktemp)
-  printf '%s' "$body" > "$tmp"
-  rc=0
-  # 用 || 捕获退出码：既避免 set -e 因校验失败而把整个菜单带崩，
-  # 也避免 `local rc=$?` 触发 SC2155。
-  "$CORE_BIN" notify-config add-channel "$tmp" || rc=$?
-  rm -f "$tmp"
+  printf '每天几点发送日报 [00:05]: '
+  read -r at || true
+  [[ -n "$at" ]] || at="00:05"
+
+  local rc=0
+  "$CORE_BIN" notify-config enable "$hook" "$secret" "$at" || rc=$?
   [[ $rc -eq 0 ]] || return 0
-
   echo
-  case "$t" in
-    1) printf '%s重要%s: WxPusher 建议用独立 App 接收。\n' "$C_YEL" "$C_RESET"
-       echo "      它的微信通道 24 小时只能收 10 条，装不下每 30 分钟一次的心跳。"
-       echo "      在手机装 WxPusher 客户端并登录，即走无条数限制的 App 通道。" ;;
-    5) printf '%s提示%s: Server酱免费版每天只有个位数条数，建议只勾「只要日结」。\n' "$C_YEL" "$C_RESET" ;;
-    2) echo "提示: Telegram 需要服务器能直连 api.telegram.org，否则收不到。" ;;
-  esac
-  echo "接着执行「发送测试推送」确认能收到。"
+  echo "接着选「发送测试推送」，确认飞书群里能收到卡片。"
 }
 
-menu_notify_del() {
+menu_notify_time() {
   banner
-  printf '%s删除推送渠道%s\n\n' "$C_B" "$C_RESET"
-  "$CORE_BIN" notify-config status 2>/dev/null | sed 's/^/  /'
-  echo
-  printf '输入要删除的序号或渠道名（回车取消）: '
-  local k; read -r k || true
-  [[ -z "$k" ]] && { echo "已取消"; return 0; }
-  printf '确认删除 %s ? [y/N] ' "$k"
-  local yn; read -r yn || true
-  [[ "${yn,,}" == "y" ]] || { echo "已取消"; return 0; }
-  "$CORE_BIN" notify-config remove-channel "$k"
+  printf '%s修改日报发送时刻%s\n\n' "$C_B" "$C_RESET"
+  printf '每天早上几点发送（24 小时制 HH:MM，如 00:05 / 09:00）: '
+  local t; read -r t || true
+  [[ -n "$t" ]] || { echo "已取消"; return 0; }
+  "$CORE_BIN" notify-config set-time "$t"
 }
 
-menu_notify_options() {
+menu_notify_toggle() {
   banner
-  printf '%s推送全局选项%s\n\n' "$C_B" "$C_RESET"
-  "$CORE_BIN" notify-config status 2>/dev/null | sed 's/^/  /'
-  echo
-  echo "  1) 启用 / 关闭推送"
-  echo "  2) 修改心跳间隔（分钟）"
-  echo "  3) 修改日结时刻（HH:MM）"
-  echo "  4) 设置死手开关 URL（可选）"
-  echo "  0) 返回"
-  echo
-  printf '请选择: '
-  local c n t u; read -r c || true
-  case "$c" in
-    1) if "$CORE_BIN" notify-config status 2>/dev/null | head -1 | grep -q "已启用"; then
-         "$CORE_BIN" notify-config set-option enabled false
-       else
-         "$CORE_BIN" notify-config set-option enabled true
-       fi ;;
-    2) printf '心跳间隔分钟数 (1-1440): '; read -r n || true
-       if [[ "$n" =~ ^[0-9]+$ ]] && ((n >= 1 && n <= 1440)); then
-         "$CORE_BIN" notify-config set-option interval_minutes "$n"
-       else
-         warn "无效数值"
-       fi ;;
-    3) printf '日结时刻 HH:MM（如 00:05）: '; read -r t || true
-       [[ -n "$t" ]] && "$CORE_BIN" notify-config set-option daily_at "$t" ;;
-    4) printf '死手开关 URL（如 https://hc-ping.com/uuid，留空则清除）: '; read -r u || true
-       "$CORE_BIN" notify-config set-option heartbeat_url "$u" ;;
-    0|"") return 0 ;;
-    *) warn "无效选择" ;;
-  esac
+  printf '%s启用 / 停用%s\n\n' "$C_B" "$C_RESET"
+  local on="false"
+  "$CORE_BIN" notify-config status 2>/dev/null | head -1 | grep -q "已启用" && on="true"
+  if [[ "$on" == "true" ]]; then
+    "$CORE_BIN" notify-config set-enabled false
+  else
+    # 重新启用不需要重新粘贴 webhook：配置本身就存着。
+    # 若配置不完整，sbx-core 会拒绝并说明缺什么。
+    "$CORE_BIN" notify-config set-enabled true
+  fi
 }
 
 menu_notify_help() {
   banner
-  printf '%s怎么选推送渠道%s\n\n' "$C_B" "$C_RESET"
-  echo "  WxPusher      扫码即得 SPT，免注册免实名。用独立 App 接收，"
-  echo "                单日约 3000 条后才不提醒 —— 最适合心跳。"
-  echo "                （注意：微信通道 24 小时只能收 10 条，别指望它跑心跳）"
+  printf '%s怎么配置飞书日报%s\n\n' "$C_B" "$C_RESET"
+  echo "  1) 在飞书里建一个群（只有你自己也行），或用现有群"
+  echo "  2) 群设置 → 群机器人 → 添加机器人 → 自定义机器人"
+  echo "  3) 复制它给出的 Webhook 地址"
+  echo "  4) 回到这里选「配置 / 修改」，粘贴地址即可"
   echo
-  echo "  Telegram      收全部事件最省心，消息可导出、最适合当备份载体。"
-  echo "                需要服务器能直连 api.telegram.org。"
+  echo "  可选：在机器人设置里开启「签名校验」，把密钥一并填进来。"
+  echo "        开启后即使 webhook 泄露，别人也无法往你的群发消息。"
   echo
-  echo "  PushPlus      推到你微信里。但自 2024-08 起未实名无法调用；"
-  echo "                实名后 200 条/天，够用。"
+  printf '%s推送什么%s: 每天一条卡片 = 前一天全天流量 + 全部历史账本。\n' "$C_YEL" "$C_RESET"
+  echo "  服务器若在当天中途崩溃/断电，重启后会立刻补推一条「今日截至当前」。"
   echo
-  echo "  Server酱      推到你微信里。免费版每天只有个位数条数，只够日结。"
-  echo
-  echo "  通用 Webhook  自建服务 / ntfy / Bark 等都能对接；"
-  echo "                接收 JSON，含 text、nodes、replay 字段，可配 HMAC 签名。"
-  echo
-  printf '%s接收端提醒%s: 微信没有开放给个人的主动推送接口，任何"推到微信"\n' "$C_YEL" "$C_RESET"
-  echo "  都受限。要高频收推送，优先选 WxPusher App 或 Telegram。"
+  printf '%s注意%s: 采集与推送无关——不配推送，流量统计照常运行。\n' "$C_YEL" "$C_RESET"
+  echo "  但日报只留在飞书里，无法自动回灌数据库：整机损毁时历史数据不可恢复。"
 }
 
 menu_notify() {
   while :; do
     banner
-    printf '%s流量推送配置%s\n\n' "$C_B" "$C_RESET"
+    printf '%s流量日报配置%s\n\n' "$C_B" "$C_RESET"
     "$CORE_BIN" notify-config status 2>/dev/null | sed 's/^/  /'
     echo
-    echo "  1) 添加推送渠道"
-    echo "  2) 删除推送渠道"
-    echo "  3) 全局选项（启用/关闭、频率、日结时刻、死手开关）"
-    echo "  4) 查看当前配置（凭据脱敏）"
+    echo "  1) 配置 / 修改（飞书群机器人）"
+    echo "  2) 修改发送时刻"
+    echo "  3) 启用 / 停用"
+    echo "  4) 查看当前配置（凭据已脱敏）"
     echo "  5) 发送测试推送"
-    echo "  6) 怎么选渠道 / 说明"
+    echo "  6) 怎么配置飞书机器人"
     echo "  0) 返回"
     echo
     printf '请选择: '
     local c; read -r c || true
     case "$c" in
-      1) menu_notify_add; pause ;;
-      2) menu_notify_del; pause ;;
-      3) menu_notify_options; pause ;;
-      4) hr; "$CORE_BIN" notify-config get; hr; pause ;;
+      1) menu_notify_setup; pause ;;
+      2) menu_notify_time; pause ;;
+      3) menu_notify_toggle; pause ;;
+      4) hr; "$CORE_BIN" notify-config show; hr; pause ;;
       5) hr; "$CORE_BIN" notify-test; hr; pause ;;
       6) menu_notify_help; pause ;;
       0|"") return 0 ;;
