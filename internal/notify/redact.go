@@ -1,12 +1,12 @@
-// Package notify 实现流量数据的定时外推与"异地留痕"：
-// 按固定节奏把当日/前日流量推送到 IM 或 Webhook，并在每条消息里内嵌一段
-// 可机器解析的数据（SBX1 行），使聊天记录本身成为可回放的备份。
+// Package notify 实现流量日报的定时外推：
+// 每天在配置的时刻把「截至当日」的完整流量账本渲染成一张飞书卡片推到群里，
+// 并在检测到上次是异常退出（崩溃/断电）时补推一条「今日截至当前」的卡片。
 //
 // 设计边界（必须保持）：
 //   - 推送失败绝不影响采集、策略与 HTTP 服务；
 //   - 本包对 daily/totals/samples/counter_state/node_policy 一律只读，
-//     只写 meta 表里 notify_* 前缀的三个键；
-//   - 凭据不得出现在日志、错误或任何面向用户的输出里（见 redact.go）。
+//     只写 meta 表里 notify_* 前缀的键；
+//   - 凭据不得出现在日志、错误或任何面向用户的输出里（见本文件）。
 package notify
 
 import (
@@ -18,24 +18,19 @@ import (
 	"strings"
 )
 
-// reBareBotToken 匹配裸文本里的 Telegram bot token（<数字>:<token>）。
-var reBareBotToken = regexp.MustCompile(`[0-9]{5,}:[A-Za-z0-9_-]{20,}`)
+// reFeishuHookPath 匹配飞书 webhook 路径里的 hook token。
+var reFeishuHookPath = regexp.MustCompile(`/open-apis/bot/v2/hook/[A-Za-z0-9_-]+`)
 
-// reBareSendKey 匹配裸文本里的 Server酱 sendkey。
-var reBareSendKey = regexp.MustCompile(`SCT[A-Za-z0-9]{6,}`)
-
-// reBotPath 匹配 Telegram API 路径里的 bot token。
-var reBotPath = regexp.MustCompile(`/bot[0-9]+:[A-Za-z0-9_-]+`)
-
-// reSendKeyPath 匹配 Server酱 路径里的 sendkey。
-var reSendKeyPath = regexp.MustCompile(`/SCT[A-Za-z0-9]+`)
+// reBareFeishuHook 匹配裸文本里的飞书 webhook 地址（保留前缀，只抹 token）。
+// 用于错误信息中残留完整 URL 的兜底场景。
+var reBareFeishuHook = regexp.MustCompile(`(open\.feishu\.cn/open-apis/bot/v2/hook/)[A-Za-z0-9_-]+`)
 
 // RedactURL 对 URL 做脱敏，保留足够的排查信息（scheme / host / 路径结构 / query 的键名），
 // 抹掉所有可能承载凭据的部分：
 //   - userinfo → ***
 //   - query 的值 → ***（键名保留）
 //   - fragment 整体丢弃
-//   - 路径里的 Telegram bot token（/bot<id>:<token>）与 Server酱 sendkey（/SCT...）→ ***
+//   - 路径里的飞书 hook token（/open-apis/bot/v2/hook/<token>）→ ***
 //
 // 无法解析为 URL 时退化为对裸凭据模式的正则替换。
 func RedactURL(raw string) string {
@@ -66,13 +61,7 @@ func redactPath(p string) string {
 	if p == "" {
 		return ""
 	}
-	if reBotPath.MatchString(p) {
-		p = reBotPath.ReplaceAllString(p, "/bot***")
-	}
-	if reSendKeyPath.MatchString(p) {
-		p = reSendKeyPath.ReplaceAllString(p, "/***")
-	}
-	return p
+	return reFeishuHookPath.ReplaceAllString(p, "/open-apis/bot/v2/hook/***")
 }
 
 func redactQuery(q string) string {
@@ -87,39 +76,22 @@ func redactQuery(q string) string {
 
 // redactBare 对不是合法 URL 的文本做兜底脱敏。
 func redactBare(s string) string {
-	s = reBareBotToken.ReplaceAllString(s, "***")
-	return reBareSendKey.ReplaceAllString(s, "***")
+	return reBareFeishuHook.ReplaceAllString(s, "${1}***")
 }
 
-// RedactSecret 脱敏单个凭据。Telegram bot token 保留 bot id（便于判断是哪个 bot），
-// 其余一律替换，绝不回显 token 本体。
+// RedactSecret 脱敏单个密钥。飞书签名密钥是用户自设的普通字符串，
+// 没有任何"可用于识别的非敏感部分"，因此一律替换，绝不回显。
 func RedactSecret(s string) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
+	if strings.TrimSpace(s) == "" {
 		return ""
 	}
-	if i := strings.Index(s, ":"); i > 0 && isAllDigits(s[:i]) {
-		return s[:i] + ":***"
-	}
 	return "***"
-}
-
-func isAllDigits(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
 }
 
 // SafeErr 把错误转成可安全写入日志的字符串。
 //
 // 这是本包最容易踩的坑：net/http 会把请求错误包装成 *url.Error，而它的 Error()
-// **包含完整 URL**——直接 slog.Warn("...", "err", err) 就会把 ?key=... 打进日志。
+// **包含完整 URL**——直接 slog.Warn("...", "err", err) 就会把 hook token 打进日志。
 // 因此所有进入日志的错误都必须经过这里。
 func SafeErr(err error) string {
 	if err == nil {
