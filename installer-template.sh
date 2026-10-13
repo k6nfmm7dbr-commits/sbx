@@ -2019,7 +2019,7 @@ menu_settings() {
     echo "  1) 面板设置与统计维护（端口 / 间隔 / 监听 / 自检 / 清空）"
     echo "  2) 分享地址（域名 / IP）"
     echo "  3) 服务管理（重启 / 停止 / 日志）"
-    echo "  4) 流量推送配置（Telegram / WxPusher / 微信等）"
+    echo "  4) 流量日报配置（飞书群机器人推送）"
     echo "  0) 返回"
     echo
     printf '请选择: '
