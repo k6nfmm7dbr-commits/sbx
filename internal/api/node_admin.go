@@ -22,6 +22,7 @@ import (
 	"github.com/k6nfmm7dbr-commits/sbx/internal/config"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/fsx"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/nodes"
+	"github.com/k6nfmm7dbr-commits/sbx/internal/ruleset"
 )
 
 const maxNodeMutationBody = 64 << 10
@@ -33,6 +34,8 @@ type nodeCreateRequest struct {
 	SNI     string `json:"sni"`
 	Method  string `json:"method"`
 	Version int    `json:"version"`
+	// Allow 是「只允许访问的规则集」名单；空表示不限制。
+	Allow []string `json:"allow"`
 }
 
 type nodeEditRequest struct {
@@ -40,6 +43,8 @@ type nodeEditRequest struct {
 	SNI    string `json:"sni"`
 	Method string `json:"method"`
 	PSK    string `json:"psk"`
+	// Allow 用指针区分「没传」与「传了空数组」：前者不改动，后者表示解除限制。
+	Allow *[]string `json:"allow"`
 }
 
 type mutationResponse struct {
@@ -382,9 +387,14 @@ func (s *Server) createNode(w http.ResponseWriter, r *http.Request) {
 		s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": "节点类型或端口无效"})
 		return
 	}
+	allow, aerr := ruleset.Validate(req.Allow)
+	if aerr != nil {
+		s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": aerr.Error()})
+		return
+	}
 	cli, _, _ := s.newNodeCLI()
 	result, warning, err := s.withNodeMutationBuild(r.Context(), cli, func() ([]string, error) {
-		return s.newNodeArgs(r.Context(), cli.Store, req)
+		return s.newNodeArgs(r.Context(), cli.Store, req, allow)
 	})
 	if err != nil {
 		s.sendJSON(w, r, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -401,7 +411,7 @@ func (s *Server) createNode(w http.ResponseWriter, r *http.Request) {
 	s.sendJSON(w, r, http.StatusOK, mutationResponse{Node: dto, Warning: warning})
 }
 
-func (s *Server) newNodeArgs(ctx context.Context, store *nodes.Store, req nodeCreateRequest) ([]string, error) {
+func (s *Server) newNodeArgs(ctx context.Context, store *nodes.Store, req nodeCreateRequest, allow []string) ([]string, error) {
 	args := []string{"add", req.Type, "--port=" + strconv.Itoa(req.Port)}
 	if strings.TrimSpace(req.Name) != "" {
 		args = append(args, "--name="+strings.TrimSpace(req.Name))
@@ -463,6 +473,10 @@ func (s *Server) newNodeArgs(ctx context.Context, store *nodes.Store, req nodeCr
 		}
 		args = append(args, "--version="+strconv.Itoa(version), "--psk="+psk)
 	}
+	// 受限节点：只允许访问勾选的服务，其余一律拒绝。
+	if len(allow) > 0 {
+		args = append(args, "--allow="+strings.Join(allow, ","))
+	}
 	return args, nil
 }
 
@@ -506,6 +520,15 @@ func (s *Server) editNode(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	if req.PSK != "" {
 		args = append(args, "--psk="+req.PSK)
+	}
+	if req.Allow != nil {
+		allow, aerr := ruleset.Validate(*req.Allow)
+		if aerr != nil {
+			s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": aerr.Error()})
+			return
+		}
+		// 空列表会拼成 --allow=，CLI 据此解除限制。
+		args = append(args, "--allow="+strings.Join(allow, ","))
 	}
 	if len(args) == 2 {
 		s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": "请选择至少一个可修改字段"})
@@ -706,6 +729,12 @@ func (s *Server) mutateNodeFiles(ctx context.Context, cli *nodes.CLI, build func
 	defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); _ = lock.Close() }()
 	args, err := build()
 	if err != nil {
+		_ = cli.RunUnlocked([]string{"rollback"})
+		return "", "", err
+	}
+	// 规则集必须在生成候选之前就位：候选配置引用的是本地 .srs 路径，缺文件会让
+	// sing-box 起不来——那是全节点一起挂，而不是单个节点不可用。
+	if err = s.ensureRuleSets(ctx, args); err != nil {
 		_ = cli.RunUnlocked([]string{"rollback"})
 		return "", "", err
 	}

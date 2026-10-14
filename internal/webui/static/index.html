@@ -232,6 +232,14 @@
       <label class="field node-form-psk hidden"><small>新 PSK（留空则不变）</small><input id="node-form-psk" type="password" autocomplete="new-password" placeholder="留空保持当前 PSK"></label>
       <small class="node-secret-note" id="node-secret-note">节点密钥和密码由服务器安全生成，面板不会显示或传输这些密钥。</small>
     </section>
+    <section class="sect" id="node-editor-allow-section">
+      <label class="field check"><input type="checkbox" id="node-form-allow-on"><span>只允许访问特定服务</span></label>
+      <div id="node-form-allow-body" class="hidden">
+        <small class="node-secret-note">开启后，这个节点只能访问下面勾选的服务，其它网站一律无法访问。限制只作用于该节点，其它节点不受影响。</small>
+        <div id="node-form-allow-list" class="ruleset-picker"></div>
+        <small class="node-secret-note" id="node-form-allow-count"></small>
+      </div>
+    </section>
     <div class="err hidden" id="node-form-error"></div>
   </div>
   <footer class="drawer-foot"><button class="btn ghost" id="node-form-cancel">取消</button><button class="btn primary" id="node-form-save">保存</button></footer>

@@ -91,6 +91,10 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request, route string)
 	case "/api/events":
 		s.handleEvents(w, r)
 
+	case "/api/rulesets":
+		// 规则集清单：供节点编辑页渲染「只允许访问」多选。
+		s.handleRuleSets(w, r)
+
 	case "/api/daily":
 		daysRaw := qsGet(r, "days")
 		days := 30
