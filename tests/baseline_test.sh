@@ -146,14 +146,18 @@ grep -q 'request === nodeDailyRequest' "$ROOT/internal/webui/static/app.js"
 ck "节点切换响应防止旧请求覆盖当前视图" 0 $?
 grep -q "activeView === 'node') loadNodeDaily(true)" "$ROOT/internal/webui/static/app.js"
 ck "只在节点趋势页定时重载趋势数据" 0 $?
-grep -q 'clearHistory := true' "$ROOT/internal/api/node_admin.go"
-ck "DELETE API 默认清理每日和采样历史" 0 $?
+# v3.0.30 复审后的行为变更：删除节点**默认保留**每日/采样历史。
+# 旧断言在这里断言的是"默认清理"，那正是导致用户历史丢失的原因，已随实现一并翻转。
+grep -q 'clearHistory := false' "$ROOT/internal/api/node_admin.go"
+ck "DELETE API 默认保留每日和采样历史" 0 $?
+grep -q 'clearHistory = raw == "1"' "$ROOT/internal/api/node_admin.go"
+ck "显式 clear_history=1 仍可清理（逃生通道保留）" 0 $?
 grep -q 'for _, table := range \[\]string{"daily", "samples"}' "$ROOT/internal/api/node_admin.go"
 ck "节点删除清理不删除累计 totals" 0 $?
 grep -q 'cumulative_preserved' "$ROOT/internal/api/node_admin.go"
 ck "DELETE API 返回累计流量保留标记" 0 $?
-grep -q '累计流量会保留；每日与采样流量历史将清除' "$ROOT/internal/webui/static/app.js"
-ck "输入验证明确说明累计保留和其他历史清理" 0 $?
+grep -q '该节点的流量历史会完整保留' "$ROOT/internal/webui/static/app.js"
+ck "删除确认明确说明流量历史会保留" 0 $?
 grep -qF '是否同时清除该节点的累计与每日流量历史' "$ROOT/internal/webui/static/app.js"
 [[ $? -ne 0 ]]; ck "删除流程移除二次历史确认" 0 $?
 DELETE_FN=$(sed -n '/^function deleteNodeConfig/,/^}/p' "$ROOT/internal/webui/static/app.js")
