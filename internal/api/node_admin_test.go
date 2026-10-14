@@ -352,9 +352,9 @@ func TestPanelDeleteReportsCandidateGenerationCause(t *testing.T) {
 	}
 }
 
-func TestPanelDeleteClearsDailyAndSamplesButKeepsTotalsByDefault(t *testing.T) {
+func TestPanelDeletePreservesHistoryByDefault(t *testing.T) {
 	ts, nodesFile, _, _, srv := newNodeCRUDTestServer(t)
-	code, _ := doJSON(t, ts, http.MethodPost, "/api/nodes", `{"type":"shadowsocks","name":"clear-history","port":8389}`)
+	code, _ := doJSON(t, ts, http.MethodPost, "/api/nodes", `{"type":"shadowsocks","name":"keep-history","port":8389}`)
 	if code != http.StatusOK {
 		t.Fatalf("create failed: %d", code)
 	}
@@ -368,25 +368,68 @@ func TestPanelDeleteClearsDailyAndSamplesButKeepsTotalsByDefault(t *testing.T) {
 		}
 	}
 	code, result := doJSON(t, ts, http.MethodDelete, "/api/nodes/1", "")
-	if code != http.StatusOK || result["history_cleared"] != true || result["cumulative_preserved"] != true {
-		t.Fatalf("delete default should clear daily/samples but preserve cumulative: %d %#v", code, result)
+	if code != http.StatusOK || result["history_cleared"] != false || result["cumulative_preserved"] != true {
+		t.Fatalf("默认删除必须保留历史: %d %#v", code, result)
 	}
-	for _, table := range []string{"daily", "samples"} {
+	// 删掉的历史无法恢复，误留的数据随时能再清——所以默认必须是"保留"。
+	for _, table := range []string{"daily", "samples", "totals"} {
 		var count int
 		if err := srv.db.QueryRow("SELECT COUNT(*) FROM " + table + " WHERE scope='node:1'").Scan(&count); err != nil {
 			t.Fatal(err)
 		}
-		if count != 0 {
-			t.Errorf("default delete must clear %s history, count=%d", table, count)
+		if count != 1 {
+			t.Errorf("默认删除必须保留 %s 里的历史, 实得 %d 行", table, count)
 		}
 	}
-	var totalsCount int
-	if err := srv.db.QueryRow("SELECT COUNT(*) FROM totals WHERE scope='node:1'").Scan(&totalsCount); err != nil {
-		t.Fatal(err)
+	// 展示名要留档：节点已从 nodes.json 移除，名字丢了就只剩"节点 #1"没人认得。
+	var name string
+	if err := srv.db.QueryRow("SELECT v FROM meta WHERE k='node_name:1'").Scan(&name); err != nil {
+		t.Fatalf("删除时应记下展示名: %v", err)
 	}
-	if totalsCount != 1 {
-		t.Fatalf("default delete must preserve cumulative totals, count=%d", totalsCount)
+	if name != "keep-history" {
+		t.Errorf("留档的名称应为 keep-history, 实得 %q", name)
 	}
+	// 关键回归：删除后，面板的日趋势必须仍能看到这个节点。
+	// "数据留在库里但面板查不到"等于没保留——这正是用户报的那个问题。
+	code, daily := doJSON(t, ts, http.MethodGet, "/api/daily?days=180", "")
+	if code != http.StatusOK {
+		t.Fatalf("daily 查询失败: %d", code)
+	}
+	days, _ := daily["days"].([]any)
+	found := false
+	for _, raw := range days {
+		row, _ := raw.(map[string]any)
+		if row["day"] == "2026-10-05" {
+			found = true
+			if row["rx"] != float64(9) || row["tx"] != float64(4) {
+				t.Errorf("已删除节点的当日数据应保留, 实得 %#v", row)
+			}
+		}
+	}
+	if !found {
+		t.Error("已删除节点的历史应仍出现在日趋势中")
+	}
+	// 单独查看该节点也要能取到（前端「历史节点」入口走的就是这个 scope）。
+	code, one := doJSON(t, ts, http.MethodGet, "/api/daily?days=180&scope=node:1", "")
+	if code != http.StatusOK || len(one["days"].([]any)) != 1 {
+		t.Errorf("按已删除节点查询应返回其历史: code=%d %#v", code, one)
+	}
+
+	// 面板的节点下拉走 /api/summary：已删除节点必须出现在 history_nodes 里，
+	// 否则用户虽然保住了数据，却在界面上找不到入口。
+	code, sum := doJSON(t, ts, http.MethodGet, "/api/summary", "")
+	if code != http.StatusOK {
+		t.Fatalf("summary 查询失败: %d", code)
+	}
+	hlist, _ := sum["history_nodes"].([]any)
+	if len(hlist) != 1 {
+		t.Fatalf("history_nodes 应含 1 个已删除节点, 实得 %#v", sum["history_nodes"])
+	}
+	h0, _ := hlist[0].(map[string]any)
+	if h0["id"] != "1" || h0["name"] != "keep-history" {
+		t.Errorf("历史节点应带留档名, 实得 %#v", h0)
+	}
+
 	data, err := os.ReadFile(nodesFile)
 	if err != nil {
 		t.Fatal(err)
@@ -397,24 +440,43 @@ func TestPanelDeleteClearsDailyAndSamplesButKeepsTotalsByDefault(t *testing.T) {
 	}
 }
 
-func TestPanelDeleteCanExplicitlyKeepHistory(t *testing.T) {
+// TestPanelDeleteCanExplicitlyClearHistory 覆盖显式清理这条逃生通道。
+//
+// 它只应被显式请求（clear_history=1）触发，用来清掉"建错了/试试看的"节点。
+func TestPanelDeleteCanExplicitlyClearHistory(t *testing.T) {
 	ts, _, _, _, srv := newNodeCRUDTestServer(t)
-	code, _ := doJSON(t, ts, http.MethodPost, "/api/nodes", `{"type":"shadowsocks","name":"keep-history","port":8391}`)
+	code, _ := doJSON(t, ts, http.MethodPost, "/api/nodes", `{"type":"shadowsocks","name":"wipe-history","port":8391}`)
 	if code != http.StatusOK {
 		t.Fatalf("create failed: %d", code)
 	}
-	if _, err := srv.db.Exec("INSERT INTO totals(scope,rx,tx,rx_pkts,tx_pkts) VALUES('node:1',9,4,0,0)"); err != nil {
+	for _, query := range []string{
+		"INSERT INTO daily(day,scope,rx,tx,rx_pkts,tx_pkts) VALUES('2026-10-05','node:1',9,4,0,0)",
+		"INSERT INTO totals(scope,rx,tx,rx_pkts,tx_pkts) VALUES('node:1',9,4,0,0)",
+		"INSERT INTO samples(ts,scope,rx,tx,duration_ms,valid) VALUES(1,'node:1',9,4,2000,1)",
+	} {
+		if _, err := srv.db.Exec(query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, result := doJSON(t, ts, http.MethodDelete, "/api/nodes/1?clear_history=1", "")
+	if code != http.StatusOK || result["history_cleared"] != true || result["cumulative_preserved"] != true {
+		t.Fatalf("clear_history=1 应清理每日与采样: %d %#v", code, result)
+	}
+	for _, table := range []string{"daily", "samples"} {
+		var count int
+		if err := srv.db.QueryRow("SELECT COUNT(*) FROM " + table + " WHERE scope='node:1'").Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Errorf("显式清理后 %s 应为空, 实得 %d 行", table, count)
+		}
+	}
+	// 累计流量无论如何都保留——这是"删节点不删账"的底线。
+	var totalsCount int
+	if err := srv.db.QueryRow("SELECT COUNT(*) FROM totals WHERE scope='node:1'").Scan(&totalsCount); err != nil {
 		t.Fatal(err)
 	}
-	code, result := doJSON(t, ts, http.MethodDelete, "/api/nodes/1?clear_history=0", "")
-	if code != http.StatusOK || result["history_cleared"] != false || result["cumulative_preserved"] != true {
-		t.Fatalf("explicit clear_history=0 should preserve history: %d %#v", code, result)
-	}
-	var count int
-	if err := srv.db.QueryRow("SELECT COUNT(*) FROM totals WHERE scope='node:1'").Scan(&count); err != nil {
-		t.Fatal(err)
-	}
-	if count != 1 {
-		t.Fatalf("explicit opt-out must retain history, count=%d", count)
+	if totalsCount != 1 {
+		t.Fatalf("累计必须始终保留, count=%d", totalsCount)
 	}
 }

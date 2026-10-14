@@ -162,13 +162,25 @@ function renderNodeCards(s) {
 function renderNodeSelect(s) {
   var sel = document.getElementById('node-select');
   var nodes = s.nodes || [];
+  var history = s.history_nodes || [];
   var previous = state.nodeId == null ? '' : String(state.nodeId);
-  var exists = nodes.some(function (n) { return String(n.id) === previous; });
-  var want = exists ? previous : (nodes.length ? String(nodes[0].id) : '');
-  var sig = nodes.map(function (n) { return n.id + ':' + n.name; }).join('|');
+  // 已删除节点的历史同样可选：删除节点不再清空流量记录，那份数据必须看得到，
+  // 否则"保留"只是躺在库里而已。
+  var exists = nodes.some(function (n) { return String(n.id) === previous; }) ||
+               history.some(function (h) { return String(h.id) === previous; });
+  var fallback = nodes.length ? String(nodes[0].id) : (history.length ? String(history[0].id) : '');
+  var want = exists ? previous : fallback;
+  var sig = nodes.map(function (n) { return n.id + ':' + n.name; }).join('|') +
+            '#' + history.map(function (h) { return h.id + ':' + h.name; }).join('|');
   if (sel._sig !== sig) {
     sel._sig = sig;
-    sel.innerHTML = nodes.map(function (n) { return '<option value="' + esc(n.id) + '">' + esc(n.name) + '</option>'; }).join('');
+    var html = nodes.map(function (n) { return '<option value="' + esc(n.id) + '">' + esc(n.name) + '</option>'; }).join('');
+    if (history.length) {
+      html += '<optgroup label="历史节点（已删除）">' + history.map(function (h) {
+        return '<option value="' + esc(h.id) + '">' + esc(h.name) + '</option>';
+      }).join('') + '</optgroup>';
+    }
+    sel.innerHTML = html;
   }
   if (want && sel.value !== want) sel.value = want;
   state.nodeId = want || null;
@@ -429,11 +441,11 @@ function showNodeFormError(message) {
 function deleteNodeConfig(id) {
   var n = findManageNode(id);
   if (!n) return;
-  var confirmation = window.prompt('即将删除节点“' + n.name + '”。累计流量会保留；每日与采样流量历史将清除，此操作不可恢复。\n请输入“我已确定”以继续删除：');
+  var confirmation = window.prompt('即将删除节点“' + n.name + '”。\n\n该节点的流量历史会完整保留（每日明细与累计都留着），之后仍可在「日报 → 节点」下拉的「历史节点（已删除）」里查看。\n\n请输入“我已确定”以继续删除：');
   if (confirmation === null) return;
   if (confirmation.trim() !== '我已确定') { toast('验证文字不匹配，已取消删除'); return; }
   nodeRequest('/api/nodes/' + id, 'DELETE').then(function (d) {
-    toast(d.warning || (d.history_cleared ? '节点已删除；累计流量保留，每日与采样历史已清理' : '节点已删除；累计流量保留，其他历史未清除'));
+    toast(d.warning || (d.history_cleared ? '节点已删除；每日与采样历史已按要求清理，累计流量保留' : '节点已删除；流量历史与累计均已保留'));
     return refreshAfterNodeMutation();
   }).catch(function (e) { if (e.message !== '未登录') toast(e.message); });
 }

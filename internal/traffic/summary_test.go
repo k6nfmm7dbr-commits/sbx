@@ -249,3 +249,94 @@ func TestBuildSummaryAggregatesExcludeSystem(t *testing.T) {
 		t.Error("无采集器时 healthy 应为 false（对齐 collector=None）")
 	}
 }
+
+// TestBuildSummaryListsDeletedNodesAsHistory 校验"删除节点默认保留历史"这条链路
+// 的后半段：光把数据留在库里不够，面板得能列出这些节点，否则数据等于看不见。
+func TestBuildSummaryListsDeletedNodesAsHistory(t *testing.T) {
+	orig := TimeNow
+	TimeNow = func() time.Time { return time.Date(2026, 10, 14, 10, 0, 0, 0, time.UTC) }
+	t.Cleanup(func() { TimeNow = orig })
+
+	env := newEnv(t, 2)
+	// 当前只剩 node:2；node:1 已从 nodes.json 移除，但历史仍在 daily 里。
+	if err := writeNodesFile(env.cfg.NodesFile,
+		nodes.Node{"id": int64(2), "type": "trojan", "port": int64(30013), "name": "在用的"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		"INSERT INTO daily(day,scope,rx,tx,rx_pkts,tx_pkts) VALUES" +
+			"('2026-09-30','node:1',100,200,1,2)," +
+			"('2026-10-01','node:1',300,400,3,4)," +
+			"('2026-10-13','node:2',7,8,1,1)",
+		"INSERT INTO meta(k,v) VALUES('node_name:1','泰国-旧')",
+	} {
+		if _, err := env.db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s, err := BuildSummary(env.cfg, env.db.DB, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Nodes) != 1 {
+		t.Fatalf("当前节点应只有 1 个, 实得 %d", len(s.Nodes))
+	}
+	if len(s.HistoryNodes) != 1 {
+		t.Fatalf("历史节点应有 1 个, 实得 %+v", s.HistoryNodes)
+	}
+	h := s.HistoryNodes[0]
+	if h.ID != "1" || h.Name != "泰国-旧" {
+		t.Errorf("历史节点应为 id=1 且带留档名, 实得 %+v", h)
+	}
+	if h.DayFirst != "2026-09-30" || h.DayLast != "2026-10-01" || h.Days != 2 {
+		t.Errorf("日期范围/天数不对: %+v", h)
+	}
+	if h.Total.Rx != 400 || h.Total.Tx != 600 {
+		t.Errorf("累计应为 rx=400 tx=600, 实得 %+v", h.Total)
+	}
+}
+
+// TestBuildSummaryHistoryNodeFallbacks 覆盖两个边界：
+// 没有留档名时退回显示编号；仍在使用中的节点绝不能被列成"历史节点"。
+func TestBuildSummaryHistoryNodeFallbacks(t *testing.T) {
+	orig := TimeNow
+	TimeNow = func() time.Time { return time.Date(2026, 10, 14, 10, 0, 0, 0, time.UTC) }
+	t.Cleanup(func() { TimeNow = orig })
+
+	env := newEnv(t, 2)
+	if err := writeNodesFile(env.cfg.NodesFile,
+		nodes.Node{"id": int64(2), "type": "trojan", "port": int64(30013), "name": "在用的"}); err != nil {
+		t.Fatal(err)
+	}
+	q := "INSERT INTO daily(day,scope,rx,tx,rx_pkts,tx_pkts) VALUES" +
+		"('2026-10-01','node:1',1,2,0,0),('2026-10-02','node:2',3,4,0,0)"
+	if _, err := env.db.Exec(q); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := BuildSummary(env.cfg, env.db.DB, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.HistoryNodes) != 1 {
+		t.Fatalf("只应列出已删除的 node:1, 实得 %+v", s.HistoryNodes)
+	}
+	if s.HistoryNodes[0].Name != "节点 #1" {
+		t.Errorf("无留档名时应退回编号, 实得 %q", s.HistoryNodes[0].Name)
+	}
+	// 没有历史节点时返回非 nil 空切片（JSON 层由 omitempty 省略该键，
+	// 前端按 `|| []` 兜底）——这里断言的是 Go 侧的取值契约。
+	if err := writeNodesFile(env.cfg.NodesFile,
+		nodes.Node{"id": int64(1), "type": "vless", "port": int64(443), "name": "n1"},
+		nodes.Node{"id": int64(2), "type": "trojan", "port": int64(30013), "name": "在用的"}); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := BuildSummary(env.cfg, env.db.DB, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s2.HistoryNodes == nil || len(s2.HistoryNodes) != 0 {
+		t.Errorf("无历史节点时应为空切片, 实得 %#v", s2.HistoryNodes)
+	}
+}
