@@ -2,6 +2,7 @@ package traffic
 
 import (
 	"database/sql"
+	"sort"
 	"strings"
 
 	"github.com/k6nfmm7dbr-commits/sbx/internal/config"
@@ -111,17 +112,35 @@ type SummaryNode struct {
 	RateLimitMbps int    `json:"rate_limit_mbps,omitempty"`
 }
 
+// HistoryNode 是已从 nodes.json 移除、但 daily 表里仍有流量的节点。
+//
+// 存在的理由：删除节点默认保留历史（见 api 层的 deleteNode）。没有这份清单，
+// 保留下来的数据虽然还在库里，却在面板上无处可选、无处可看——
+// 那"保留"就只做了一半。
+type HistoryNode struct {
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	DayFirst string   `json:"day_first"`
+	DayLast  string   `json:"day_last"`
+	Days     int      `json:"days"`
+	Total    Counters `json:"total"`
+}
+
 // Summary 对齐 build_summary 返回结构。
 type Summary struct {
-	Now           int64         `json:"now"`
-	Day           string        `json:"day"`
-	TZ            string        `json:"tz"`
-	Interval      int           `json:"interval"`
-	Backend       string        `json:"backend"`
-	Healthy       bool          `json:"healthy"`
-	Error         string        `json:"error"`
-	LastSample    int64         `json:"last_sample"`
-	Nodes         []SummaryNode `json:"nodes"`
+	Now        int64         `json:"now"`
+	Day        string        `json:"day"`
+	TZ         string        `json:"tz"`
+	Interval   int           `json:"interval"`
+	Backend    string        `json:"backend"`
+	Healthy    bool          `json:"healthy"`
+	Error      string        `json:"error"`
+	LastSample int64         `json:"last_sample"`
+	Nodes      []SummaryNode `json:"nodes"`
+	// HistoryNodes 是已删除但仍有历史流量的节点，供面板「历史节点」入口使用。
+	// omitempty：没有历史节点时整个键不出现，与既有 API shape 保持一致
+	//（同 SummaryNode 的策略字段）；前端按 `|| []` 兜底。
+	HistoryNodes  []HistoryNode `json:"history_nodes,omitempty"`
 	Today         Counters      `json:"today"`
 	Total         Counters      `json:"total"`
 	SystemToday   Counters      `json:"system_today"`
@@ -134,6 +153,95 @@ type Summary struct {
 	// nft 规则应用失败等瞬态故障会在此呈现，便于用户在面板直接看到
 	// 「阻断未生效」而不是误以为已被限制。
 	PolicyError string `json:"policy_error,omitempty"`
+}
+
+// nodeNameMetaKeyPrefix 与 api 层删除节点时的约定一致：把展示名存在
+// meta 的 node_name:<id> 键里，供这里回显。
+const nodeNameMetaKeyPrefix = "node_name:"
+
+// qHistoryNodes 列出「不在当前 nodes.json 里、但 daily 中仍有流量」的节点。
+//
+// 只读 daily 与 meta，不碰任何写路径。
+func qHistoryNodes(db *sql.DB, current []nodes.Node) ([]HistoryNode, error) {
+	// 顺序要紧：先把名字取完，再开主查询的游标。
+	//
+	// database.DB 的连接池只有一条连接（SetMaxOpenConns(1)），而 database/sql 在
+	// rows 关闭前不会归还连接——在外层 rows 仍开着时再发一条 Query 会死等连接，
+	// 表现为整个 /api/summary 永久挂起。
+	names := nodeNamesFromMeta(db)
+
+	rows, err := db.Query(
+		"SELECT scope, MIN(day), MAX(day), COUNT(*), " +
+			"SUM(rx), SUM(tx), SUM(rx_pkts), SUM(tx_pkts) " +
+			"FROM daily WHERE scope LIKE 'node:%' GROUP BY scope")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	live := make(map[string]struct{}, len(current))
+	for _, n := range current {
+		live["node:"+nodes.IDString(n)] = struct{}{}
+	}
+
+	out := []HistoryNode{}
+	for rows.Next() {
+		var scope, first, last string
+		var days int
+		var rx, tx, rxPkts, txPkts int64
+		if err := rows.Scan(&scope, &first, &last, &days, &rx, &tx, &rxPkts, &txPkts); err != nil {
+			return nil, err
+		}
+		if _, stillLive := live[scope]; stillLive {
+			continue // 还在 nodes.json 里的节点由 Nodes 那份负责，不重复列出
+		}
+		id := strings.TrimPrefix(scope, "node:")
+		name := names[id]
+		if name == "" {
+			// 早于"记名"功能删除的节点没有留档，退回显示编号。
+			name = "节点 #" + id
+		}
+		out = append(out, HistoryNode{
+			ID: id, Name: name,
+			DayFirst: first, DayLast: last, Days: days,
+			Total: Counters{Rx: rx, Tx: tx, RxPkts: rxPkts, TxPkts: txPkts},
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// 最近还有流量的排前面，便于查找。
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].DayLast != out[j].DayLast {
+			return out[i].DayLast > out[j].DayLast
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
+}
+
+// nodeNamesFromMeta 读回已删除节点的展示名。读不到就返回空表——
+// 名字只是锦上添花，调用方会退回显示编号。
+func nodeNamesFromMeta(db *sql.DB) map[string]string {
+	out := map[string]string{}
+	// 用 GLOB 而不是 LIKE：键名前缀里的下划线在 LIKE 中是通配符，
+	// 会把 nodeXname: 之类的键一并匹配进来。
+	rows, err := db.Query("SELECT k,v FROM meta WHERE k GLOB ?", nodeNameMetaKeyPrefix+"*")
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k string
+		var v sql.NullString
+		if err := rows.Scan(&k, &v); err != nil {
+			return out
+		}
+		if v.Valid {
+			out[strings.TrimPrefix(k, nodeNameMetaKeyPrefix)] = v.String
+		}
+	}
+	return out
 }
 
 // BuildSummary 汇总今日/累计/速率/连接数。src 为 nil 时不读采集器缓存
@@ -177,6 +285,11 @@ func BuildSummary(cfg *config.Config, db *sql.DB, src LiveSource) (*Summary, err
 		Error:      st.Error,
 		LastSample: st.LastOK,
 		Backend:    backendName(src),
+	}
+
+	// 已删除节点的历史。删除默认保留数据，这份清单是让它"看得见"的入口。
+	if s.HistoryNodes, err = qHistoryNodes(db, list); err != nil {
+		return nil, err
 	}
 
 	for _, n := range list {

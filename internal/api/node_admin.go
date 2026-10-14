@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -534,7 +535,13 @@ func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	auditResult := "failure"
 	defer func() { auditEvent(r, "node_delete", auditResult, "node_id", id) }()
-	clearHistory := true
+	// 默认保留历史：删除节点是"不再使用"，不是"抹掉账"。
+	//
+	// 每日明细与采样一律保留，累计流量本来就一直保留；只有显式传
+	// clear_history=1 才清理每日与采样——那是给"节点建错了、要清干净"准备的。
+	// 之所以把"保留"设为默认：删掉的历史无法恢复，而误留的数据随时能再清，
+	// 两种代价完全不对等。
+	clearHistory := false
 	if raw := qsGet(r, "clear_history"); raw != "" {
 		if raw != "1" && raw != "0" {
 			s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": "clear_history must be 0 or 1"})
@@ -542,6 +549,9 @@ func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request, id string) {
 		}
 		clearHistory = raw == "1"
 	}
+	// 删除前记下展示名：节点一旦从 nodes.json 移除，名字就再也找不回来，
+	// 而保留下来的历史流量需要一个认得出的标题（否则只剩"节点 #1"）。
+	name := s.nodeDisplayName(id)
 	if !s.requireNodeForRepairMutation(w, r, id) {
 		return
 	}
@@ -552,6 +562,8 @@ func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	auditResult = "success"
+	s.rememberNodeName(id, name)
+
 	historyCleared := false
 	if clearHistory {
 		if err := s.clearNodeDailyAndSampleHistory(r.Context(), id); err != nil {
@@ -580,6 +592,39 @@ func (s *Server) clearNodeDailyAndSampleHistory(ctx context.Context, id string) 
 		}
 	}
 	return tx.Commit()
+}
+
+// nodeNameMetaKey 是"已删除节点的展示名"在 meta 表中的键前缀（后接节点 id）。
+//
+// 存在 meta 里而不是新建表：这只是一个展示用的补充信息，值很小、只增不改，
+// meta 本来就是通用 KV，为它单独建表并不划算。
+const nodeNameMetaKey = "node_name:"
+
+// nodeDisplayName 返回节点的展示名；找不到或读取失败时返回空串。
+//
+// 走宽松读取（LoadPanelNodes）：这只是删除时的一次留档，
+// 节点文件有问题不该反过来拦住删除动作本身。
+func (s *Server) nodeDisplayName(id string) string {
+	for _, n := range nodes.LoadPanelNodes(s.cfg.NodesFile) {
+		if nodes.IDString(n) == id {
+			return nodes.DisplayName(n)
+		}
+	}
+	return ""
+}
+
+// rememberNodeName 记下已删除节点的展示名，供「历史节点」列表显示。
+// 失败只记日志：留档失败不该让删除动作整体失败。
+func (s *Server) rememberNodeName(id, name string) {
+	if strings.TrimSpace(name) == "" {
+		return
+	}
+	if _, err := s.db.Exec(
+		"INSERT INTO meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+		nodeNameMetaKey+id, name); err != nil {
+		slog.Warn("记录已删除节点名称失败, 历史列表将只显示编号",
+			"node_id", id, "err", err)
+	}
 }
 
 func (s *Server) nodeLinks(w http.ResponseWriter, r *http.Request, id string) {
