@@ -578,3 +578,17 @@ select, input[type="number"], input[type="password"], input[type="text"] { backg
   .manage-node-actions { width: 100%; }
   .manage-node-actions .mini-btn { flex: 1; padding-right: 7px; padding-left: 7px; }
 }
+
+/* 访问限制：只允许访问特定服务（规则集多选） */
+.field.check { grid-template-columns: auto minmax(0,1fr); gap: 8px; align-items: center; }
+.field.check input { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); }
+.field.check span { color: var(--text); font-size: 12.5px; font-weight: 650; }
+.ruleset-picker { display: grid; gap: 10px; max-height: 300px; margin-top: 4px; overflow-y: auto; }
+.ruleset-group { display: grid; gap: 6px; }
+.ruleset-group-title { color: var(--text-3); font-size: 10.5px; font-weight: 700; letter-spacing: .04em; }
+.ruleset-items { display: grid; grid-template-columns: repeat(auto-fill,minmax(146px,1fr)); gap: 5px; }
+.ruleset-item { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); cursor: pointer; }
+.ruleset-item:hover { border-color: var(--line-2); }
+.ruleset-item input { flex: none; width: 14px; height: 14px; margin: 0; accent-color: var(--accent); }
+.ruleset-item span { min-width: 0; color: var(--text-2); font-size: 11.5px; }
+#node-form-allow-count.warn { color: var(--warn); }

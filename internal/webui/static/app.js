@@ -331,6 +331,7 @@ function renderManageNodes() {
     var protocol = n.protocol || n.type;
     var meta = [n.type || protocol, '端口 ' + n.port];
     if (n.paused) meta.push('已暂停');
+    if (Array.isArray(n.allow) && n.allow.length) meta.push('仅允许 ' + n.allow.length + ' 项服务');
     var peers = Array.isArray(n.port_conflict_with) ? n.port_conflict_with : [];
     if (peers.length) meta.push('端口重复，与节点 #' + peers.join(', #') + ' 冲突');
     return '<article class="manage-node' + (n.paused ? ' paused' : '') + (peers.length ? ' conflict' : '') + '">' +
@@ -380,6 +381,10 @@ function openNodeEditor(id) {
   document.getElementById('node-form-version').disabled = !!editingNode;
   document.getElementById('node-form-psk').value = '';
   document.getElementById('node-form-error').classList.add('hidden');
+  var allow = (editingNode && Array.isArray(editingNode.allow)) ? editingNode.allow : [];
+  document.getElementById('node-form-allow-on').checked = allow.length > 0;
+  document.getElementById('node-form-allow-body').classList.toggle('hidden', allow.length === 0);
+  renderAllowPicker(allow);
   var btn = document.getElementById('node-form-save');
   btn.disabled = false; btn.textContent = editingNode ? '保存修改' : '添加节点';
   updateNodeFormFields();
@@ -400,6 +405,11 @@ function nodeRequest(path, method, body) {
 function saveNodeConfig() {
   var port = Number(document.getElementById('node-form-port').value);
   if (!(port >= 1 && port <= 65535)) { showNodeFormError('端口必须在 1–65535'); return; }
+  // 开关关掉 = 不限制（提交空数组即解除限制）；开着但一项没勾，则拒绝提交——
+  // 那会让节点什么都访问不了，几乎肯定是误操作。
+  var allowOn = document.getElementById('node-form-allow-on').checked;
+  var allow = allowOn ? selectedAllow() : [];
+  if (allowOn && !allow.length) { showNodeFormError('已开启访问限制，请至少勾选一项服务'); return; }
   var body, path, method;
   if (editingNode) {
     body = { port: port };
@@ -419,6 +429,7 @@ function saveNodeConfig() {
     };
     path = '/api/nodes'; method = 'POST';
   }
+  body.allow = allow;
   var btn = document.getElementById('node-form-save');
   btn.disabled = true; btn.textContent = '处理中…';
   nodeRequest(path, method, body).then(function (d) {
@@ -436,6 +447,60 @@ function saveNodeConfig() {
 function showNodeFormError(message) {
   var el = document.getElementById('node-form-error');
   el.textContent = message; el.classList.remove('hidden');
+}
+
+/* ---------- 访问限制（只允许访问特定服务） ---------- */
+// 规则集清单来自服务端内置的一览（Repcz/Tool 的 .srs）。面板只负责勾选，
+// 不提供自由填写域名——避免用户写出无效规则，也避免把任意内容拼进 sing-box 配置。
+var ruleSetCache = null;
+
+function loadRuleSets() {
+  if (ruleSetCache) return Promise.resolve(ruleSetCache);
+  return fetch('/api/rulesets').then(function (r) {
+    if (r.status === 401) { location.replace('/login'); throw new Error('未登录'); }
+    return r.json().then(function (d) { if (!r.ok) throw new Error(d.error || ('请求失败 ' + r.status)); return d; });
+  }).then(function (d) {
+    ruleSetCache = d.groups || [];
+    return ruleSetCache;
+  });
+}
+
+function renderAllowPicker(selected) {
+  var host = document.getElementById('node-form-allow-list');
+  if (!host) return;
+  var chosen = {};
+  (selected || []).forEach(function (n) { chosen[n] = true; });
+  loadRuleSets().then(function (groups) {
+    host.innerHTML = groups.map(function (g) {
+      var items = (g.items || []).map(function (it) {
+        return '<label class="ruleset-item"><input type="checkbox" value="' + esc(it.name) + '"' +
+          (chosen[it.name] ? ' checked' : '') + '><span>' + esc(it.label || it.name) + '</span></label>';
+      }).join('');
+      return '<div class="ruleset-group"><div class="ruleset-group-title">' + esc(g.name) + '</div>' +
+        '<div class="ruleset-items">' + items + '</div></div>';
+    }).join('');
+    updateAllowCount();
+  }).catch(function (e) {
+    host.innerHTML = '<div class="empty">无法加载可选服务列表：' + esc(e.message) + '</div>';
+  });
+}
+
+function selectedAllow() {
+  var out = [];
+  document.querySelectorAll('#node-form-allow-list input[type=checkbox]').forEach(function (el) {
+    if (el.checked) out.push(el.value);
+  });
+  return out;
+}
+
+function updateAllowCount() {
+  var el = document.getElementById('node-form-allow-count');
+  if (!el) return;
+  var n = selectedAllow().length;
+  el.classList.toggle('warn', n === 0);
+  el.textContent = n
+    ? '已选 ' + n + ' 项服务'
+    : '尚未勾选任何服务。此时该节点将无法访问任何网站，请至少选择一项。';
 }
 
 function deleteNodeConfig(id) {
@@ -470,6 +535,11 @@ function bindNodeManageUI() {
   document.getElementById('node-create-open').addEventListener('click', function () { openNodeEditor(null); });
   document.getElementById('node-form-type').addEventListener('change', updateNodeFormFields);
   document.getElementById('node-form-save').addEventListener('click', saveNodeConfig);
+  document.getElementById('node-form-allow-on').addEventListener('change', function (e) {
+    document.getElementById('node-form-allow-body').classList.toggle('hidden', !e.target.checked);
+    updateAllowCount();
+  });
+  document.getElementById('node-form-allow-list').addEventListener('change', updateAllowCount);
   document.getElementById('node-form-cancel').addEventListener('click', function () { closeDrawer('node-editor-drawer'); });
   document.getElementById('node-editor-close').addEventListener('click', function () { closeDrawer('node-editor-drawer'); });
   document.getElementById('node-links-close').addEventListener('click', function () { closeDrawer('node-links-drawer'); });
