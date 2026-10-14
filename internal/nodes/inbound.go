@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+
+	"github.com/k6nfmm7dbr-commits/sbx/internal/ruleset"
 )
 
 // TagPrefix 是 sbx 管理的 inbound 标签前缀。
@@ -169,6 +171,10 @@ func RebuildConfig(store *Store, list []Node) (map[string]any, error) {
 		}
 	} else {
 		return nil, fmt.Errorf("读取 sing-box 配置失败: route 必须是对象")
+	}
+	// 白名单路由必须放在 route.final 确定之后：放行规则要指向最终的出站。
+	if err := BuildRoute(cfg, list, ruleset.Dir(store.SBConf)); err != nil {
+		return nil, err
 	}
 	return cfg, nil
 }
