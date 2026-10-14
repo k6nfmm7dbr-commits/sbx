@@ -19,6 +19,9 @@ type PublicNodeDTO struct {
 	RateLimitMbps int    `json:"rate_limit_mbps,omitempty"`
 	// PortConflictWith 仅供节点管理恢复 UI 标记历史重复端口，不改变策略/enforcement。
 	PortConflictWith []int64 `json:"port_conflict_with,omitempty"`
+	// Allow 是「只允许访问特定服务」的规则集名单；为空表示不限制（字段省略，
+	// 保持既有 API 形状不变）。
+	Allow []string `json:"allow,omitempty"`
 }
 
 // PublicNodes 把内部节点列表转为仅含展示/编辑元数据的脱敏 DTO。
@@ -38,6 +41,7 @@ func PublicNodes(list []Node) []PublicNodeDTO {
 			SNI:      Str(n, "sni"),
 			Method:   Str(n, "method"),
 			Version:  version,
+			Allow:    AllowOf(n),
 		})
 	}
 	return out

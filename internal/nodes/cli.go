@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/k6nfmm7dbr-commits/sbx/internal/fsx"
+	"github.com/k6nfmm7dbr-commits/sbx/internal/ruleset"
 )
 
 // CLI 是 nodes_tool.py 的 Go 版命令入口。stdout/stderr 可注入便于测试。
@@ -183,6 +184,8 @@ var addKnown = map[string]bool{
 	"port": true, "name": true, "uuid": true, "password": true, "method": true,
 	"sni": true, "flow": true, "private-key": true, "public-key": true, "short-id": true,
 	"version": true, "psk": true, "obfs-mode": true, "mode": true,
+	// allow：逗号分隔的规则集名（"只允许访问这些服务"）。空值表示不限制。
+	"allow": true,
 }
 
 func (c *CLI) cmdAdd(args []string) int {
@@ -252,6 +255,18 @@ func (c *CLI) cmdAdd(args []string) int {
 	if typ == "trojan" || typ == "anytls" {
 		node["cert"] = c.Store.CertDir() + "/cert.pem"
 		node["key"] = c.Store.CertDir() + "/key.pem"
+	}
+	if raw, has := p.flags["allow"]; has {
+		names, aerr := parseAllowFlag(raw)
+		if aerr != nil {
+			return c.usageError(aerr.Error())
+		}
+		if rc := c.requireRuleSetsCached(names); rc != exitOK {
+			return rc
+		}
+		if len(names) > 0 {
+			node[AllowKey] = allowToAny(names)
+		}
 	}
 
 	list = append(list, node)
@@ -344,7 +359,53 @@ func (c *CLI) cmdRemove(args []string) int {
 // SniTypes 是允许修改 SNI 的类型（reality + 自签证书类）。
 var sniTypes = map[string]bool{"vless": true, "trojan": true, "anytls": true}
 
-var editKnown = map[string]bool{"port": true, "sni": true, "method": true, "psk": true}
+var editKnown = map[string]bool{"port": true, "sni": true, "method": true, "psk": true, "allow": true}
+
+// parseAllowFlag 解析 --allow=Google,TikTok 形式的白名单参数。
+//
+// 名字必须是内置清单里的合法项（ruleset.Validate 负责），因此拼进配置里的
+// 只有受控字符串，不存在把任意内容注入 sing-box 配置的可能。
+// 空值表示解除限制。
+func parseAllowFlag(raw string) ([]string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	return ruleset.Validate(strings.Split(raw, ","))
+}
+
+// allowToAny 把规则集名转成可直接写入 nodes.json 的 JSON 数组。
+func allowToAny(names []string) []any {
+	out := make([]any, len(names))
+	for i, n := range names {
+		out[i] = n
+	}
+	return out
+}
+
+// requireRuleSetsCached 确认白名单用到的规则集已在本地就绪。
+//
+// CLI 刻意不做网络下载（那是面板的职责，也便于在无外网环境下用 CLI 管理节点），
+// 但必须在这里拦住：候选配置引用的是本地 .srs 路径，文件缺失同样会让 sing-box
+// 起不来。提前给出可操作的提示，比让用户看到「sing-box 配置校验失败」有用得多。
+func (c *CLI) requireRuleSetsCached(names []string) int {
+	if len(names) == 0 {
+		return exitOK
+	}
+	dir := ruleset.Dir(c.Store.SBConf)
+	var missing []string
+	for _, n := range names {
+		if !ruleset.Cached(dir, n) {
+			missing = append(missing, n)
+		}
+	}
+	if len(missing) == 0 {
+		return exitOK
+	}
+	return c.fail(fmt.Sprintf(
+		"规则集 %s 尚未缓存；请在面板中配置（会自动下载），或手动把 %s.srs 放入 %s",
+		strings.Join(missing, ", "), missing[0], dir))
+}
 
 func (c *CLI) cmdEdit(args []string) int {
 	p, err := parseArgs(args, editKnown)
@@ -352,7 +413,7 @@ func (c *CLI) cmdEdit(args []string) int {
 		return c.usageError(err.Error())
 	}
 	if len(p.positional) != 1 {
-		return c.usageError("用法: edit <id> [--port N] [--sni DOMAIN]")
+		return c.usageError("用法: edit <id> [--port N] [--sni DOMAIN] [--allow A,B]")
 	}
 	id := p.positional[0]
 	list, rc := c.repairLoadForMutation()
@@ -426,8 +487,28 @@ func (c *CLI) cmdEdit(args []string) int {
 		target["psk"] = psk
 		changed = append(changed, "PSK 已更新")
 	}
+	if raw, has := p.flags["allow"]; has {
+		names, aerr := parseAllowFlag(raw)
+		if aerr != nil {
+			return c.usageError(aerr.Error())
+		}
+		_, existed := target[AllowKey]
+		switch {
+		case len(names) == 0 && existed:
+			delete(target, AllowKey)
+			changed = append(changed, "已解除访问限制")
+		case len(names) == 0:
+			// 本来就没有限制，空值等于没改——不记入 changed，让它走"未指定修改"分支
+		default:
+			if rc := c.requireRuleSetsCached(names); rc != exitOK {
+				return rc
+			}
+			target[AllowKey] = allowToAny(names)
+			changed = append(changed, "访问限制→"+strings.Join(names, ","))
+		}
+	}
 	if len(changed) == 0 {
-		return c.fail("未指定要修改的内容（--port / --sni / --method / --psk）")
+		return c.fail("未指定要修改的内容（--port / --sni / --method / --psk / --allow）")
 	}
 
 	cand, nodesCand, rc := c.writeCandidates(list)
