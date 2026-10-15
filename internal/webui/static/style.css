@@ -653,12 +653,13 @@ select, input[type="number"], input[type="password"], input[type="text"] { backg
 .cal-cell.sel b { color: #fff; }
 .cal-cell.sel .dot { background: rgba(255,255,255,.85); }
 
-/* 选中日期的汇总条 */
-.day-summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; margin-top: 13px; padding-top: 13px; border-top: 1px solid var(--line); }
-.ds-date { color: var(--text); font-size: 14px; font-weight: 700; }
-.ds-item { display: flex; align-items: baseline; gap: 5px; }
-.ds-item small { color: var(--text-3); font-size: 11px; }
-.ds-item b { font-size: 14px; font-weight: 680; font-variant-numeric: tabular-nums; }
+/* 选中日期的汇总条：日期独占一行，三个数值等宽三列，
+   避免旧 flex 布局在窄面板下「上传」挤在日期后面、「下载/合计」甩到下一行的参差感。 */
+.day-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 12px; align-items: baseline; margin-top: 13px; padding-top: 13px; border-top: 1px solid var(--line); }
+.ds-date { grid-column: 1 / -1; color: var(--text); font-size: 14px; font-weight: 700; }
+.ds-item { display: flex; align-items: baseline; gap: 5px; min-width: 0; }
+.ds-item small { flex: none; color: var(--text-3); font-size: 11px; }
+.ds-item b { min-width: 0; font-size: 14px; font-weight: 680; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .ds-item b.up { color: var(--up); }
 .ds-item b.down { color: var(--down); }
-.ds-none { color: var(--text-3); font-size: 12px; }
+.ds-none { grid-column: 1 / -1; color: var(--text-3); font-size: 12px; }
