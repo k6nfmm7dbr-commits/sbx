@@ -147,6 +147,38 @@ func TestPanelNodeCRUDAndShareLinks(t *testing.T) {
 	}
 }
 
+// 编辑已有 shadowsocks 节点时 method 必须被忽略：加密算法和凭据是绑定的，
+// 客户端早就按旧算法配好了，改了会表现为「节点突然连不上」且查不出原因。
+// 面板前端在编辑模式下已经不提交 method，这里守的是直接打 API 的场景。
+func TestPanelNodeEditIgnoresMethodChange(t *testing.T) {
+	ts, nodesFile, _, _, _ := newNodeCRUDTestServer(t)
+	code, created := doJSON(t, ts, http.MethodPost, "/api/nodes",
+		`{"type":"shadowsocks","name":"ss","port":8388,"method":"2022-blake3-aes-128-gcm"}`)
+	if code != http.StatusOK {
+		t.Fatalf("create status=%d body=%v", code, created)
+	}
+
+	code, edited := doJSON(t, ts, http.MethodPut, "/api/nodes/1",
+		`{"port":9443,"method":"chacha20-ietf-poly1305"}`)
+	if code != http.StatusOK {
+		t.Fatalf("edit failed: %d %#v", code, edited)
+	}
+	var saved []map[string]any
+	b, _ := os.ReadFile(nodesFile)
+	if err := json.Unmarshal(b, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if len(saved) != 1 {
+		t.Fatalf("expected 1 node, got %d", len(saved))
+	}
+	if saved[0]["method"] != "2022-blake3-aes-128-gcm" {
+		t.Fatalf("edit must not change method, got %v", saved[0]["method"])
+	}
+	if saved[0]["port"] != float64(9443) {
+		t.Fatalf("other fields should still apply, port=%v", saved[0]["port"])
+	}
+}
+
 func TestPanelNodeDuplicatePortRecovery(t *testing.T) {
 	ts, nodesFile, _, _, _ := newNodeCRUDTestServer(t)
 	writeTemp(t, nodesFile, `[

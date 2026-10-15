@@ -515,12 +515,12 @@ func (s *Server) editNode(w http.ResponseWriter, r *http.Request, id string) {
 	if req.SNI != "" {
 		args = append(args, "--sni="+strings.TrimSpace(req.SNI))
 	}
-	if req.Method != "" {
-		args = append(args, "--method="+req.Method)
-	}
 	if req.PSK != "" {
 		args = append(args, "--psk="+req.PSK)
 	}
+	// 加密算法刻意**不支持修改**：换 method 必须同时换 password，而旧凭据早已
+	// 分发到客户端，改了以后用户看到的是「节点突然连不上」，且无从判断原因。
+	// 要换算法就删掉重建。前端已经不提交这个字段，这里再兜一层，防止直接调 API。
 	if req.Allow != nil {
 		allow, aerr := ruleset.Validate(*req.Allow)
 		if aerr != nil {
