@@ -1,6 +1,7 @@
 package nodes
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/k6nfmm7dbr-commits/sbx/internal/fsx"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/ruleset"
@@ -54,6 +56,8 @@ func (c *CLI) runCommand(args []string, lockMutations bool) int {
 		return mutate(func() int { return c.cmdEdit(rest) })
 	case "sync":
 		return mutate(c.cmdSync)
+	case "rulesets":
+		return mutate(func() int { return c.cmdRuleSets(rest) })
 	case "commit":
 		return mutate(c.cmdCommit)
 	case "rollback":
@@ -89,7 +93,7 @@ func (c *CLI) runCommand(args []string, lockMutations bool) int {
 
 func (c *CLI) usageError(msg string) int {
 	fmt.Fprintln(c.Stderr, msg)
-	fmt.Fprintln(c.Stderr, "用法: sbx-core node <add|edit|remove|list|count|last|info|links|sync|commit|rollback|ss2022-key|port-used|set-host|get-host|set-host6|get-host6>")
+	fmt.Fprintln(c.Stderr, "用法: sbx-core node <add|edit|remove|list|count|last|info|links|sync|commit|rollback|rulesets|ss2022-key|port-used|set-host|get-host|set-host6|get-host6>")
 	return exitUsage
 }
 
@@ -386,8 +390,11 @@ func allowToAny(names []string) []any {
 // requireRuleSetsCached 确认白名单用到的规则集已在本地就绪。
 //
 // CLI 刻意不做网络下载（那是面板的职责，也便于在无外网环境下用 CLI 管理节点），
-// 但必须在这里拦住：候选配置引用的是本地 .srs 路径，文件缺失同样会让 sing-box
+// 但必须在这里拦住：候选配置引用的是本地规则集路径，文件缺失同样会让 sing-box
 // 起不来。提前给出可操作的提示，比让用户看到「sing-box 配置校验失败」有用得多。
+//
+// 手动放入的 <Name>.list 会在这里现场转换——那是本地操作，不需要网络，
+// 所以「离线导入 + CLI 保存节点」这条路是通的。
 func (c *CLI) requireRuleSetsCached(names []string) int {
 	if len(names) == 0 {
 		return exitOK
@@ -395,6 +402,12 @@ func (c *CLI) requireRuleSetsCached(names []string) int {
 	dir := ruleset.Dir(c.Store.SBConf)
 	var missing []string
 	for _, n := range names {
+		if ruleset.Cached(dir, n) {
+			continue
+		}
+		if _, err := ruleset.CompileManual(context.Background(), dir, n); err != nil {
+			return c.fail(fmt.Sprintf("规则集 %s 转换失败：%v", n, err))
+		}
 		if !ruleset.Cached(dir, n) {
 			missing = append(missing, n)
 		}
@@ -403,7 +416,7 @@ func (c *CLI) requireRuleSetsCached(names []string) int {
 		return exitOK
 	}
 	return c.fail(fmt.Sprintf(
-		"规则集 %s 尚未缓存；请在面板中配置（会自动下载），或手动把 %s.srs 放入 %s",
+		"规则集 %s 尚未缓存；请在面板中配置（会自动下载并转换），或手动把 %s.list 放入 %s",
 		strings.Join(missing, ", "), missing[0], dir))
 }
 
@@ -531,6 +544,43 @@ func (c *CLI) cmdSync() int {
 		return rc
 	}
 	return c.outJSON(map[string]any{"candidate": cand, "nodes_candidate": nodesCand})
+}
+
+// rulesetEnsureTimeout 是准备规则集的总超时。
+//
+// 首次启用白名单要把上游文本拉下来再转换，项数多、网络慢都可能花上几分钟；
+// 而升级流程里这一步失败会让整次升级中止，所以余量给得比单次下载大得多。
+const rulesetEnsureTimeout = 5 * time.Minute
+
+// cmdRuleSets 确保 nodes.json 里白名单用到的规则集都已就绪（下载并转换）。
+//
+// 存在的理由是升级流程：配置里引用的规则集文件必须在生成配置**之前**就位，
+// 否则 `sing-box check` 会失败——那不只是这次升级失败，而是所有节点一起挂。
+//
+// 之所以不塞进 sync 里自动做：CLI 刻意不碰网络，这样在无外网环境下仍然能用
+// CLI 管理节点（sync / commit 都不需要联网）。
+func (c *CLI) cmdRuleSets(args []string) int {
+	if len(args) > 0 {
+		return c.usageError("用法: rulesets")
+	}
+	list, rc := c.strictLoadForMutation()
+	if rc != exitOK {
+		return rc
+	}
+	var names []string
+	for _, n := range list {
+		names = append(names, AllowOf(n)...)
+	}
+	if len(names) == 0 {
+		return exitOK
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), rulesetEnsureTimeout)
+	defer cancel()
+	if err := ruleset.Ensure(ctx, ruleset.Dir(c.Store.SBConf), names); err != nil {
+		return c.fail(fmt.Sprintf("规则集准备失败：%v", err))
+	}
+	fmt.Fprintf(c.Stdout, "规则集已就绪：%d 项\n", len(names))
+	return exitOK
 }
 
 // ---- commit / rollback ---------------------------------------------------

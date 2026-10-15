@@ -29,6 +29,10 @@ func RuleSetTagOf(name string) string { return ruleSetTagPrefix + name }
 // 这里刻意「静默过滤」而不是报错：nodes.json 是 root 可编辑的本地文件，
 // 若被手工写进非法名字，最坏后果也不该是「配置生成失败导致所有节点都改不了」。
 // 真正的输入校验发生在面板 API 层，用户填错会在那里得到明确提示。
+//
+// 同时会把旧上游的名字翻译到当前清单（见 ruleset.MigrateAllow）：换上游后，
+// 老节点里勾过的 OpenAI / xAI 这类名字仍按「最接近的选项」继续生效，
+// 而不是悄悄失效。翻译是幂等的，因此这里反复调用不会让名单越来越短。
 func AllowOf(n Node) []string {
 	raw, ok := n[AllowKey]
 	if !ok || raw == nil {
@@ -47,17 +51,8 @@ func AllowOf(n Node) []string {
 	default:
 		return nil
 	}
-	seen := make(map[string]bool, len(items))
-	out := make([]string, 0, len(items))
-	for _, name := range items {
-		name = strings.TrimSpace(name)
-		if name == "" || seen[name] || !ruleset.Known(name) {
-			continue
-		}
-		seen[name] = true
-		out = append(out, name)
-	}
-	return out
+	mapped, _ := ruleset.MigrateAllow(items)
+	return mapped
 }
 
 // HasAllow 报告节点是否配了访问限制。
@@ -158,7 +153,7 @@ func BuildRoute(cfg map[string]any, list []Node, ruleSetDir string) error {
 		ruleSets = append(ruleSets, map[string]any{
 			"tag":    RuleSetTagOf(name),
 			"type":   "local",
-			"format": "binary",
+			"format": "source",
 			"path":   ruleset.FilePath(ruleSetDir, name),
 		})
 	}

@@ -9,20 +9,18 @@ import (
 	"testing"
 )
 
-// preloadRuleSet 在测试环境预置规则集文件。
+// preloadRuleSet 在测试环境预置规则集文件（转换后的 sing-box source 格式）。
 //
-// 真实环境里这一步由 ruleset.Ensure 联网完成；测试里预置是为了让断言聚焦在
-// 「配置生成是否正确」，而不是把网络拉进单元测试。
+// 真实环境里这一步由 ruleset.Ensure 联网下载并转换完成；测试里预置是为了让断言
+// 聚焦在「配置生成是否正确」，而不是把网络拉进单元测试。
 func preloadRuleSet(t *testing.T, name string) {
 	t.Helper()
 	dir := filepath.Join(os.Getenv("SBX_DIR"), "rulesets")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	blob := make([]byte, 256)
-	copy(blob, "SRS")
-	blob[3] = 2
-	if err := os.WriteFile(filepath.Join(dir, name+".srs"), blob, 0o644); err != nil {
+	blob := []byte(`{"version":5,"rules":[{"domain_suffix":["example.com"]}]}` + "\n")
+	if err := os.WriteFile(filepath.Join(dir, name+".json"), blob, 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -160,7 +158,7 @@ func TestCreateNodeWithAllowListWritesRoute(t *testing.T) {
 		t.Fatalf("应有 2 个 rule_set 定义，实得 %d", len(sets))
 	}
 	set0, _ := sets[0].(map[string]any)
-	if set0["type"] != "local" || set0["format"] != "binary" || set0["tag"] != "sbx-rs-Google" {
+	if set0["type"] != "local" || set0["format"] != "source" || set0["tag"] != "sbx-rs-Google" {
 		t.Errorf("rule_set 定义不对: %#v", set0)
 	}
 }
@@ -197,7 +195,7 @@ func TestCreateNodeRejectsUnknownRuleSet(t *testing.T) {
 }
 
 // 规则集拿不到必须整次失败，且不留下任何改动。
-// 若带着缺失的 .srs 写进配置，sing-box 会起不来——那是全节点一起挂。
+// 若带着缺失的规则集写进配置，sing-box 会起不来——那是全节点一起挂。
 func TestCreateNodeFailsClosedWhenRuleSetUnavailable(t *testing.T) {
 	ts, nodesFile, restarts, _, _ := newNodeCRUDTestServer(t)
 	// 指向一个必然连不上的地址，且不预置文件。

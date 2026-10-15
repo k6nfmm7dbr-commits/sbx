@@ -2244,7 +2244,14 @@ apply_update() {
   if [[ -s "$NODES_JSON" ]]; then
     # sync 真实失败（nodes.json 损坏/不可写/candidate 生成失败）绝不能吞掉：
     # 继续执行会造成 config/nodes 不一致，必须报告并跳过本次配置迁移
-    if ! core_node sync >/dev/null; then
+    # 规则集必须在生成候选配置**之前**就位：候选配置引用的是本地规则集文件。
+    # 换上游后文件格式变了(.srs → .json)，老机器上的缓存对不上号，
+    # 缺文件会让随后的 sing-box check 失败并中止升级。
+    if ! core_node rulesets >/dev/null; then
+      err "规则集准备失败: 无法下载或转换白名单需要的规则集"
+      info "已跳过本次升级的配置迁移；请检查网络后重新运行升级"
+      sync_err="规则集准备失败"
+    elif ! core_node sync >/dev/null; then
       err "node sync 失败: nodes.json 可能损坏或 candidate 无法生成"
       info "已跳过本次升级的配置迁移；请修复 $NODES_JSON 后重新运行升级"
       sync_err="node sync 失败"

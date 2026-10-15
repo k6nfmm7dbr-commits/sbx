@@ -339,18 +339,36 @@ sudo apt-get update
 
 管理菜单 → 节点管理 → 编辑节点 → 勾选「只允许访问特定服务」→ 选择服务 → 保存。
 
-可选服务来自内置清单(Google、YouTube、TikTok、Netflix、OpenAI、Microsoft、GitHub、
-Steam、Bilibili 等,按用途分组),不需要手填域名。
+可选服务来自内置清单(上游 `blackmatrix7/ios_rule_script` 的全部规则集,去掉国内站点
+与广告/拦截类,共四百余项),按「常用」+ 首字母分组。列表默认折叠、支持搜索——
+直接输入 `netflix` 或 `telegram` 即可定位。
 
-首次启用会自动从上游下载规则集并缓存在 sing-box 配置同级的 `rulesets/` 目录,之后
-重启不再依赖网络。服务器连不上外网时,可手动把 `<名称>.srs` 放进该目录——**已存在的
-文件不会被覆盖**,删除它才会重新下载。
+清单里有几处归并,是为了少让人纠结:
+
+- **AI 是一整项**。上游把 OpenAI / Claude / Gemini / Copilot 拆成八个文件,这里合并成
+  一个「AI」,勾一次就全覆盖。
+- **不收录国内站点**。这些站点本来就不需要走代理,放进白名单只会让列表变长。
+
+首次启用会自动从上游下载规则文本并转换、缓存在 sing-box 配置同级的 `rulesets/` 目录,
+之后重启不再依赖网络。
+
+服务器连不上外网时,可以手动离线导入:把 Surge 格式的 `<名称>.list` 放进该目录,
+sbx 会在下次保存节点时把它转换成 sing-box 规则集。**已存在的规则集文件不会被覆盖**,
+删除它才会重新生成。注意文件名用的是规则集名本身(如 `Netflix.list`),内容按行写,
+例如:
+
+```text
+# NAME: Netflix
+DOMAIN-SUFFIX,netflix.com
+IP-CIDR,203.0.113.0/24,no-resolve
+```
 
 命令行等价写法:
 
 ```bash
 sbx-core node edit <id> --allow=Google,TikTok   # 设置白名单
 sbx-core node edit <id> --allow=                # 解除限制
+sbx-core node rulesets                          # 提前把需要的规则集下载/转换好
 ```
 
 ### 生效方式
@@ -376,7 +394,15 @@ sbx-core node edit <id> --allow=                # 解除限制
 - **「只允许」的代价**:Google 搜索能用、结果页能显示,但点进搜索结果里的第三方网站
   会被拒绝。这是白名单模式的固有效果,不是故障。若目标是「别刷视频/别玩游戏」而非
   「只允许办公」,白名单会造成困扰。
-- 规则集来自第三方公开列表,**已缓存的文件不会自动更新**,删除后下次保存会重新下载。
+- 规则集来自第三方公开列表,**已缓存的文件不会自动更新**,删除后下次保存会重新生成。
+- 上游用的是 Surge 格式的文本规则,sbx 会在本地转换成 sing-box 规则集。转换是**有损的**:
+  `IP-ASN`、`USER-AGENT`、`PROCESS-NAME`、`URL-REGEX` 这些条件在 sing-box 的规则集里
+  没有对应表达,会被跳过(少数规则集靠 `IP-ASN` 覆盖不少 IP,例如 Cloudflare、
+  Telegram,勾它们时覆盖会比上游原文略少)。
+- **从旧版本升级不用担心白名单失效**:旧清单里的名字会自动映射到新清单——`Github` →
+  `GitHub`、`OpenAI`/`Claude` → `AI`、`xAI` → `Twitter`(Grok 的域名在 Twitter 规则集里)、
+  `TronLink` → `Crypto`;不再收录的国内站点(如 `Bilibili`)会被丢弃并记进日志。
+  映射在读取时完成,不会改动你的 `nodes.json`;下次在面板上保存节点时会自然写回。
 - 规则集取不到时**整次保存失败并回滚**,不会把缺失的配置写进 sing-box——配置里引用
   的是本地文件,缺文件会让 sing-box 起不来,那是全节点一起挂。
 
