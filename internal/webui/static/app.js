@@ -491,24 +491,20 @@ function drawNodeDomains() {
     return;
   }
   var body = rows.map(function (r, i) {
-    var pct = total > 0 ? (r.total / total * 100) : 0;
     return '<tr>' +
       '<td class="dom-rank">' + (i + 1) + '</td>' +
       '<td class="dom-name" title="' + esc(r.domain) + '">' + esc(r.domain) + '</td>' +
       '<td class="dom-num">' + fmtBytes(r.total) + '</td>' +
-      '<td class="dom-num">' + pct.toFixed(1) + '%</td>' +
       '<td class="dom-num">' + (r.hits || 0) + '</td>' +
       '</tr>';
   }).join('');
   var foot = '';
   if (d.unclassified > 0) {
-    var rp = total > 0 ? (d.unclassified / total * 100).toFixed(1) : '0.0';
     foot = '<tr class="dom-rest"><td></td><td>未归类（短连接）</td>' +
-      '<td class="dom-num">' + fmtBytes(d.unclassified) + '</td>' +
-      '<td class="dom-num">' + rp + '%</td><td></td></tr>';
+      '<td class="dom-num">' + fmtBytes(d.unclassified) + '</td><td></td></tr>';
   }
   host.innerHTML = '<table class="dom-table"><thead><tr>' +
-    '<th>#</th><th>域名</th><th>流量</th><th>占比</th><th>次数</th>' +
+    '<th>#</th><th>域名</th><th>流量</th><th>次数</th>' +
     '</tr></thead><tbody>' + body + foot + '</tbody></table>';
 }
 
