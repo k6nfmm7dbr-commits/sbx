@@ -64,6 +64,17 @@ CREATE TABLE IF NOT EXISTS samples (
     PRIMARY KEY (ts, scope)
 );
 CREATE INDEX IF NOT EXISTS idx_samples_ts ON samples(ts);
+-- domain_daily 按「域名」维度记录流量，数据来自 sing-box 的 Clash API 连接表。
+-- 主键 (day, scope, domain) 已覆盖「某节点某天按流量排序」的查询。
+CREATE TABLE IF NOT EXISTS domain_daily (
+    day    TEXT NOT NULL,
+    scope  TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    rx     INTEGER NOT NULL DEFAULT 0,
+    tx     INTEGER NOT NULL DEFAULT 0,
+    hits   INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, scope, domain)
+);
 CREATE TABLE IF NOT EXISTS node_policy (
     node_id                TEXT PRIMARY KEY,
     paused                 INTEGER NOT NULL DEFAULT 0,

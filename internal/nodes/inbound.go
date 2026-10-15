@@ -176,6 +176,8 @@ func RebuildConfig(store *Store, list []Node) (map[string]any, error) {
 	if err := BuildRoute(cfg, list, ruleset.Dir(store.SBConf)); err != nil {
 		return nil, err
 	}
+	// 域名流量统计要靠读连接表，确保管理接口存在（已存在则沿用现有配置）。
+	EnsureClashAPI(cfg)
 	return cfg, nil
 }
 

@@ -60,6 +60,11 @@ func Serve() int {
 	}
 	defer db.Close()
 
+	// 「节点访问域名」统计依赖 sing-box 的连接表，需要配置里存在管理接口。
+	// 配置平时只在节点增删改时重建，所以升级后若从没动过节点就会一直缺失——
+	// 这里补一次（只在确实缺失时执行，失败降级不影响启动）。
+	ensureClashAPIOnStartup(context.Background())
+
 	collector := traffic.NewCollector(cfg, db)
 
 	// nftables 是硬依赖：不可用时明确告警（不拒绝启动，见函数注释），

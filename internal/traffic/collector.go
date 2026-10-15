@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/k6nfmm7dbr-commits/sbx/internal/clash"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/config"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/connection"
 	"github.com/k6nfmm7dbr-commits/sbx/internal/database"
@@ -64,6 +65,16 @@ type Collector struct {
 	rateReady   bool
 	rates       map[string]Rate
 
+	// 域名流量统计：数据来自 sing-box 的连接表（Clash API）。
+	// 只在采集线程里使用，不需要额外加锁。
+	sbConf     string
+	domTracker *domainTracker
+	// clashCli 只在 sing-box 配置变化时重建（见 clashClient）。
+	clashCli   *clash.Client
+	clashMod   time.Time
+	clashSize  int64
+	domPurgeAt time.Time
+
 	doneOnce sync.Once
 	done     chan struct{}
 }
@@ -77,6 +88,9 @@ func NewCollector(cfg *config.Config, db *database.DB) *Collector {
 		backend: firewall.NewNft(cfg.NftConf),
 		now:     time.Now,
 		done:    make(chan struct{}),
+		// sing-box 配置路径只在构造时解析一次；域名统计要从中读管理接口地址。
+		sbConf:     nodes.NewStore().SBConf,
+		domTracker: newDomainTracker(),
 	}
 }
 
@@ -274,7 +288,7 @@ func (d *deltaSlot) anyTraffic() bool {
 // commitTick 把一轮差分结果原子入账：增量、样本、基线、世代、清理同事务。
 func (c *Collector) commitTick(ctx context.Context, deltas map[string]*deltaSlot,
 	snap firewall.Snapshot, state map[string]counterBaseline, freshRuleset bool,
-	ts, tsMS int64, epoch uint64, hasEpoch bool) error {
+	ts, tsMS int64, epoch uint64, hasEpoch bool, domDeltas []domainDelta) error {
 
 	tx, err := c.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -377,6 +391,14 @@ func (c *Collector) commitTick(ctx context.Context, deltas map[string]*deltaSlot
 			return err
 		}
 	}
+	// 域名明细与计数同事务入账：避免出现「总量已更新、域名还没写」的中间态。
+	if err := applyDomainDeltas(ctx, tx, day, domDeltas); err != nil {
+		return err
+	}
+	if err := c.purgeDomainsIfDue(ctx, tx, day); err != nil {
+		return err
+	}
+
 	if _, err := tx.ExecContext(ctx, "DELETE FROM samples WHERE ts < ?", ts-sampleKeepSeconds); err != nil {
 		return err
 	}
@@ -518,7 +540,10 @@ func (c *Collector) Tick(ctx context.Context) error {
 		d.valid = d.valid && d.seenRX && d.seenTX && d.durationMS > 0
 	}
 
-	if err := c.commitTick(ctx, deltas, snapshot, state, freshRuleset, ts, tsMS, epoch, hasEpoch); err != nil {
+	// 域名流量：读一次 sing-box 连接表并结算增量。失败只降级，不影响上面的计数。
+	domDeltas := c.observeDomains(ctx, TodayAt(c.cfg.TZ, c.now()))
+
+	if err := c.commitTick(ctx, deltas, snapshot, state, freshRuleset, ts, tsMS, epoch, hasEpoch, domDeltas); err != nil {
 		return err
 	}
 
