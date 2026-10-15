@@ -248,10 +248,117 @@ function renderTable(hostId, rows) {
   host.innerHTML = html;
 }
 function drawDaily() { if (cache.daily) renderTable('daily-table', cache.daily); }
-function drawNodeDaily() {
-  if (state.nodeId == null) return;
+
+/* ---------- 节点详情：用日历选日期 ---------- */
+// 节点有 180 天记录，平铺成表格既长又看不出哪天有流量，所以换成日历：
+// 有记录的日期可点，选中后上面的汇总与下面的访问域名一起切到那一天。
+var calState = { nodeId: null, day: null, y: 0, m: 0 };
+
+function pad2(n) { return (n < 10 ? '0' : '') + n; }
+function isoToday() {
+  var d = new Date();
+  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+}
+
+// resetCalendar 在切换到另一个节点时清掉选中日期，避免把上一个节点的
+// 日期带过来（那个日期在新节点上可能根本没有记录）。
+function resetCalendar(id) {
+  if (calState.nodeId === id) return;
+  calState.nodeId = id;
+  calState.day = null;
+  calState.y = 0;
+  calState.m = 0;
+}
+
+function nodeDayRows() {
   var entry = cache.nodeDaily[String(state.nodeId)];
-  if (entry) renderTable('node-daily-table', entry.days);
+  var byDay = {};
+  ((entry && entry.days) || []).forEach(function (r) { byDay[r.day] = r; });
+  return byDay;
+}
+
+function drawNodeDaily() {
+  var host = document.getElementById('node-cal');
+  var sum = document.getElementById('node-day-summary');
+  if (!host) return;
+  if (state.nodeId == null) {
+    host.innerHTML = '';
+    if (sum) sum.innerHTML = '';
+    return;
+  }
+  var entry = cache.nodeDaily[String(state.nodeId)];
+  if (!entry) { host.innerHTML = '<div class="empty">正在加载…</div>'; return; }
+
+  resetCalendar(String(state.nodeId));
+  var byDay = nodeDayRows();
+  var days = entry.days || [];
+  var today = isoToday();
+  // 默认选今天；今天没有记录就退到最近有记录的一天。
+  if (!calState.day) {
+    calState.day = byDay[today] ? today : (days.length ? days[days.length - 1].day : today);
+  }
+  var sel = calState.day;
+  if (!calState.y) {
+    var parts = sel.split('-');
+    calState.y = Number(parts[0]);
+    calState.m = Number(parts[1]) - 1;
+  }
+  var y = calState.y, m = calState.m;
+  var startDow = new Date(y, m, 1).getDay();
+  var dayCount = new Date(y, m + 1, 0).getDate();
+
+  var cells = '';
+  for (var i = 0; i < startDow; i++) cells += '<span class="cal-cell pad"></span>';
+  for (var d = 1; d <= dayCount; d++) {
+    var iso = y + '-' + pad2(m + 1) + '-' + pad2(d);
+    var row = byDay[iso];
+    var cls = 'cal-cell' + (row ? ' has' : '') + (iso === sel ? ' sel' : '') + (iso === today ? ' today' : '');
+    cells += '<button type="button" class="' + cls + '" data-day="' + iso + '"' +
+      (row ? '' : ' disabled') + '><b>' + d + '</b>' + (row ? '<i class="dot"></i>' : '') + '</button>';
+  }
+
+  host.innerHTML =
+    '<div class="cal-head">' +
+      '<button type="button" class="cal-nav" data-cal="-1" aria-label="上个月">‹</button>' +
+      '<span class="cal-title">' + y + ' 年 ' + (m + 1) + ' 月</span>' +
+      '<button type="button" class="cal-nav" data-cal="1" aria-label="下个月">›</button>' +
+    '</div>' +
+    '<div class="cal-week"><span>日</span><span>一</span><span>二</span><span>三</span>' +
+      '<span>四</span><span>五</span><span>六</span></div>' +
+    '<div class="cal-grid">' + cells + '</div>';
+
+  var cur = byDay[sel];
+  if (sum) {
+    sum.innerHTML = '<span class="ds-date">' + esc(sel) + (sel === today ? '（今天）' : '') + '</span>' +
+      (cur
+        ? '<span class="ds-item"><small>上传</small><b class="up">' + fmtBytes(cur.rx) + '</b></span>' +
+          '<span class="ds-item"><small>下载</small><b class="down">' + fmtBytes(cur.tx) + '</b></span>' +
+          '<span class="ds-item"><small>合计</small><b>' + fmtBytes(cur.rx + cur.tx) + '</b></span>'
+        : '<span class="ds-none">该日没有流量记录</span>');
+  }
+}
+
+function bindCalendar() {
+  var host = document.getElementById('node-cal');
+  if (!host || host.dataset.bound) return;
+  host.dataset.bound = '1';
+  host.addEventListener('click', function (e) {
+    var nav = e.target && e.target.closest ? e.target.closest('[data-cal]') : null;
+    if (nav) {
+      var d = new Date(calState.y, calState.m + Number(nav.getAttribute('data-cal')), 1);
+      calState.y = d.getFullYear();
+      calState.m = d.getMonth();
+      drawNodeDaily();
+      return;
+    }
+    var cell = e.target && e.target.closest ? e.target.closest('[data-day]') : null;
+    if (!cell || cell.disabled) return;
+    var day = cell.getAttribute('data-day');
+    if (day === calState.day) return;
+    calState.day = day;
+    drawNodeDaily();
+    loadNodeDomains(true);  // 域名跟着切到选中那天
+  });
 }
 function loadDaily(force) {
   if (!force && cache.daily && Date.now() - cache.dailyFetchedAt < 60000) {
@@ -268,22 +375,27 @@ function loadDaily(force) {
 }
 function loadNodeDaily(force) {
   if (state.nodeId == null) return Promise.resolve();
-  loadNodeDomains(force);
   var id = String(state.nodeId), cached = cache.nodeDaily[id];
+  resetCalendar(id);
   if (!force && cached) {
     drawNodeDaily();
+    // 日期要先确定下来，域名查询才知道该查哪一天。
+    loadNodeDomains(false);
     if (Date.now() - cached.fetchedAt < 60000) return Promise.resolve();
   }
   var request = ++nodeDailyRequest, epoch = nodeDailyEpoch;
   if (!cached) {
-    var host = document.getElementById('node-daily-table');
+    var host = document.getElementById('node-cal');
     if (host) host.innerHTML = '<div class="empty">正在加载节点趋势…</div>';
   }
   return api('/api/daily', { days: 180, scope: 'node:' + id })
     .then(function (d) {
       if (epoch !== nodeDailyEpoch) return;
       cache.nodeDaily[id] = { days: d.days || [], fetchedAt: Date.now() };
-      if (activeView === 'node' && String(state.nodeId) === id && request === nodeDailyRequest) drawNodeDaily();
+      if (activeView === 'node' && String(state.nodeId) === id && request === nodeDailyRequest) {
+        drawNodeDaily();
+        loadNodeDomains(force);
+      }
     })
     .catch(function (e) { if (e.message !== '未登录') toast(e.message); });
 }
@@ -377,9 +489,16 @@ function openNodeEditor(id) {
   document.getElementById('node-form-name').disabled = !!editingNode;
   document.getElementById('node-form-port').value = editingNode ? editingNode.port : '443';
   document.getElementById('node-form-sni').value = editingNode ? (editingNode.sni || '') : '';
-  document.getElementById('node-form-method').value = editingNode ? (editingNode.method || '2022-blake3-aes-128-gcm') : '2022-blake3-aes-128-gcm';
-  document.getElementById('node-form-version').value = editingNode ? String(editingNode.version || 5) : '5';
-  document.getElementById('node-form-version').disabled = !!editingNode;
+  var methodSel = document.getElementById('node-form-method');
+  methodSel.value = editingNode ? (editingNode.method || '2022-blake3-aes-128-gcm') : '2022-blake3-aes-128-gcm';
+  var versionSel = document.getElementById('node-form-version');
+  versionSel.value = editingNode ? String(editingNode.version || 5) : '5';
+  // 加密算法与 Snell 版本都不允许在编辑时改：换算法必须连带换凭据，
+  // 而旧凭据早就分发到客户端了，改了会表现为「节点突然连不上」且查不出原因。
+  methodSel.disabled = !!editingNode;
+  versionSel.disabled = !!editingNode;
+  setFieldNote(methodSel, editingNode ? '加密算法（不可修改，换算法请删除后重建）' : '加密算法');
+  setFieldNote(versionSel, editingNode ? 'Snell 版本（不可修改）' : 'Snell 版本');
   document.getElementById('node-form-psk').value = '';
   document.getElementById('node-form-error').classList.add('hidden');
   var allow = (editingNode && Array.isArray(editingNode.allow)) ? editingNode.allow : [];
@@ -403,6 +522,17 @@ function nodeRequest(path, method, body) {
   });
 }
 
+// setFieldNote 改字段上方那行小标题的文案。
+//
+// 编辑模式下有几个字段被锁死（加密算法、Snell 版本），光靠 disabled 用户只会
+// 觉得「点了没反应」，得直接说明为什么。
+function setFieldNote(el, text) {
+  if (!el || !el.closest) return;
+  var label = el.closest('label');
+  var note = label ? label.querySelector('small') : null;
+  if (note) note.textContent = text;
+}
+
 function saveNodeConfig() {
   var port = Number(document.getElementById('node-form-port').value);
   if (!(port >= 1 && port <= 65535)) { showNodeFormError('端口必须在 1–65535'); return; }
@@ -416,7 +546,7 @@ function saveNodeConfig() {
     body = { port: port };
     var protocol = editingNode.protocol || '';
     if (['vless', 'trojan', 'anytls'].indexOf(protocol) >= 0) body.sni = document.getElementById('node-form-sni').value.trim();
-    if (protocol === 'shadowsocks') body.method = document.getElementById('node-form-method').value;
+    // 刻意不提交 method：加密算法不允许改（见 openNodeEditor 的说明）。
     if (protocol === 'snell') body.psk = document.getElementById('node-form-psk').value.trim();
     path = '/api/nodes/' + editingNode.id; method = 'PUT';
   } else {
@@ -456,27 +586,36 @@ function showNodeFormError(message) {
 var domainsCache = {};
 var domainsRequest = 0;
 
+// 域名是「按天」查的：日历选到哪天就查哪天，缓存键也要带上日期，
+// 否则切日期时会把上一天的列表又画一遍。
 function loadNodeDomains(force) {
   if (state.nodeId == null) return;
-  var id = String(state.nodeId), cached = domainsCache[id];
+  var id = String(state.nodeId);
+  var day = calState.day || isoToday();
+  var key = id + '@' + day;
+  var cached = domainsCache[key];
   if (!force && cached && Date.now() - cached.fetchedAt < 30000) { drawNodeDomains(); return; }
   var request = ++domainsRequest;
   if (!cached) {
     var host0 = document.getElementById('node-domains-table');
     if (host0) host0.innerHTML = '<div class="empty">正在加载…</div>';
   }
-  api('/api/node-domains', { id: id, limit: 100 }).then(function (d) {
-    domainsCache[id] = { data: d, fetchedAt: Date.now() };
+  api('/api/node-domains', { id: id, day: day, limit: 100 }).then(function (d) {
+    domainsCache[key] = { data: d, fetchedAt: Date.now() };
     if (activeView === 'node' && String(state.nodeId) === id && request === domainsRequest) drawNodeDomains();
   }).catch(function (e) { if (e.message !== '未登录') toast(e.message); });
 }
 
 function drawNodeDomains() {
   if (state.nodeId == null) return;
+  var id = String(state.nodeId);
+  var day = calState.day || isoToday();
   var host = document.getElementById('node-domains-table');
   var meta = document.getElementById('node-domains-meta');
+  var title = document.getElementById('node-domains-title');
   if (!host) return;
-  var entry = domainsCache[String(state.nodeId)];
+  if (title) title.textContent = (day === isoToday() ? '今日访问域名' : day + ' 访问域名');
+  var entry = domainsCache[id + '@' + day];
   if (!entry) return;
   var d = entry.data || {}, rows = d.domains || [], total = d.total || 0;
   if (meta) {
@@ -486,8 +625,8 @@ function drawNodeDomains() {
   }
   if (!rows.length) {
     host.innerHTML = '<div class="empty">' + (total > 0
-      ? '该节点今日有流量，但尚未采到域名明细——只统计存活超过约 2 秒的连接。'
-      : '该节点今日还没有流量。') + '</div>';
+      ? '该日有流量，但尚未采到域名明细——只统计存活超过约 2 秒的连接。'
+      : '该日没有流量记录。') + '</div>';
     return;
   }
   var body = rows.map(function (r, i) {
@@ -946,3 +1085,4 @@ document.getElementById('pol-rate-enable').addEventListener('change', function (
 });
 bindNodeManageUI();
 bindAllowPicker();
+bindCalendar();

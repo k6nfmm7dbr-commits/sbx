@@ -633,3 +633,32 @@ select, input[type="number"], input[type="password"], input[type="text"] { backg
   .dom-table th:nth-child(3) { width: 72px; }
   .dom-table th:nth-child(4) { width: 40px; }
 }
+
+/* 节点详情的日历：180 天记录用日历比平铺表格清楚得多 */
+.cal-head { display: flex; align-items: center; gap: 10px; margin-bottom: 11px; }
+.cal-title { flex: 1; min-width: 0; color: var(--text); font-size: 15px; font-weight: 700; text-align: center; letter-spacing: -.01em; }
+.cal-nav { flex: none; width: 32px; height: 32px; border: 1px solid var(--line); border-radius: 9px; color: var(--text-2); background: var(--surface-2); font-size: 16px; line-height: 1; cursor: pointer; }
+.cal-nav:hover { border-color: var(--line-2); background: var(--surface-3); }
+.cal-week { display: grid; grid-template-columns: repeat(7,1fr); gap: 2px; margin-bottom: 4px; }
+.cal-week span { color: var(--text-3); font-size: 11px; font-weight: 650; text-align: center; }
+.cal-grid { display: grid; grid-template-columns: repeat(7,1fr); gap: 2px; }
+.cal-cell { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; min-height: 36px; padding: 0; border: 1px solid transparent; border-radius: 9px; color: var(--text-3); background: transparent; font-size: 13px; font-variant-numeric: tabular-nums; cursor: default; }
+.cal-cell b { font-weight: 620; }
+.cal-cell.pad { visibility: hidden; }
+.cal-cell.has { color: var(--text); background: var(--surface-2); border-color: var(--line); cursor: pointer; }
+.cal-cell.has:hover { background: var(--surface-3); }
+.cal-cell .dot { width: 4px; height: 4px; border-radius: 50%; background: var(--accent); }
+.cal-cell.today b { color: var(--accent); }
+.cal-cell.sel { color: #fff; background: var(--accent); border-color: var(--accent); }
+.cal-cell.sel b { color: #fff; }
+.cal-cell.sel .dot { background: rgba(255,255,255,.85); }
+
+/* 选中日期的汇总条 */
+.day-summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; margin-top: 13px; padding-top: 13px; border-top: 1px solid var(--line); }
+.ds-date { color: var(--text); font-size: 14px; font-weight: 700; }
+.ds-item { display: flex; align-items: baseline; gap: 5px; }
+.ds-item small { color: var(--text-3); font-size: 11px; }
+.ds-item b { font-size: 14px; font-weight: 680; font-variant-numeric: tabular-nums; }
+.ds-item b.up { color: var(--up); }
+.ds-item b.down { color: var(--down); }
+.ds-none { color: var(--text-3); font-size: 12px; }

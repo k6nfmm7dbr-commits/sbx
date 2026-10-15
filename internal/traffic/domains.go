@@ -209,17 +209,17 @@ func purgeDomainsBefore(ctx context.Context, tx *sql.Tx, beforeDay string) error
 	return err
 }
 
-// QTopDomains 返回某节点在 fromDay（含）之后按总流量倒序的域名列表。
-// fromDay 传今天即「今日」。
-func QTopDomains(db *sql.DB, fromDay, scope string, limit int) ([]DomainRow, error) {
+// QTopDomains 返回某节点在 [fromDay, toDay] 区间内按总流量倒序的域名列表。
+// fromDay == toDay 即「某一天」，两个都传今天即「今日」。
+func QTopDomains(db *sql.DB, fromDay, toDay, scope string, limit int) ([]DomainRow, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
 	rows, err := db.Query(`
 SELECT domain, SUM(rx), SUM(tx), SUM(rx+tx) AS total, SUM(hits)
-FROM domain_daily WHERE day >= ? AND scope=?
+FROM domain_daily WHERE day >= ? AND day <= ? AND scope=?
 GROUP BY domain
-ORDER BY total DESC, domain ASC LIMIT ?`, fromDay, scope, limit)
+ORDER BY total DESC, domain ASC LIMIT ?`, fromDay, toDay, scope, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -235,30 +235,32 @@ ORDER BY total DESC, domain ASC LIMIT ?`, fromDay, scope, limit)
 	return out, rows.Err()
 }
 
-// QDomainClassified 返回某节点在 fromDay 之后已归类到域名的总流量。
+// QDomainClassified 返回某节点在 [fromDay, toDay] 区间内已归类到域名的总流量。
 //
 // 与 daily 表里该节点的总量相减，就得到「未被采样到」的部分——短连接会在
 // 两次轮询之间结束，那部分流量无法归属到任何域名。把这个差值展示出来，
 // 用户才能判断排序结果可不可信，而不是误以为它就是全部。
-func QDomainClassified(db *sql.DB, fromDay, scope string) (int64, error) {
+func QDomainClassified(db *sql.DB, fromDay, toDay, scope string) (int64, error) {
 	var total sql.NullInt64
 	err := db.QueryRow(
-		`SELECT SUM(rx+tx) FROM domain_daily WHERE day >= ? AND scope=?`, fromDay, scope).Scan(&total)
+		`SELECT SUM(rx+tx) FROM domain_daily WHERE day >= ? AND day <= ? AND scope=?`,
+		fromDay, toDay, scope).Scan(&total)
 	if err != nil {
 		return 0, err
 	}
 	return total.Int64, nil
 }
 
-// QScopeTrafficRange 返回某节点在 fromDay 之后的**权威**总流量。
+// QScopeTrafficRange 返回某节点在 [fromDay, toDay] 区间内的**权威**总流量。
 //
 // 口径是 nftables 计数器（与面板其它地方一致），用来和上面「已归类到域名」
 // 的量相减，得出没被连接表采样到的部分——把它显式展示出来，用户才能判断
 // 域名排序可不可信，而不是误以为那就是全部流量。
-func QScopeTrafficRange(db *sql.DB, fromDay, scope string) (int64, error) {
+func QScopeTrafficRange(db *sql.DB, fromDay, toDay, scope string) (int64, error) {
 	var total sql.NullInt64
 	err := db.QueryRow(
-		`SELECT SUM(rx+tx) FROM daily WHERE day >= ? AND scope=?`, fromDay, scope).Scan(&total)
+		`SELECT SUM(rx+tx) FROM daily WHERE day >= ? AND day <= ? AND scope=?`,
+		fromDay, toDay, scope).Scan(&total)
 	if err != nil {
 		return 0, err
 	}

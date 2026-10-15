@@ -93,9 +93,14 @@ func TestNodeDomainsEndpointValidatesParams(t *testing.T) {
 		"/api/node-domains?id=-1",
 		"/api/node-domains?id=abc",
 		"/api/node-domains?id=1&days=0",
-		"/api/node-domains?id=1&days=99",
+		// 上限与域名保留期对齐（180 天）；31 天曾经是非法值，现在合法，别写回去
+		"/api/node-domains?id=1&days=181",
 		"/api/node-domains?id=1&limit=0",
 		"/api/node-domains?id=1&limit=9999",
+		// day 必须是规范日期
+		"/api/node-domains?id=1&day=2026-1-2",
+		"/api/node-domains?id=1&day=not-a-date",
+		"/api/node-domains?id=1&day=2026-13-01",
 	}
 	for _, path := range cases {
 		if code, _ := doJSON(t, ts, http.MethodGet, path, ""); code != http.StatusBadRequest {

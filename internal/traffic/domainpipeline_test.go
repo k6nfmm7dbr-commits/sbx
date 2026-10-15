@@ -61,7 +61,7 @@ func TestDomainPipelineEndToEnd(t *testing.T) {
 	}
 	commitDomains(t, db, day, first)
 
-	rows, err := QTopDomains(db.DB, day, "node:2", 10)
+	rows, err := QTopDomains(db.DB, day, day, "node:2", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestDomainPipelineEndToEnd(t *testing.T) {
 	second := c.observeDomains(ctx, day)
 	commitDomains(t, db, day, second)
 
-	rows, _ = QTopDomains(db.DB, day, "node:2", 10)
+	rows, _ = QTopDomains(db.DB, day, day, "node:2", 10)
 	var shop DomainRow
 	for _, r := range rows {
 		if r.Domain == "shop.example.com" {
@@ -95,7 +95,7 @@ func TestDomainPipelineEndToEnd(t *testing.T) {
 	}
 
 	// 已归类总量与未归类的计算基础
-	classified, err := QDomainClassified(db.DB, day, "node:2")
+	classified, err := QDomainClassified(db.DB, day, day, "node:2")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -100,11 +100,13 @@
         <h2>节点详情</h2>
         <select id="node-select" aria-label="选择节点"></select>
       </div>
-      <div id="node-daily-table"></div>
+      <!-- 日期用日历选：节点有 180 天记录，平铺成表格既长又看不出哪天有流量 -->
+      <div id="node-cal" class="cal"></div>
+      <div id="node-day-summary" class="day-summary"></div>
     </div>
     <div class="panel glass">
       <div class="panel-head">
-        <h2>今日访问域名</h2>
+        <h2 id="node-domains-title">访问域名</h2>
         <small id="node-domains-meta">—</small>
       </div>
       <div id="node-domains-table"></div>
