@@ -2,6 +2,7 @@ package nodes
 
 import (
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -143,6 +144,11 @@ func TestInboundGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// SBX 新增：域名流量统计要读连接表，因此会写入 experimental.clash_api。
+	// 这一项不在旧 Python 实现的契约里（金标文件来自它），所以先单独校验其形状，
+	// 再剔除后对拍——否则金标比对会永远失败，而它本意是守住「其余部分不变」。
+	assertClashAPIShape(t, cfg)
+	stripClashAPI(cfg)
 	if !reflectDeepEqual(normalize(t, cfg), normalize(t, doc.RebuildResult)) {
 		t.Errorf("rebuild_config 与 Python 不一致:\n got %s\nwant %s",
 			mustJSON(cfg), mustJSON(doc.RebuildResult))
@@ -345,5 +351,43 @@ func TestCLIUsageErrors(t *testing.T) {
 	if rc := cli.run([]string{"remove", "99"}); rc != exitErr ||
 		!strings.Contains(cli.err(), "未找到节点") {
 		t.Errorf("remove 不存在节点应报错, got %d %s", rc, cli.err())
+	}
+}
+
+// assertClashAPIShape 校验 SBX 写入的管理接口：必须只监听回环并带足够长的密钥。
+//
+// 它有控制能力（可切断连接、切换出站），一旦对外暴露就是一条未授权的管理通道。
+func assertClashAPIShape(t *testing.T, cfg map[string]any) {
+	t.Helper()
+	exp, ok := cfg["experimental"].(map[string]any)
+	if !ok {
+		t.Fatal("应写入 experimental 段")
+	}
+	ca, ok := exp["clash_api"].(map[string]any)
+	if !ok {
+		t.Fatal("应写入 experimental.clash_api")
+	}
+	ctrl, _ := ca["external_controller"].(string)
+	host, _, err := net.SplitHostPort(ctrl)
+	if err != nil {
+		t.Fatalf("external_controller 格式非法: %q", ctrl)
+	}
+	if host != "127.0.0.1" {
+		t.Errorf("管理接口必须只监听回环，实得 %q", ctrl)
+	}
+	if secret, _ := ca["secret"].(string); len(secret) < 32 {
+		t.Errorf("应生成足够长的密钥，实得 %d 字符", len(secret))
+	}
+}
+
+// stripClashAPI 移除 SBX 自己写入的管理接口，供金标对拍使用。
+func stripClashAPI(cfg map[string]any) {
+	exp, ok := cfg["experimental"].(map[string]any)
+	if !ok {
+		return
+	}
+	delete(exp, "clash_api")
+	if len(exp) == 0 {
+		delete(cfg, "experimental")
 	}
 }
