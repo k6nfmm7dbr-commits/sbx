@@ -268,6 +268,7 @@ function loadDaily(force) {
 }
 function loadNodeDaily(force) {
   if (state.nodeId == null) return Promise.resolve();
+  loadNodeDomains(force);
   var id = String(state.nodeId), cached = cache.nodeDaily[id];
   if (!force && cached) {
     drawNodeDaily();
@@ -447,6 +448,68 @@ function saveNodeConfig() {
 function showNodeFormError(message) {
   var el = document.getElementById('node-form-error');
   el.textContent = message; el.classList.remove('hidden');
+}
+
+/* ---------- 节点访问域名（来自 sing-box 连接表采样） ---------- */
+// 数据说明：只统计存活超过采样间隔（约 2 秒）的连接，因此列表里的流量
+// 是估算值。接口额外给出「未归类」的量，界面把它单独列一行，让偏差可见。
+var domainsCache = {};
+var domainsRequest = 0;
+
+function loadNodeDomains(force) {
+  if (state.nodeId == null) return;
+  var id = String(state.nodeId), cached = domainsCache[id];
+  if (!force && cached && Date.now() - cached.fetchedAt < 30000) { drawNodeDomains(); return; }
+  var request = ++domainsRequest;
+  if (!cached) {
+    var host0 = document.getElementById('node-domains-table');
+    if (host0) host0.innerHTML = '<div class="empty">正在加载…</div>';
+  }
+  api('/api/node-domains', { id: id, limit: 100 }).then(function (d) {
+    domainsCache[id] = { data: d, fetchedAt: Date.now() };
+    if (activeView === 'node' && String(state.nodeId) === id && request === domainsRequest) drawNodeDomains();
+  }).catch(function (e) { if (e.message !== '未登录') toast(e.message); });
+}
+
+function drawNodeDomains() {
+  if (state.nodeId == null) return;
+  var host = document.getElementById('node-domains-table');
+  var meta = document.getElementById('node-domains-meta');
+  if (!host) return;
+  var entry = domainsCache[String(state.nodeId)];
+  if (!entry) return;
+  var d = entry.data || {}, rows = d.domains || [], total = d.total || 0;
+  if (meta) {
+    meta.textContent = total > 0
+      ? '合计 ' + fmtBytes(total) + (d.unclassified > 0 ? ' · 未归类 ' + fmtBytes(d.unclassified) : '')
+      : '暂无流量';
+  }
+  if (!rows.length) {
+    host.innerHTML = '<div class="empty">' + (total > 0
+      ? '该节点今日有流量，但尚未采到域名明细——只统计存活超过约 2 秒的连接。'
+      : '该节点今日还没有流量。') + '</div>';
+    return;
+  }
+  var body = rows.map(function (r, i) {
+    var pct = total > 0 ? (r.total / total * 100) : 0;
+    return '<tr>' +
+      '<td class="dom-rank">' + (i + 1) + '</td>' +
+      '<td class="dom-name" title="' + esc(r.domain) + '">' + esc(r.domain) + '</td>' +
+      '<td class="dom-num">' + fmtBytes(r.total) + '</td>' +
+      '<td class="dom-num">' + pct.toFixed(1) + '%</td>' +
+      '<td class="dom-num">' + (r.hits || 0) + '</td>' +
+      '</tr>';
+  }).join('');
+  var foot = '';
+  if (d.unclassified > 0) {
+    var rp = total > 0 ? (d.unclassified / total * 100).toFixed(1) : '0.0';
+    foot = '<tr class="dom-rest"><td></td><td>未归类（短连接）</td>' +
+      '<td class="dom-num">' + fmtBytes(d.unclassified) + '</td>' +
+      '<td class="dom-num">' + rp + '%</td><td></td></tr>';
+  }
+  host.innerHTML = '<table class="dom-table"><thead><tr>' +
+    '<th>#</th><th>域名</th><th>流量</th><th>占比</th><th>次数</th>' +
+    '</tr></thead><tbody>' + body + foot + '</tbody></table>';
 }
 
 /* ---------- 访问限制（只允许访问特定服务） ---------- */
