@@ -594,14 +594,30 @@ select, input[type="number"], input[type="password"], input[type="text"] { backg
 #node-form-allow-count.warn { color: var(--warn); }
 
 /* 节点访问域名 */
-.dom-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+/* 固定列布局:数字列给死宽度,域名列吃掉剩余空间。长域名按点号/连字符折行,
+   而不是撑开整张表——否则窄屏下域名会压到后面的数字列上。
+   注意:全局 `tbody td { white-space: nowrap }` 会直接命中单元格(它比类选择器
+   更容易命中该属性),必须在这里显式重置成 normal,否则 overflow-wrap 不生效。 */
+.dom-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12.5px; }
 .dom-table th { padding: 6px 8px; border-bottom: 1px solid var(--line); color: var(--text-3); font-size: 11px; font-weight: 700; text-align: right; }
 .dom-table th:first-child { width: 34px; text-align: center; }
 .dom-table th:nth-child(2) { text-align: left; }
+.dom-table th:nth-child(3) { width: 82px; }
+.dom-table th:nth-child(4) { width: 48px; }
 .dom-table td { padding: 7px 8px; border-bottom: 1px solid var(--line); color: var(--text-2); }
 .dom-table tr:last-child td { border-bottom: 0; }
 .dom-rank { text-align: center; color: var(--text-3); font-variant-numeric: tabular-nums; }
-.dom-name { max-width: 0; color: var(--text); font-weight: 600; text-align: left; word-break: break-all; }
+.dom-name { color: var(--text); font-weight: 600; text-align: left; white-space: normal; overflow-wrap: anywhere; }
 .dom-num { white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; }
 .dom-rest td { color: var(--text-3); font-style: italic; }
+.dom-rest td:nth-child(2) { white-space: normal; }
 #node-domains-meta { color: var(--text-3); font-size: 11.5px; }
+/* 极窄屏(≤370px):压缩数字列与内边距,把宽度让给域名列,避免域名被折成碎块。 */
+@media (max-width: 370px) {
+  .dom-table { font-size: 12px; }
+  .dom-table th,
+  .dom-table td { padding-left: 5px; padding-right: 5px; }
+  .dom-table th:first-child { width: 26px; }
+  .dom-table th:nth-child(3) { width: 72px; }
+  .dom-table th:nth-child(4) { width: 40px; }
+}
