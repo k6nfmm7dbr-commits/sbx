@@ -2,6 +2,7 @@ package ruleset
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -33,6 +34,43 @@ func TestCatalogHasNoDuplicates(t *testing.T) {
 				t.Errorf("规则集 %q 重复出现（已在 %q）", it.Name, prev)
 			}
 			seen[it.Name] = g.Name
+		}
+	}
+}
+
+// 清单是按「是否需要代理才能访问」筛过的：国内站点本来就不需要走代理，
+// 收进白名单只会让面板变长。生成器把排除名单一并产出，这里断言它确实生效了。
+func TestCatalogExcludesMainlandAndPolicySets(t *testing.T) {
+	for _, name := range catalogExcluded {
+		if Known(name) {
+			t.Errorf("规则集 %q 不应出现在清单里", name)
+		}
+	}
+	for _, name := range []string{"Google", "TikTok", "Netflix", "Steam", "AI"} {
+		if !Known(name) {
+			t.Errorf("规则集 %q 应保留在清单里", name)
+		}
+	}
+}
+
+// AI 相关在上游是 8 个独立文件，清单里归并成一项：成员不能再单独出现，
+// 否则面板上会同时有「AI」和「OpenAI」，选哪个都让人犹豫。
+func TestAIItemMergesUpstreamSources(t *testing.T) {
+	it, ok := itemOf("AI")
+	if !ok {
+		t.Fatal("AI 项应在清单里")
+	}
+	if len(it.Sources) < 2 {
+		t.Fatalf("AI 项应合并多个上游文件，实得 %v", it.Sources)
+	}
+	dup := map[string]bool{}
+	for _, s := range it.Sources {
+		if dup[s] {
+			t.Errorf("AI 的成员 %q 重复", s)
+		}
+		dup[s] = true
+		if Known(s) {
+			t.Errorf("AI 的成员 %q 不应再单独出现在清单里", s)
 		}
 	}
 }
@@ -93,49 +131,53 @@ func TestFilePathUnderDir(t *testing.T) {
 	if dir != "/etc/sing-box/rulesets" {
 		t.Errorf("目录推导错误: %s", dir)
 	}
-	p := FilePath(dir, "Google")
-	if p != "/etc/sing-box/rulesets/Google.srs" {
-		t.Errorf("路径推导错误: %s", p)
+	if p := FilePath(dir, "Google"); p != "/etc/sing-box/rulesets/Google.json" {
+		t.Errorf("规则集路径推导错误: %s", p)
+	}
+	if p := ListPath(dir, "Google"); p != "/etc/sing-box/rulesets/Google.list" {
+		t.Errorf("离线导入路径推导错误: %s", p)
 	}
 }
 
-// ---- 下载与缓存 ----
+// ---- 下载、转换与缓存 ----
 
-// srsBlob 造一个满足最小校验的假规则集。
-func srsBlob(n int) []byte {
-	b := make([]byte, n)
-	copy(b, srsMagic)
-	b[3] = 2
-	for i := 4; i < n; i++ {
-		b[i] = byte(i)
-	}
-	return b
+// surgeBody 造一份可被解析的假规则文本。
+func surgeBody(domainSuffix string) []byte {
+	return []byte("# NAME: Fake\nDOMAIN-SUFFIX," + domainSuffix + "\nIP-CIDR,1.2.3.0/24,no-resolve\n")
 }
 
-func TestEnsureDownloadsAndCaches(t *testing.T) {
-	blob := srsBlob(256)
+func TestEnsureDownloadsAndCompiles(t *testing.T) {
 	var hits int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits++
-		if !strings.HasSuffix(r.URL.Path, "/Google.srs") {
+		if !strings.HasSuffix(r.URL.Path, "/Google/Google.list") {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		_, _ = w.Write(blob)
+		_, _ = w.Write(surgeBody("google.com"))
 	}))
 	defer srv.Close()
-	t.Setenv("SBX_RULESET_BASE", srv.URL+"/Rules")
+	t.Setenv("SBX_RULESET_BASE", srv.URL)
 
 	dir := t.TempDir()
 	if err := Ensure(context.Background(), dir, []string{"Google"}); err != nil {
 		t.Fatalf("首次下载应成功: %v", err)
 	}
-	got, err := os.ReadFile(FilePath(dir, "Google"))
+
+	// 落盘的是转换后的 sing-box 规则集，不是上游原文。
+	raw, err := os.ReadFile(FilePath(dir, "Google"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != string(blob) {
-		t.Error("落盘内容与下载内容不一致")
+	var f sourceFile
+	if err := json.Unmarshal(raw, &f); err != nil {
+		t.Fatalf("落盘内容应为合法 JSON: %v\n%s", err, raw)
+	}
+	if f.Version != sourceRuleVersion {
+		t.Errorf("版本号应为 %d，实得 %d", sourceRuleVersion, f.Version)
+	}
+	if !containsDomain(f, "google.com") {
+		t.Errorf("应包含上游的域名规则: %s", raw)
 	}
 	// 0644：sing-box 可能以非 root 运行，必须可读。
 	st, _ := os.Stat(FilePath(dir, "Google"))
@@ -153,17 +195,19 @@ func TestEnsureDownloadsAndCaches(t *testing.T) {
 	}
 }
 
-// 手工放入的规则集必须被尊重：运维可能用自建镜像或自维护名单，
+// 手工放入的规则集必须被尊重：运维可能用内网镜像或自维护名单，
 // 自动下载覆盖掉它们会造成难以察觉的配置漂移。
 func TestEnsureKeepsManuallyPlacedFile(t *testing.T) {
+	var hits int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(srsBlob(128))
+		hits++
+		_, _ = w.Write(surgeBody("from-upstream.com"))
 	}))
 	defer srv.Close()
 	t.Setenv("SBX_RULESET_BASE", srv.URL)
 
 	dir := t.TempDir()
-	mine := srsBlob(200)
+	mine := []byte("{\"version\":5,\"rules\":[{\"domain\":[\"mine.example\"]}]}\n")
 	if err := os.WriteFile(FilePath(dir, "Google"), mine, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -173,6 +217,70 @@ func TestEnsureKeepsManuallyPlacedFile(t *testing.T) {
 	got, _ := os.ReadFile(FilePath(dir, "Google"))
 	if string(got) != string(mine) {
 		t.Error("不应覆盖已有的本地文件")
+	}
+	if hits != 0 {
+		t.Error("已就绪时不应发起请求")
+	}
+}
+
+// 离线导入：运维只需要放一份 Surge 文本，转换由 sbx 负责。
+func TestEnsureCompilesManuallyPlacedList(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_, _ = w.Write(surgeBody("from-upstream.com"))
+	}))
+	defer srv.Close()
+	t.Setenv("SBX_RULESET_BASE", srv.URL)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(ListPath(dir, "Google"), surgeBody("my-own-list.com"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Ensure(context.Background(), dir, []string{"Google"}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(FilePath(dir, "Google"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "my-own-list.com") {
+		t.Errorf("应使用手动放入的文本: %s", raw)
+	}
+	if hits != 0 {
+		t.Error("有手动文本时不应访问上游")
+	}
+}
+
+// AI 项由多个上游文件合并而成，任一文件缺失都应整体失败——
+// 少一个来源意味着少放行一组域名，而用户以为自己勾的是「全部 AI」。
+func TestEnsureMergesMultipleSources(t *testing.T) {
+	sources := []string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sources = append(sources, r.URL.Path)
+		_, _ = w.Write(surgeBody(strings.ToLower(strings.TrimSuffix(filepath.Base(filepath.Dir(r.URL.Path)), ".list")) + ".example"))
+	}))
+	defer srv.Close()
+	t.Setenv("SBX_RULESET_BASE", srv.URL)
+
+	dir := t.TempDir()
+	if err := Ensure(context.Background(), dir, []string{"AI"}); err != nil {
+		t.Fatalf("合并下载应成功: %v", err)
+	}
+	it, _ := itemOf("AI")
+	if len(sources) != len(it.Sources) {
+		t.Errorf("应逐个下载 %d 个来源，实发 %d 次请求", len(it.Sources), len(sources))
+	}
+	raw, _ := os.ReadFile(FilePath(dir, "AI"))
+	var f sourceFile
+	if err := json.Unmarshal(raw, &f); err != nil {
+		t.Fatalf("落盘内容应为合法 JSON: %v", err)
+	}
+	// 每个来源贡献一个域名，合并后应全部出现。
+	for _, s := range it.Sources {
+		if !containsDomain(f, strings.ToLower(s)+".example") {
+			t.Errorf("合并结果缺少来源 %s 的规则", s)
+		}
 	}
 }
 
@@ -186,7 +294,9 @@ func TestEnsureFailsOnBadContent(t *testing.T) {
 	}{
 		{"404", nil, http.StatusNotFound},
 		{"错误页", []byte("<html>not found</html>"), http.StatusOK},
-		{"过小", []byte("SRS"), http.StatusOK},
+		{"空内容", []byte(""), http.StatusOK},
+		// 能下载到、但里面没有任何 sing-box 表达得了的条件。
+		{"无可表达规则", []byte("# 只有注释\nUSER-AGENT,OnlyThis\nIP-ASN,20473\n"), http.StatusOK},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -242,12 +352,54 @@ func TestEnsureEmptyIsNoop(t *testing.T) {
 	}
 }
 
-func TestCachedFalseForPartialFile(t *testing.T) {
+func TestCachedRejectsPartialFile(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(FilePath(dir, "Google"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if Cached(dir, "Google") {
-		t.Error("过小的文件不应被视为已就绪")
+		t.Error("不是 JSON 对象的文件不应被视为已就绪")
 	}
+}
+
+// 面板要展示四百多项的就绪状态，必须一次扫目录拿全，不能逐项开文件。
+func TestCachedSetScansOnce(t *testing.T) {
+	dir := t.TempDir()
+	ready := []byte("{\"version\":5,\"rules\":[]}\n")
+	if err := os.WriteFile(FilePath(dir, "A"), ready, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(FilePath(dir, "Empty"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// .list 是离线导入的源文本，不算「已就绪」。
+	if err := os.WriteFile(ListPath(dir, "B"), surgeBody("b.com"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := CachedSet(dir)
+	if !got["A"] {
+		t.Error("A 应被报告为就绪")
+	}
+	if got["Empty"] {
+		t.Error("空文件不应被报告为就绪")
+	}
+	if got["B"] {
+		t.Error(".list 源文本不应被报告为就绪")
+	}
+	// 目录不存在时不应 panic，返回空集合即可。
+	if len(CachedSet(filepath.Join(dir, "nope"))) != 0 {
+		t.Error("目录不存在时应返回空集合")
+	}
+}
+
+func containsDomain(f sourceFile, want string) bool {
+	for _, r := range f.Rules {
+		for _, d := range r.DomainSuffix {
+			if d == want {
+				return true
+			}
+		}
+	}
+	return false
 }

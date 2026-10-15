@@ -36,6 +36,9 @@ func (s *Server) handleRuleSets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dir := s.ruleSetDir()
+	// 清单有四百多项，逐个开文件判断就绪状态会让这个接口变成几百次 IO，
+	// 所以先扫一遍目录拿到集合。
+	cached := ruleset.CachedSet(dir)
 	groups := ruleset.Catalog()
 	out := make([]rulesetGroupDTO, 0, len(groups))
 	for _, g := range groups {
@@ -44,7 +47,7 @@ func (s *Server) handleRuleSets(w http.ResponseWriter, r *http.Request) {
 			items = append(items, rulesetItemDTO{
 				Name:   it.Name,
 				Label:  it.Label,
-				Cached: ruleset.Cached(dir, it.Name),
+				Cached: cached[it.Name],
 			})
 		}
 		out = append(out, rulesetGroupDTO{Name: g.Name, Items: items})
@@ -54,7 +57,7 @@ func (s *Server) handleRuleSets(w http.ResponseWriter, r *http.Request) {
 
 // ensureRuleSets 确保本次变更需要的规则集已缓存到本地。
 //
-// 时机很关键：必须在生成候选配置之前。配置里引用的是本地 .srs 路径，
+// 时机很关键：必须在生成候选配置之前。配置里引用的是本地规则集路径，
 // 文件缺失会让 sing-box 直接起不来——那不只是这个节点不可用，而是
 // 整机上所有节点一起挂。所以取不到就整次变更失败，绝不带着缺口往下走。
 func (s *Server) ensureRuleSets(ctx context.Context, args []string) error {

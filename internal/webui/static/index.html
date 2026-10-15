@@ -243,6 +243,10 @@
       <label class="field check"><input type="checkbox" id="node-form-allow-on"><span>只允许访问特定服务</span></label>
       <div id="node-form-allow-body" class="hidden">
         <small class="node-secret-note">开启后，这个节点只能访问下面勾选的服务，其它网站一律无法访问。限制只作用于该节点，其它节点不受影响。</small>
+        <div class="allow-toolbar">
+          <input type="search" id="node-form-allow-search" class="allow-search" placeholder="搜索服务名，如 Netflix、Telegram" autocomplete="off" aria-label="搜索可选服务">
+          <button type="button" class="btn allow-toggle" id="node-form-allow-toggle">展开全部</button>
+        </div>
         <div id="node-form-allow-list" class="ruleset-picker"></div>
         <small class="node-secret-note" id="node-form-allow-count"></small>
       </div>

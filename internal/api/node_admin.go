@@ -732,7 +732,7 @@ func (s *Server) mutateNodeFiles(ctx context.Context, cli *nodes.CLI, build func
 		_ = cli.RunUnlocked([]string{"rollback"})
 		return "", "", err
 	}
-	// 规则集必须在生成候选之前就位：候选配置引用的是本地 .srs 路径，缺文件会让
+	// 规则集必须在生成候选之前就位：候选配置引用的是本地规则集路径，缺文件会让
 	// sing-box 起不来——那是全节点一起挂，而不是单个节点不可用。
 	if err = s.ensureRuleSets(ctx, args); err != nil {
 		_ = cli.RunUnlocked([]string{"rollback"})

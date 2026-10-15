@@ -509,9 +509,17 @@ function drawNodeDomains() {
 }
 
 /* ---------- 访问限制（只允许访问特定服务） ---------- */
-// 规则集清单来自服务端内置的一览（Repcz/Tool 的 .srs）。面板只负责勾选，
-// 不提供自由填写域名——避免用户写出无效规则，也避免把任意内容拼进 sing-box 配置。
+// 规则集清单来自服务端内置的一览（上游 blackmatrix7/ios_rule_script 的文本规则，
+// 由服务端下载并转换成 sing-box 规则集）。面板只负责勾选，不提供自由填写域名——
+// 避免用户写出无效规则，也避免把任意内容拼进 sing-box 配置。
+//
+// 清单有四百多项，平铺出来没法用，所以按上游首字母分组、默认只展开已选项所在的组，
+// 顶部再给一个搜索框。
 var ruleSetCache = null;
+var allowGroups = [];
+var allowSelected = {};
+var allowQuery = '';
+var allowExpanded = false;
 
 function loadRuleSets() {
   if (ruleSetCache) return Promise.resolve(ruleSetCache);
@@ -525,31 +533,114 @@ function loadRuleSets() {
 }
 
 function renderAllowPicker(selected) {
+  allowSelected = {};
+  (selected || []).forEach(function (n) { allowSelected[n] = true; });
+  allowQuery = '';
+  allowExpanded = false;
+  var search = document.getElementById('node-form-allow-search');
+  if (search) search.value = '';
+  var toggle = document.getElementById('node-form-allow-toggle');
+  if (toggle) toggle.textContent = '展开全部';
   var host = document.getElementById('node-form-allow-list');
   if (!host) return;
-  var chosen = {};
-  (selected || []).forEach(function (n) { chosen[n] = true; });
+  host.innerHTML = '<div class="empty">正在加载可选服务…</div>';
   loadRuleSets().then(function (groups) {
-    host.innerHTML = groups.map(function (g) {
-      var items = (g.items || []).map(function (it) {
-        return '<label class="ruleset-item"><input type="checkbox" value="' + esc(it.name) + '"' +
-          (chosen[it.name] ? ' checked' : '') + '><span>' + esc(it.label || it.name) + '</span></label>';
-      }).join('');
-      return '<div class="ruleset-group"><div class="ruleset-group-title">' + esc(g.name) + '</div>' +
-        '<div class="ruleset-items">' + items + '</div></div>';
-    }).join('');
-    updateAllowCount();
+    allowGroups = groups;
+    drawAllowPicker();
   }).catch(function (e) {
     host.innerHTML = '<div class="empty">无法加载可选服务列表：' + esc(e.message) + '</div>';
   });
 }
 
-function selectedAllow() {
-  var out = [];
-  document.querySelectorAll('#node-form-allow-list input[type=checkbox]').forEach(function (el) {
-    if (el.checked) out.push(el.value);
+// drawAllowPicker 只负责按当前搜索词与折叠状态重绘。
+// 勾选状态存在 allowSelected 里，重绘不会丢用户已经点过的选择。
+function drawAllowPicker() {
+  var host = document.getElementById('node-form-allow-list');
+  if (!host) return;
+  var q = allowQuery.trim().toLowerCase();
+  var parts = [];
+  allowGroups.forEach(function (g) {
+    var items = (g.items || []).filter(function (it) {
+      if (!q) return true;
+      return (it.name + ' ' + (it.label || '')).toLowerCase().indexOf(q) >= 0;
+    });
+    if (!items.length) return;
+    var picked = 0;
+    var body = items.map(function (it) {
+      var on = allowSelected[it.name] ? true : false;
+      if (on) picked++;
+      return '<label class="ruleset-item"><input type="checkbox" value="' + esc(it.name) + '"' +
+        (on ? ' checked' : '') + '><span>' + esc(it.label || it.name) + '</span></label>';
+    }).join('');
+    // 搜索时一律展开（用户在找东西）；平时只展开有已选项的组，避免四百多项铺满屏幕。
+    var open = q !== '' || allowExpanded || picked > 0;
+    parts.push('<section class="ruleset-group' + (open ? ' open' : '') + '">' +
+      '<button type="button" class="ruleset-group-head">' +
+      '<i class="rs-caret" aria-hidden="true"></i>' +
+      '<span>' + esc(g.name) + '</span>' +
+      '<b>' + (picked ? picked + '/' : '') + items.length + '</b></button>' +
+      '<div class="ruleset-items">' + body + '</div></section>');
   });
-  return out;
+  host.innerHTML = parts.length
+    ? parts.join('')
+    : '<div class="empty">没有匹配「' + esc(allowQuery) + '」的服务。</div>';
+  updateAllowCount();
+}
+
+// refreshAllowGroupCounts 在勾选变化时更新各组的「已选/总数」，不重建 DOM——
+// 重建会让刚点过的复选框失去焦点，连续勾选多个时会很难受。
+function refreshAllowGroupCounts() {
+  document.querySelectorAll('#node-form-allow-list .ruleset-group').forEach(function (sec) {
+    var boxes = sec.querySelectorAll('input[type=checkbox]');
+    var picked = 0;
+    boxes.forEach(function (b) { if (b.checked) picked++; });
+    var badge = sec.querySelector('.ruleset-group-head b');
+    if (badge) badge.textContent = (picked ? picked + '/' : '') + boxes.length;
+  });
+}
+
+function bindAllowPicker() {
+  var host = document.getElementById('node-form-allow-list');
+  var search = document.getElementById('node-form-allow-search');
+  var toggle = document.getElementById('node-form-allow-toggle');
+  if (host && !host.dataset.bound) {
+    host.dataset.bound = '1';
+    host.addEventListener('change', function (e) {
+      var el = e.target;
+      if (!el || el.type !== 'checkbox') return;
+      if (el.checked) allowSelected[el.value] = true; else delete allowSelected[el.value];
+      refreshAllowGroupCounts();
+      updateAllowCount();
+    });
+    host.addEventListener('click', function (e) {
+      var head = e.target && e.target.closest ? e.target.closest('.ruleset-group-head') : null;
+      if (!head) return;
+      e.preventDefault();
+      head.parentNode.classList.toggle('open');
+    });
+  }
+  if (search && !search.dataset.bound) {
+    search.dataset.bound = '1';
+    // 回车在表单里会触发提交，这里必须拦掉。
+    search.addEventListener('keydown', function (e) { if (e.key === 'Enter') e.preventDefault(); });
+    search.addEventListener('input', function () {
+      allowQuery = search.value || '';
+      drawAllowPicker();
+    });
+  }
+  if (toggle && !toggle.dataset.bound) {
+    toggle.dataset.bound = '1';
+    toggle.addEventListener('click', function (e) {
+      e.preventDefault();
+      allowExpanded = !allowExpanded;
+      toggle.textContent = allowExpanded ? '收起全部' : '展开全部';
+      drawAllowPicker();
+    });
+  }
+}
+
+function selectedAllow() {
+  return Object.keys(allowSelected);
 }
 
 function updateAllowCount() {
@@ -854,3 +945,4 @@ document.getElementById('pol-rate-enable').addEventListener('change', function (
   document.getElementById('pol-rate-box').classList.toggle('hidden', !e.target.checked);
 });
 bindNodeManageUI();
+bindAllowPicker();

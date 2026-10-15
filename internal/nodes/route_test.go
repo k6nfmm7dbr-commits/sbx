@@ -379,7 +379,7 @@ func TestRebuildConfigAppliesAllowAndKeepsUserConfig(t *testing.T) {
 	}
 	// 规则集路径落在 sing-box 配置同级的 rulesets/ 下。
 	sets := routeOf(t, cfg)["rule_set"].([]any)
-	wantPath := filepath.Join(dir, "rulesets", "Google.srs")
+	wantPath := filepath.Join(dir, "rulesets", "Google.json")
 	if got := sets[0].(map[string]any)["path"]; got != wantPath {
 		t.Errorf("规则集路径应为 %s，实得 %v", wantPath, got)
 	}
