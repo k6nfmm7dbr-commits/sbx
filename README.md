@@ -373,17 +373,33 @@ sbx-core node rulesets                          # 提前把需要的规则集下
 
 ### 生效方式
 
-为每个受限节点生成三条路由规则,**顺序即优先级**:
+为每个受限节点生成五条路由规则,**顺序即优先级**:
 
 1. **放行 DNS**(53 端口)
-2. **白名单内的目标放行**
-3. **其余一律拒绝**
+2. **放行客户端延迟探测域名**(精确域名与域名后缀各一条)
+3. **白名单内的目标放行**
+4. **其余一律拒绝**
 
 第 1 条是必需的:不少客户端会把域名解析也交给代理,若 DNS 被兜底规则拒掉,用户连
 「域名 → IP」都做不到,表现为「这个节点什么网站都打不开」——而症状与白名单里勾了
 什么毫无关系,极难排查。
 
-其它节点完全不受影响:三条规则都带 `inbound` 条件,只匹配该节点。
+第 2 条是为了**让客户端能测出延迟**。客户端的「延迟测试」通常是一次真实的 HTTP 请求,
+白名单模式下会落到兜底拒绝上,节点在客户端里就一直显示超时——用户看到的是「节点挂了」,
+实际只是探测请求被拒。这些目标内置放行、不需要勾选:
+
+```text
+www.gstatic.com  connectivitycheck.gstatic.com  www.google.com
+cp.cloudflare.com  speed.cloudflare.com
+www.apple.com  captive.apple.com
+www.msftconnecttest.com  www.msftncsi.com
+connectivitycheck.platform.hicloud.com  wifi.vivo.com.cn
+connect.rom.miui.com  connectivitycheck.android.com
+www.baidu.com
+（后缀：gstatic.com / msftconnecttest.com / msftncsi.com）
+```
+
+任何其它节点完全不受影响:五条规则都带 `inbound` 条件,只匹配该节点。
 
 ### 需要注意
 
@@ -394,6 +410,12 @@ sbx-core node rulesets                          # 提前把需要的规则集下
 - **「只允许」的代价**:Google 搜索能用、结果页能显示,但点进搜索结果里的第三方网站
   会被拒绝。这是白名单模式的固有效果,不是故障。若目标是「别刷视频/别玩游戏」而非
   「只允许办公」,白名单会造成困扰。
+- **延迟测试能用,IP 形式的探测不行**。上一条列出的探测域名已经内置放行;但
+  `http://1.1.1.1/cdn-cgi/trace` 这类**直接打 IP** 的探测会失败。原因是实测确认过:
+  路由规则里只要出现 `ip_cidr` 条件,sing-box 就会先把连接的域名解析掉、目标变成 IP,
+  于是同一份规则里靠前的域名规则**全部失配**——整个白名单会失效。两害相权取其轻,
+  所以只放行域名维度。主流客户端(Clash / sing-box / Surge / Loon / Quantumult X /
+  Windows)默认都用域名。
 - 规则集来自第三方公开列表,**已缓存的文件不会自动更新**,删除后下次保存会重新生成。
 - 上游用的是 Surge 格式的文本规则,sbx 会在本地转换成 sing-box 规则集。转换是**有损的**:
   `IP-ASN`、`USER-AGENT`、`PROCESS-NAME`、`URL-REGEX` 这些条件在 sing-box 的规则集里

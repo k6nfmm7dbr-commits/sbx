@@ -117,6 +117,28 @@ sbx 自己转换——顺带换来两个实际收益:规则集内容可以用文
 `openaicomproductionae4b.blob.core.windows.net`、`production-openaicom-storage.azureedge.net`
 这些图片分发域名,表现为「ChatGPT 能打开,但生不了图」。新上游这份规则集包含它们。
 
+### 内置放行延迟探测目标
+
+配了白名单的节点在客户端里一直显示「超时」。原因是客户端的延迟测试**是一次真实的
+HTTP 请求**(Clash 系打 `www.gstatic.com/generate_204`,Surge / Loon / Quantumult X 打
+`www.apple.com/library/test/success.html`,Windows 打 `www.msftconnecttest.com/connecttest.txt`),
+这些请求落到白名单的兜底拒绝上——用户看到的是「节点挂了」,而症状与白名单里勾了什么
+毫无关系。
+
+现在每个受限节点会额外生成两条规则,内置放行这些探测目标(精确域名一条、域名后缀
+一条),不需要用户勾选。与 DNS 放行同理:探测请求不承载内容,放行不削弱白名单意图。
+
+**刻意不支持 IP 形式的探测**(`http://1.1.1.1/cdn-cgi/trace` 之类)。实现时实测到一个
+反直觉的行为:路由规则里只要出现 `ip_cidr` 条件,sing-box 就会先把连接的域名解析掉,
+之后目标变成 IP,**同一份 rules 里靠前的域名规则全部失配**——白名单整体失效,节点会
+变成「什么网站都打不开」。日志里看得很清楚:加了 `ip_cidr` 之后请求 `www.gstatic.com`
+直接跳到兜底的 `match => reject`,中间那条 domain 规则压根没被匹配到。代价是少数把
+IP 当探测目标的客户端仍会显示超时,但主流客户端默认都用域名。
+
+测试:断言探测规则存在、排在兜底拒绝之前、两个维度各自成一条规则,并守住「route 里
+不允许出现 `ip_cidr`」这条;真实流量端到端验证 `www.gstatic.com` / `cp.cloudflare.com` /
+`captive.apple.com` / `www.msftconnecttest.com` 被放行,白名单外的 `bigseller.com` 仍被拒绝。
+
 ## 流量推送重做为「飞书流量日报」（不改版本号）
 
 推送功能按实际使用反馈重做：砍掉多渠道、砍掉心跳、砍掉消息内嵌的可回放数据，
