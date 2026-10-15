@@ -24,6 +24,81 @@ const RouteSetTagPrefix = ruleSetTagPrefix
 // RuleSetTagOf 返回某个规则集在 sing-box 配置中的 tag。
 func RuleSetTagOf(name string) string { return ruleSetTagPrefix + name }
 
+// 各客户端用来测节点延迟的目标。这一组是**内置**的：不依赖用户勾选，
+// 配了白名单的节点一律放行。
+//
+// 为什么必须特判：客户端的「延迟测试」通常是一次真实的 HTTP 请求（Clash 系用
+// `http://www.gstatic.com/generate_204`，Surge / Loon / Quantumult X 用
+// `http://www.apple.com/library/test/success.html`，Windows 用
+// `http://www.msftconnecttest.com/connecttest.txt`……）。白名单模式下这些请求
+// 会落到兜底的 reject 上，节点在客户端里就一直显示超时——用户看到的是
+// 「节点挂了」，而症状与白名单里勾了什么毫无关系，排查成本极高。
+//
+// 这些目标基本都是连通性探测端点，不承载内容，放行不削弱白名单的意图
+// （与 DNS 放行同理）。少数目标是「探测端点同时也是真实站点」（`www.google.com`、
+// `www.apple.com`），但客户端默认就用它们，不放行就测不了延迟——这是必要代价。
+var (
+	connectivityProbeDomains = []string{
+		// Clash / Mihomo / sing-box 系客户端默认
+		"www.gstatic.com",
+		"connectivitycheck.gstatic.com",
+		// v2rayN / v2rayNG / 部分 Clash 配置
+		"www.google.com",
+		// Clash Verge / Rev / OpenClash
+		"cp.cloudflare.com",
+		"speed.cloudflare.com",
+		// Surge / Loon / Quantumult X 默认
+		"www.apple.com",
+		// Apple 设备联网检测
+		"captive.apple.com",
+		// Windows 联网检测
+		"www.msftconnecttest.com",
+		"www.msftncsi.com",
+		// 手机系统联网检测
+		"connectivitycheck.platform.hicloud.com",
+		"wifi.vivo.com.cn",
+		"connect.rom.miui.com",
+		"connectivitycheck.android.com",
+		// 部分客户端/机场面板用百度做连通性探测
+		"www.baidu.com",
+	}
+	connectivityProbeSuffixes = []string{
+		"gstatic.com",
+		"msftconnecttest.com",
+		"msftncsi.com",
+	}
+)
+
+// 刻意**不放行 IP 形式的探测目标**（`http://1.1.1.1/cdn-cgi/trace` 之类）。
+//
+// 实测确认过一个反直觉的行为：路由规则里只要出现 `ip_cidr` 条件，sing-box 就会
+// 先把这个连接的域名解析掉，之后目标变成 IP，于是**同一份 rules 里靠前的域名
+// 规则全部失配**——白名单会整体失效，节点变成「什么网站都打不开」。
+//
+// 日志里看得很清楚：加了 ip_cidr 探测规则之后，请求 www.gstatic.com 时
+// `dns: lookup` 先发生，接着直接跳到兜底的 `match => reject`，中间那条
+// domain 规则压根没被匹配到。
+//
+// 所以这里只用域名维度。代价是少数客户端把 IP 当探测目标时会显示超时，
+// 但主流客户端（Clash / sing-box / Surge / Loon / QuantumX / Windows）
+// 用的都是域名，这个取舍是值得的。
+
+// RulesPerLimitedNode 是单个受限节点生成的规则条数，顺序为：
+// DNS / 探测域名 / 探测后缀 / 白名单 / 兜底拒绝。
+//
+// 导出是给测试与验收脚本用的：它们要断言「规则顺序正确、没有重复堆积」，
+// 而这个数字是配置结构的契约，改动规则构成时只需要动这里。
+const RulesPerLimitedNode = 5
+
+// anyStrings 把字符串切片转成写配置用的 []any。
+func anyStrings(in []string) []any {
+	out := make([]any, len(in))
+	for i, s := range in {
+		out[i] = s
+	}
+	return out
+}
+
 // AllowOf 读取节点的白名单规则集名，已去重并剔除非法值。
 //
 // 这里刻意「静默过滤」而不是报错：nodes.json 是 root 可编辑的本地文件，
@@ -112,11 +187,14 @@ func neededRuleSets(list []Node) []string {
 //
 // 生成的规则形如（以配了 Google+TikTok 的节点为例）：
 //
+//	{ "inbound": ["sbx-n2"], "port": [53], "action": "route", ... }          ← DNS 放行
+//	{ "inbound": ["sbx-n2"], "domain": ["www.gstatic.com", ...], ... }       ← 延迟探测放行
+//	{ "inbound": ["sbx-n2"], "domain_suffix": ["gstatic.com", ...], ... }    ← 延迟探测放行
 //	{ "inbound": ["sbx-n2"], "rule_set": ["sbx-rs-Google","sbx-rs-TikTok"],
-//	  "action": "route", "outbound": "direct" }      ← 白名单内放行
-//	{ "inbound": ["sbx-n2"], "action": "reject" }     ← 其余一律拒绝
+//	  "action": "route", "outbound": "direct" }                              ← 白名单内放行
+//	{ "inbound": ["sbx-n2"], "action": "reject" }                            ← 其余一律拒绝
 //
-// 两条都带 inbound 条件，因此只影响该节点——这是「一个自用、一个给员工」能
+// 每条都带 inbound 条件，因此只影响该节点——这是「一个自用、一个给员工」能
 // 共存于同一个 sing-box 进程的关键。
 //
 // 顺序上 sbx 规则必须排在用户规则之前：白名单的语义是「除这些以外都不许」，
@@ -168,7 +246,10 @@ func BuildRoute(cfg map[string]any, list []Node, ruleSetDir string) error {
 			userRules = append(userRules, it)
 		}
 	}
-	managed := make([]any, 0, len(limited)*3)
+	probeDomains := anyStrings(connectivityProbeDomains)
+	probeSuffixes := anyStrings(connectivityProbeSuffixes)
+
+	managed := make([]any, 0, len(limited)*RulesPerLimitedNode)
 	for _, n := range limited {
 		tag := TagOf(IDString(n))
 		allow := AllowOf(n)
@@ -188,14 +269,30 @@ func BuildRoute(cfg map[string]any, list []Node, ruleSetDir string) error {
 			"action":   "route",
 			"outbound": final,
 		})
-		// 2) 白名单内的目标放行。
+		// 2) 放行各客户端的延迟探测目标。
+		//
+		// 理由同上：这些是连通性探测请求，被拒会让节点在客户端里一直显示超时。
+		// 三个维度必须各自成一条规则——sing-box 同一条规则内的不同字段是 AND 关系。
+		managed = append(managed, map[string]any{
+			"inbound":  []any{tag},
+			"domain":   probeDomains,
+			"action":   "route",
+			"outbound": final,
+		})
+		managed = append(managed, map[string]any{
+			"inbound":       []any{tag},
+			"domain_suffix": probeSuffixes,
+			"action":        "route",
+			"outbound":      final,
+		})
+		// 3) 白名单内的目标放行。
 		managed = append(managed, map[string]any{
 			"inbound":  []any{tag},
 			"rule_set": names,
 			"action":   "route",
 			"outbound": final,
 		})
-		// 3) 其余一律拒绝。必须最后，reject 是无条件匹配。
+		// 4) 其余一律拒绝。必须最后，reject 是无条件匹配。
 		managed = append(managed, map[string]any{
 			"inbound": []any{tag},
 			"action":  "reject",

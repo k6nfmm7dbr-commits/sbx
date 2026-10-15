@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -98,6 +99,16 @@ func eqStrings(a, b []string) bool {
 	return true
 }
 
+// 受限节点的规则布局，与 RulesPerLimitedNode 对应。
+// 用常量而不是裸数字：规则构成变化时测试不需要跟着数第几条。
+const (
+	idxDNS         = 0
+	idxProbeDomain = 1
+	idxProbeSuffix = 2
+	idxAllow       = RulesPerLimitedNode - 2
+	idxReject      = RulesPerLimitedNode - 1
+)
+
 // ---- 白名单规则生成 ----
 
 // 受限节点必须得到「先放行白名单、再兜底拒绝」两条规则，顺序不能反——
@@ -111,8 +122,9 @@ func TestBuildRouteLimitedNodeGetsAllowThenReject(t *testing.T) {
 		t.Fatal(err)
 	}
 	rules := rulesOf(t, cfg)
-	if len(rules) != 3 {
-		t.Fatalf("受限节点应生成 3 条规则（DNS 放行 / 白名单放行 / 兜底拒绝），实得 %d: %#v", len(rules), rules)
+	if len(rules) != RulesPerLimitedNode {
+		t.Fatalf("受限节点应生成 %d 条规则（DNS / 探测×3 / 白名单 / 兜底拒绝），实得 %d: %#v",
+			RulesPerLimitedNode, len(rules), rules)
 	}
 
 	dns := ruleAt(t, cfg, 0)
@@ -126,7 +138,7 @@ func TestBuildRouteLimitedNodeGetsAllowThenReject(t *testing.T) {
 		t.Errorf("DNS 放行应限定 53 端口，实得 %#v", dns["port"])
 	}
 
-	allow := ruleAt(t, cfg, 1)
+	allow := ruleAt(t, cfg, idxAllow)
 	if got := strList(t, allow["inbound"]); !eqStrings(got, []string{"sbx-n2"}) {
 		t.Errorf("放行规则的 inbound 应为 [sbx-n2]，实得 %v", got)
 	}
@@ -137,7 +149,7 @@ func TestBuildRouteLimitedNodeGetsAllowThenReject(t *testing.T) {
 		t.Errorf("放行动作不对: %#v", allow)
 	}
 
-	reject := ruleAt(t, cfg, 2)
+	reject := ruleAt(t, cfg, idxReject)
 	if got := strList(t, reject["inbound"]); !eqStrings(got, []string{"sbx-n2"}) {
 		t.Errorf("兜底规则的 inbound 应为 [sbx-n2]，实得 %v", got)
 	}
@@ -162,7 +174,7 @@ func TestBuildRouteAllowFollowsFinal(t *testing.T) {
 	if err := BuildRoute(cfg, []Node{mkNode("3", "Google")}, t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
-	if got := ruleAt(t, cfg, 1)["outbound"]; got != "upstream" {
+	if got := ruleAt(t, cfg, idxAllow)["outbound"]; got != "upstream" {
 		t.Errorf("放行应指向 final，实得 %v", got)
 	}
 }
@@ -202,18 +214,20 @@ func TestBuildRouteManagedRulesPrecedeUserRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	rules := rulesOf(t, cfg)
-	if len(rules) != 4 {
-		t.Fatalf("应为 3 条 sbx 规则 + 1 条用户规则，实得 %d", len(rules))
+	if len(rules) != RulesPerLimitedNode+1 {
+		t.Fatalf("应为 %d 条 sbx 规则 + 1 条用户规则，实得 %d", RulesPerLimitedNode, len(rules))
 	}
-	for i := 0; i < 3; i++ {
-		if _, isUser := ruleAt(t, cfg, i)["domain_suffix"]; isUser {
-			t.Errorf("sbx 规则应排在最前，但 rules[%d] 是用户规则", i)
+	for i := 0; i < RulesPerLimitedNode; i++ {
+		// 用「有没有 inbound 条件」区分：sbx 生成的规则一律带 inbound
+		// （这是限制只作用于该节点的关键），用户自己写的规则没有。
+		if _, hasInbound := ruleAt(t, cfg, i)["inbound"]; !hasInbound {
+			t.Errorf("sbx 规则应排在最前，但 rules[%d] 没有 inbound 条件（是用户规则）", i)
 		}
 	}
-	if ruleAt(t, cfg, 2)["action"] != "reject" {
+	if ruleAt(t, cfg, idxReject)["action"] != "reject" {
 		t.Error("兜底拒绝应排在 sbx 段的最后")
 	}
-	last := ruleAt(t, cfg, 3)
+	last := ruleAt(t, cfg, RulesPerLimitedNode)
 	if _, isUser := last["domain_suffix"]; !isUser {
 		t.Errorf("用户规则应被完整保留在最后: %#v", last)
 	}
@@ -229,8 +243,8 @@ func TestBuildRouteIdempotent(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if n := len(rulesOf(t, cfg)); n != 3 {
-		t.Errorf("重复构建后规则数应恒为 3，实得 %d", n)
+	if n := len(rulesOf(t, cfg)); n != RulesPerLimitedNode {
+		t.Errorf("重复构建后规则数应恒为 %d，实得 %d", RulesPerLimitedNode, n)
 	}
 	if n := len(routeOf(t, cfg)["rule_set"].([]any)); n != 1 {
 		t.Errorf("重复构建后 rule_set 数应恒为 1，实得 %d", n)
@@ -247,7 +261,7 @@ func TestBuildRouteReplacesPreviousSelections(t *testing.T) {
 	if err := BuildRoute(cfg, []Node{mkNode("2", "TikTok")}, dir); err != nil {
 		t.Fatal(err)
 	}
-	if got := strList(t, ruleAt(t, cfg, 1)["rule_set"]); !eqStrings(got, []string{"sbx-rs-TikTok"}) {
+	if got := strList(t, ruleAt(t, cfg, idxAllow)["rule_set"]); !eqStrings(got, []string{"sbx-rs-TikTok"}) {
 		t.Errorf("应只剩新选择，实得 %v", got)
 	}
 	sets := routeOf(t, cfg)["rule_set"].([]any)
@@ -371,10 +385,10 @@ func TestRebuildConfigAppliesAllowAndKeepsUserConfig(t *testing.T) {
 	}
 	// 白名单路由生效，且用户规则仍在最后。
 	rules := rulesOf(t, cfg)
-	if len(rules) != 4 {
-		t.Fatalf("应为 3 条 sbx + 1 条用户规则，实得 %d: %#v", len(rules), rules)
+	if len(rules) != RulesPerLimitedNode+1 {
+		t.Fatalf("应为 %d 条 sbx + 1 条用户规则，实得 %d: %#v", RulesPerLimitedNode, len(rules), rules)
 	}
-	if _, isUser := ruleAt(t, cfg, 3)["domain_suffix"]; !isUser {
+	if _, isUser := ruleAt(t, cfg, RulesPerLimitedNode)["domain_suffix"]; !isUser {
 		t.Error("用户规则应保留在最后")
 	}
 	// 规则集路径落在 sing-box 配置同级的 rulesets/ 下。
@@ -397,12 +411,12 @@ func TestBuildRouteAlwaysAllowsDNSFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	rules := rulesOf(t, cfg)
-	// 每个受限节点 3 条：DNS / 白名单 / 拒绝
-	if len(rules) != 6 {
-		t.Fatalf("两个受限节点应生成 6 条规则，实得 %d", len(rules))
+	// 每个受限节点 RulesPerLimitedNode 条
+	if len(rules) != 2*RulesPerLimitedNode {
+		t.Fatalf("两个受限节点应生成 %d 条规则，实得 %d", 2*RulesPerLimitedNode, len(rules))
 	}
 	for i, tag := range []string{"sbx-n2", "sbx-n5"} {
-		base := i * 3
+		base := i * RulesPerLimitedNode
 		dns := ruleAt(t, cfg, base)
 		if got := strList(t, dns["inbound"]); !eqStrings(got, []string{tag}) {
 			t.Errorf("节点 %s 的 DNS 规则 inbound 不对: %v", tag, got)
@@ -410,8 +424,71 @@ func TestBuildRouteAlwaysAllowsDNSFirst(t *testing.T) {
 		if ports, _ := dns["port"].([]any); len(ports) != 1 || ports[0] != 53 {
 			t.Errorf("节点 %s 的 DNS 规则应限定 53: %#v", tag, dns["port"])
 		}
-		if ruleAt(t, cfg, base+2)["action"] != "reject" {
+		if ruleAt(t, cfg, base+idxReject)["action"] != "reject" {
 			t.Errorf("节点 %s 的最后一条应为 reject", tag)
+		}
+	}
+}
+
+// 客户端的「延迟测试」是一次真实的 HTTP 请求（Clash 系打 gstatic、Surge 系打
+// apple.com、Windows 打 msftconnecttest……）。白名单模式下这些请求会落到兜底
+// reject 上，节点在客户端里就一直显示超时——用户看到的是「节点挂了」，而症状
+// 与白名单里勾了什么毫无关系。所以探测目标必须内置放行，且排在拒绝之前。
+func TestBuildRouteAlwaysAllowsConnectivityProbes(t *testing.T) {
+	cfg := routeCfg("")
+	// 白名单只勾一个与探测目标无关的服务，确保放行不是「顺带」的。
+	if err := BuildRoute(cfg, []Node{mkNode("2", "Netflix")}, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if len(rulesOf(t, cfg)) != RulesPerLimitedNode {
+		t.Fatalf("只应有一个受限节点的规则，实得 %d 条", len(rulesOf(t, cfg)))
+	}
+
+	byDomain := ruleAt(t, cfg, idxProbeDomain)
+	domains := strList(t, byDomain["domain"])
+	for _, want := range []string{
+		"www.gstatic.com", "cp.cloudflare.com", "www.apple.com", "www.msftconnecttest.com",
+	} {
+		if !slices.Contains(domains, want) {
+			t.Errorf("探测域名里应含 %s（有客户端的默认延迟测试用的就是它），实得 %v", want, domains)
+		}
+	}
+	if byDomain["action"] != "route" {
+		t.Errorf("探测域名应是放行: %#v", byDomain)
+	}
+	if byDomain["outbound"] != "direct" {
+		t.Errorf("探测放行应跟随 final: %#v", byDomain)
+	}
+
+	if got := strList(t, ruleAt(t, cfg, idxProbeSuffix)["domain_suffix"]); !slices.Contains(got, "gstatic.com") {
+		t.Errorf("探测后缀里应含 gstatic.com，实得 %v", got)
+	}
+
+	// 两个维度必须各自成一条规则：sing-box 同一条规则里的字段是 AND 关系。
+	for _, i := range []int{idxProbeDomain, idxProbeSuffix} {
+		r := ruleAt(t, cfg, i)
+		fields := 0
+		for _, k := range []string{"domain", "domain_suffix"} {
+			if _, has := r[k]; has {
+				fields++
+			}
+		}
+		if fields != 1 {
+			t.Errorf("rules[%d] 混了 %d 个匹配维度（同一条规则内是 AND，会永远匹配不上）", i, fields)
+		}
+	}
+
+	// 必须在兜底拒绝之前，否则永远不会命中。
+	if !(idxProbeDomain < idxReject && idxProbeSuffix < idxReject) {
+		t.Error("探测放行必须排在兜底拒绝之前")
+	}
+
+	// 这一条是踩过坑换来的：路由规则里一旦出现 ip_cidr，sing-box 会先把连接的
+	// 域名解析掉、目标变成 IP，于是靠前的 domain 规则全部失配——白名单整体失效。
+	// 所以探测放行只能走域名维度。（真实流量下复现过，见验收脚本第 4 节。）
+	for i, raw := range rulesOf(t, cfg) {
+		if _, has := raw.(map[string]any)["ip_cidr"]; has {
+			t.Errorf("rules[%d] 带了 ip_cidr：它会让 sing-box 提前解析域名，导致域名规则失效", i)
 		}
 	}
 }

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+
+	"github.com/k6nfmm7dbr-commits/sbx/internal/nodes"
 )
 
 // preloadRuleSet 在测试环境预置规则集文件（转换后的 sing-box source 格式）。
@@ -129,8 +131,9 @@ func TestCreateNodeWithAllowListWritesRoute(t *testing.T) {
 	// sing-box 配置：两条规则 + 两个 rule_set 定义
 	cfg := readSBConf(t)
 	rules := sbxRouteRules(t, cfg)
-	if len(rules) != 3 {
-		t.Fatalf("应生成 3 条规则（DNS / 白名单 / 拒绝），实得 %d: %#v", len(rules), rules)
+	if len(rules) != nodes.RulesPerLimitedNode {
+		t.Fatalf("应生成 %d 条规则（DNS / 探测×3 / 白名单 / 拒绝），实得 %d: %#v",
+			nodes.RulesPerLimitedNode, len(rules), rules)
 	}
 	for i, r := range rules {
 		m, _ := r.(map[string]any)
@@ -143,11 +146,12 @@ func TestCreateNodeWithAllowListWritesRoute(t *testing.T) {
 	if ports, _ := dns["port"].([]any); len(ports) != 1 || !isPort53(ports[0]) {
 		t.Errorf("第一条应是 DNS 放行: %#v", dns)
 	}
-	allowRule, _ := rules[1].(map[string]any)
+	// 白名单放行在探测规则之后、兜底拒绝之前。
+	allowRule, _ := rules[nodes.RulesPerLimitedNode-2].(map[string]any)
 	if allowRule["action"] != "route" || allowRule["outbound"] != "direct" {
-		t.Errorf("第二条应是白名单放行: %#v", allowRule)
+		t.Errorf("倒数第二条应是白名单放行: %#v", allowRule)
 	}
-	last, _ := rules[2].(map[string]any)
+	last, _ := rules[nodes.RulesPerLimitedNode-1].(map[string]any)
 	if last["action"] != "reject" {
 		t.Errorf("最后一条应是兜底拒绝: %#v", last)
 	}
@@ -239,7 +243,7 @@ func TestEditNodeAllowListLifecycle(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("改端口失败 %d", code)
 	}
-	if n := len(sbxRouteRules(t, readSBConf(t))); n != 3 {
+	if n := len(sbxRouteRules(t, readSBConf(t))); n != nodes.RulesPerLimitedNode {
 		t.Errorf("未提交 allow 时限制应保持，规则数 %d", n)
 	}
 
