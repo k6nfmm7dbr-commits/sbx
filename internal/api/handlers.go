@@ -95,6 +95,10 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request, route string)
 		// 规则集清单：供节点编辑页渲染「只允许访问」多选。
 		s.handleRuleSets(w, r)
 
+	case "/api/node-domains":
+		// 某节点访问过的域名及各自的流量（按流量倒序）。
+		s.handleNodeDomains(w, r)
+
 	case "/api/daily":
 		daysRaw := qsGet(r, "days")
 		days := 30
