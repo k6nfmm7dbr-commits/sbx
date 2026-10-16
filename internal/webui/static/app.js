@@ -472,9 +472,9 @@ function updateNodeFormFields() {
   document.querySelectorAll('.node-form-snell').forEach(function (el) { el.classList.toggle('hidden', protocol !== 'snell'); });
   document.querySelectorAll('.node-form-psk').forEach(function (el) { el.classList.toggle('hidden', !editingNode || protocol !== 'snell'); });
   var secretNote = document.getElementById('node-secret-note');
-  secretNote.textContent = editingNode && protocol === 'shadowsocks'
-    ? '切换加密算法会重新生成密钥；新的分享链接会同步更新。'
-    : '节点密钥和密码由服务器安全生成，面板不会显示或传输这些密钥。';
+  // 加密算法已在编辑模式下锁定（换算法请删节点重建），「切换重生成密钥」的路径
+  // 已不存在，特殊提示一并移除；编辑非 SS 协议时整条隐藏。
+  secretNote.textContent = '节点密钥和密码由服务器安全生成，面板不会显示或传输这些密钥。';
   secretNote.classList.toggle('hidden', !!editingNode && protocol !== 'shadowsocks');
 }
 
