@@ -52,7 +52,7 @@ func TestDomainPipelineEndToEnd(t *testing.T) {
 	const day = "2026-10-15"
 
 	// 第一轮：两条新连接
-	first := c.observeDomains(ctx, day)
+	first, _ := c.observeDomains(ctx, day)
 	if !authed {
 		t.Fatal("应带上密钥访问连接表")
 	}
@@ -77,7 +77,7 @@ func TestDomainPipelineEndToEnd(t *testing.T) {
 	  {"id":"c1","upload":300,"download":1700,
 	   "metadata":{"network":"tcp","type":"shadowsocks/sbx-n2","host":"shop.example.com"}}
 	]}`
-	second := c.observeDomains(ctx, day)
+	second, _ := c.observeDomains(ctx, day)
 	commitDomains(t, db, day, second)
 
 	rows, _ = QTopDomains(db.DB, day, day, "node:2", 10)
@@ -112,7 +112,7 @@ func TestDomainPipelineWithoutClashAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := &Collector{sbConf: sbConf, domTracker: newDomainTracker(), now: time.Now}
-	if got := c.observeDomains(context.Background(), "2026-10-15"); got != nil {
+	if got, _ := c.observeDomains(context.Background(), "2026-10-15"); got != nil {
 		t.Errorf("无管理接口时应返回空，实得 %#v", got)
 	}
 	if c.clashClient() != nil {
@@ -123,10 +123,10 @@ func TestDomainPipelineWithoutClashAPI(t *testing.T) {
 // 配置缺失同样不能影响采集主流程。
 func TestDomainPipelineMissingConfig(t *testing.T) {
 	c := &Collector{sbConf: filepath.Join(t.TempDir(), "nope.json"), domTracker: newDomainTracker(), now: time.Now}
-	if got := c.observeDomains(context.Background(), "2026-10-15"); got != nil {
+	if got, _ := c.observeDomains(context.Background(), "2026-10-15"); got != nil {
 		t.Errorf("配置缺失时应返回空，实得 %#v", got)
 	}
-	if got := c.observeDomains(context.Background(), "2026-10-15"); got != nil {
+	if got, _ := c.observeDomains(context.Background(), "2026-10-15"); got != nil {
 		t.Error("重复调用也应安全")
 	}
 }
@@ -169,5 +169,61 @@ func commitDomains(t *testing.T, db *database.DB, day string, deltas []domainDel
 	}
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// 提交失败时必须能回滚域名游标基线：observe 会就地推进 t.last，
+// 不回滚的话该轮已差分出的增量在重试后就没了（无声少计）。
+// 回滚后再次 observe 应把上一轮的增量一并结出。
+func TestObserveDomainsRollbackRestoresCursor(t *testing.T) {
+	var body = `{"connections":[
+	  {"id":"c1","upload":100,"download":400,
+	   "metadata":{"network":"tcp","type":"shadowsocks/sbx-n2","host":"shop.example.com"}}
+	]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer s" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	dir := t.TempDir()
+	sbConf := filepath.Join(dir, "sing-box.json")
+	if err := os.WriteFile(sbConf,
+		[]byte(`{"experimental":{"clash_api":{"external_controller":"`+addr+`","secret":"s"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &Collector{sbConf: sbConf, domTracker: newDomainTracker(), now: time.Now}
+	ctx := context.Background()
+	const day = "2026-10-15"
+
+	deltas, rollback := c.observeDomains(ctx, day)
+	if len(deltas) != 1 || deltas[0].rx != 100 || deltas[0].tx != 400 {
+		t.Fatalf("首轮应结算 100/400，实得 %#v", deltas)
+	}
+
+	// 模拟 commitTick 失败：回滚基线
+	rollback()
+
+	// 回滚后连接又增长了 50/60：再次 observe 应得到 150/460（含上一轮没入账的部分），
+	// 而不是只有 50/60——那样上一轮的 100/400 就永久丢了。
+	body = `{"connections":[
+	  {"id":"c1","upload":150,"download":460,
+	   "metadata":{"network":"tcp","type":"shadowsocks/sbx-n2","host":"shop.example.com"}}
+	]}`
+	second, _ := c.observeDomains(ctx, day)
+	if len(second) != 1 || second[0].rx != 150 || second[0].tx != 460 {
+		t.Fatalf("回滚后重算应得到 150/460，实得 %#v", second)
+	}
+
+	// 对照组：连接字节没变，正常路径应结算出零增量（空列表）——
+	// 证明 second 轮的 150/460 恰好是「上一轮被回滚丢弃的 100/400 + 新增 50/60」。
+	third, _ := c.observeDomains(ctx, day)
+	if len(third) != 0 {
+		t.Fatalf("连接无变化时应无增量，实得 %#v", third)
 	}
 }

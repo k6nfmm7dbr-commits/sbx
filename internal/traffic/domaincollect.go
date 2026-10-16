@@ -2,7 +2,6 @@ package traffic
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"os"
@@ -65,28 +64,44 @@ func (c *Collector) clashClient() *clash.Client {
 //
 // 任何失败都只记日志并返回 nil：域名统计是附加能力，绝不能影响主采集循环——
 // 那条链路负责计费口径的流量统计。
-func (c *Collector) observeDomains(ctx context.Context, day string) []domainDelta {
+// observeDomains 读取连接表并结算域名增量。
+// 第二个返回值用于提交失败时回滚内存游标（见 domainTracker.snapshot）。
+func (c *Collector) observeDomains(ctx context.Context, day string) ([]domainDelta, func()) {
+	rollback := c.domTracker.snapshot()
 	cli := c.clashClient()
 	if cli == nil {
-		return nil
+		return nil, rollback
 	}
 	conns, err := cli.Connections(ctx)
 	if err != nil {
 		slog.Debug("读取 sing-box 连接表失败，本轮跳过域名统计", "err", err)
-		return nil
+		return nil, rollback
 	}
-	return c.domTracker.observe(conns, day)
+	return c.domTracker.observe(conns, day), rollback
 }
 
 // purgeDomainsIfDue 清理过期的域名明细。每小时最多执行一次——
 // 虽然走的是主键前缀，也没必要每个 tick 都删一遍。
-func (c *Collector) purgeDomainsIfDue(ctx context.Context, tx *sql.Tx, day string) error {
+// purgeDomainsIfDue 每小时最多执行一次过期清理，走独立短事务。
+// 只在成功后推进 domPurgeAt：失败时下一轮 tick 立即重试，而不是白等一小时。
+func (c *Collector) purgeDomainsIfDue(ctx context.Context, day string) error {
 	now := c.now()
 	if !c.domPurgeAt.IsZero() && now.Sub(c.domPurgeAt) < time.Hour {
 		return nil
 	}
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err := purgeDomainsBefore(ctx, tx, dayBefore(day, domainRetentionDays)); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
 	c.domPurgeAt = now
-	return purgeDomainsBefore(ctx, tx, dayBefore(day, domainRetentionDays))
+	return nil
 }
 
 // dayBefore 返回 day 往前 n 天的日期；day 形如 2006-01-02。
