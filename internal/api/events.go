@@ -29,9 +29,15 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	// 清除 http.Server 的 WriteTimeout 对长连接写的截止时间，避免 SSE 60s 被掐断。
+	// 覆盖 http.Server 的 WriteTimeout（60s，从请求开始计），避免 SSE 长连接被掐断。
+	//
+	// 这里刻意**不用** SetWriteDeadline(time.Time{}) 永久清除：那样对端假死的
+	// 连接在写路径上永远不超时，hs.Shutdown 会一直等到 10s 宽限期耗尽，
+	// 而 Shutdown 超时后 main 直接 os.Exit——可能正好切在节点变更两次
+	// RenameAtomic 之间，留下 config 与 nodes.json 代际不一致的现场。
+	// 改为每次写前推一个有限截止时间（见 writeSSE），死连接最多阻塞一个周期。
 	if rc := http.NewResponseController(w); rc != nil {
-		_ = rc.SetWriteDeadline(time.Time{})
+		_ = rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
 	}
 
 	// 先订阅，再取得首包。若先写首包、后 Subscribe，reconcile 可能在这段窗口
@@ -153,7 +159,17 @@ func (s *Server) ssePayloads() (map[string]string, uint64) {
 }
 
 // writeSSE 写一条 SSE 事件并 flush。返回 false 表示写入失败（客户端已断开）。
+// sseWriteTimeout 是单次 SSE 写的截止时间。心跳间隔 15s，取 30s：
+// 正常客户端即使偶发卡顿也足够；假死连接最多拖 30s 就会被写错误终结，
+// 不会把 hs.Shutdown 拖到宽限超时。
+const sseWriteTimeout = 30 * time.Second
+
 func writeSSE(w http.ResponseWriter, flusher http.Flusher, event string, data []byte) bool {
+	// 每次写前推进截止时间：连接只要活着并被正常消费，截止就永远够不着；
+	// 对端假死（TCP 重传堆积）时最多 30s 报错退出，释放连接与 goroutine。
+	if rc := http.NewResponseController(w); rc != nil {
+		_ = rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
+	}
 	if data == nil {
 		// heartbeat：只写注释行
 		if _, err := w.Write([]byte(": ping\n\n")); err != nil {

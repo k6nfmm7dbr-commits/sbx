@@ -65,7 +65,9 @@ CREATE TABLE IF NOT EXISTS samples (
 );
 CREATE INDEX IF NOT EXISTS idx_samples_ts ON samples(ts);
 -- domain_daily 按「域名」维度记录流量，数据来自 sing-box 的 Clash API 连接表。
--- 主键 (day, scope, domain) 已覆盖「某节点某天按流量排序」的查询。
+-- 主键 (day, scope, domain) 以 day 开头：按 (scope, day) 查询只能对 day 做
+-- 范围扫描，窗口内**所有节点**的行都要扫完再过滤 scope。补一个 (scope, day)
+-- 前缀索引，单节点查询从最坏几十万行降到该节点自己的行数（差 50 倍）。
 CREATE TABLE IF NOT EXISTS domain_daily (
     day    TEXT NOT NULL,
     scope  TEXT NOT NULL,
@@ -75,6 +77,7 @@ CREATE TABLE IF NOT EXISTS domain_daily (
     hits   INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (day, scope, domain)
 );
+CREATE INDEX IF NOT EXISTS idx_domain_daily_scope_day ON domain_daily(scope, day);
 CREATE TABLE IF NOT EXISTS node_policy (
     node_id                TEXT PRIMARY KEY,
     paused                 INTEGER NOT NULL DEFAULT 0,

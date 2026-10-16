@@ -63,6 +63,30 @@ func newDomainTracker() *domainTracker {
 	}
 }
 
+// snapshot 在 observe 之前留存游标基线。
+//
+// 为什么需要：observe 会就地推进 t.last，而增量要等 commitTick 事务提交才落库。
+// 若提交失败（磁盘满、DB busy），计数器基线在 DB 里随事务一起回滚、下一轮
+// 差分会重算，没有损失；但 t.last 在内存里，不回滚的话这一轮已差分出的域名
+// 增量就永久丢失了——且是无声的少计。提交失败时调用 rollback 恢复基线即可。
+func (t *domainTracker) snapshot() func() {
+	saved := make(map[string]connCursor, len(t.last))
+	for id, cur := range t.last {
+		saved[id] = cur
+	}
+	savedDay := t.day
+	return func() {
+		t.last = saved
+		if t.day != savedDay {
+			// 跨天被回滚：恢复 day 让下一轮差分对到正确的日期。
+			// known（当天已知域名集合）不回滚——它只影响 5000 上限计数，
+			// 深拷贝成本不值当；跨天与提交失败同 tick 撞上的概率极低，
+			// 最坏后果也仅是上限重新放行一批已记录过的域名。
+			t.day = savedDay
+		}
+	}
+}
+
 // observe 用一次连接表快照算出本轮增量。返回的切片元素即待入账的数据。
 func (t *domainTracker) observe(conns []clash.Connection, day string) []domainDelta {
 	if t.day != day { // 跨天：域名计数重置
@@ -173,7 +197,9 @@ func normalizeHost(m clash.Metadata) string {
 		return unknownDomain
 	}
 	if len(h) > maxDomainLen {
-		h = h[:maxDomainLen]
+		// 按字节截断可能切断多字节 UTF-8 序列；丢弃尾部不完整的残片，
+		// 避免无效 UTF-8 进入 SQLite（TEXT 列要求合法 UTF-8）。
+		h = strings.ToValidUTF8(h[:maxDomainLen], "")
 	}
 	return h
 }

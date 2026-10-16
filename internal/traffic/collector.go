@@ -3,6 +3,7 @@ package traffic
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -59,6 +60,9 @@ type Collector struct {
 	lastConns     map[string]connection.Conns
 	hasConns      bool
 	repairAt      int64
+	// 采集异常的日志退避状态（只在采集线程读写，mu 仅保护与 setError 一致）。
+	lastWarnMsg string
+	lastWarnAt  int64
 
 	rateMu      sync.Mutex
 	rateVersion uint64
@@ -222,6 +226,12 @@ func rateSnapshotStale(last int64, interval int, now int64) bool {
 func (c *Collector) metaGet(ctx context.Context, key string) (string, bool) {
 	var val sql.NullString
 	if err := c.db.QueryRowContext(ctx, "SELECT v FROM meta WHERE k=?", key).Scan(&val); err != nil {
+		// 「无此键」是正常路径；其余错误必须留痕——否则上层会把真实的
+		// DB 故障（磁盘满/库损坏）当成「没有基线」处理，展示出来的
+		// 是误导性的「疑似部分读取」而不是根因。
+		if !errors.Is(err, sql.ErrNoRows) {
+			slog.Debug("读取 meta 失败", "key", key, "err", err)
+		}
 		return "", false
 	}
 	if !val.Valid {
@@ -288,7 +298,7 @@ func (d *deltaSlot) anyTraffic() bool {
 // commitTick 把一轮差分结果原子入账：增量、样本、基线、世代、清理同事务。
 func (c *Collector) commitTick(ctx context.Context, deltas map[string]*deltaSlot,
 	snap firewall.Snapshot, state map[string]counterBaseline, freshRuleset bool,
-	ts, tsMS int64, epoch uint64, hasEpoch bool, domDeltas []domainDelta) error {
+	ts, tsMS int64, epoch uint64, hasEpoch bool, domDeltas []domainDelta, day string) error {
 
 	tx, err := c.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -318,7 +328,6 @@ func (c *Collector) commitTick(ctx context.Context, deltas map[string]*deltaSlot
 	}
 	sort.Strings(scopes)
 
-	day := TodayAt(c.cfg.TZ, c.now())
 	for _, scope := range scopes {
 		d := deltas[scope]
 		if d.anyTraffic() {
@@ -393,9 +402,6 @@ func (c *Collector) commitTick(ctx context.Context, deltas map[string]*deltaSlot
 	}
 	// 域名明细与计数同事务入账：避免出现「总量已更新、域名还没写」的中间态。
 	if err := applyDomainDeltas(ctx, tx, day, domDeltas); err != nil {
-		return err
-	}
-	if err := c.purgeDomainsIfDue(ctx, tx, day); err != nil {
 		return err
 	}
 
@@ -541,10 +547,24 @@ func (c *Collector) Tick(ctx context.Context) error {
 	}
 
 	// 域名流量：读一次 sing-box 连接表并结算增量。失败只降级，不影响上面的计数。
-	domDeltas := c.observeDomains(ctx, TodayAt(c.cfg.TZ, c.now()))
+	//
+	// day 只算一次、observe 与 commitTick 共用：两处各调一次 TodayAt 的话，
+	// tick 恰好跨零点时 observe 按昨天差分、commit 按今天入账，个别连接
+	// 的流量会记错日期。
+	day := TodayAt(c.cfg.TZ, c.now())
+	domDeltas, domRollback := c.observeDomains(ctx, day)
 
-	if err := c.commitTick(ctx, deltas, snapshot, state, freshRuleset, ts, tsMS, epoch, hasEpoch, domDeltas); err != nil {
+	if err := c.commitTick(ctx, deltas, snapshot, state, freshRuleset, ts, tsMS, epoch, hasEpoch, domDeltas, day); err != nil {
+		// 提交失败：把域名游标基线也回滚，这一轮已差分出的增量下轮重算。
+		// 计数器基线在 DB 里随事务回滚，无需处理；域名游标在内存里。
+		domRollback()
 		return err
+	}
+	// 180 天过期清理走独立短事务：此前放在采样事务里，清理日的 DELETE
+	// 最坏几十万行，会把唯一连接占住，期间所有 API 查询一起排队。
+	// 一小时才轮到一次，失败只降级（下一小时再试），不影响本 tick 入账。
+	if err := c.purgeDomainsIfDue(ctx, day); err != nil {
+		slog.Debug("域名过期清理失败, 下小时重试", "err", err)
 	}
 
 	// 连接数缓存：由采集线程每轮算一次，HTTP 请求不再逐次读 /proc。
@@ -628,7 +648,20 @@ func (c *Collector) Run(ctx context.Context) {
 				}
 			} else {
 				c.setError(err.Error())
-				slog.Warn("采集异常", "err", err)
+				// 持续性故障（磁盘满、DB 锁死）每 2s 打一条 Warn，一天 4.3 万行，
+				// 非 systemd 运行时能把日志盘写满进而让 SQLite 写失败。
+				// 同一条错误 5 分钟内只记一次；错误内容变化则立即再记。
+				c.mu.Lock()
+				nowSec := time.Now().Unix()
+				repeat := err.Error() == c.lastWarnMsg && nowSec-c.lastWarnAt < 300
+				if !repeat {
+					c.lastWarnMsg = err.Error()
+					c.lastWarnAt = nowSec
+				}
+				c.mu.Unlock()
+				if !repeat {
+					slog.Warn("采集异常", "err", err)
+				}
 			}
 		}
 		deadline = deadline.Add(interval)
