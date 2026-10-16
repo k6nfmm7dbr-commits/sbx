@@ -367,7 +367,6 @@ select.unit { padding-right: 12px; background-image: none; }
 /* Login */
 .login-body { display: grid; min-height: 100dvh; place-items: center; padding: 22px; }
 .login { width: min(350px,100%); padding: 27px; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); text-align: left; }
-.brand-mark { display: grid; place-items: center; width: 43px; height: 43px; margin-bottom: 17px; border-radius: 11px; color: #fff; background: var(--accent); font-size: 15px; font-weight: 800; }
 .login h1 { font-size: 20px; font-weight: 720; }
 .login p { margin: 6px 0 17px; color: var(--text-3); font-size: 12.5px; }
 .login code { padding: 1px 5px; border-radius: 4px; color: var(--accent); background: var(--accent-soft); font-family: ui-monospace,monospace; font-size: 11px; }
