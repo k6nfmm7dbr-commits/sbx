@@ -512,3 +512,81 @@ func TestPanelDeleteCanExplicitlyClearHistory(t *testing.T) {
 		t.Fatalf("累计必须始终保留, count=%d", totalsCount)
 	}
 }
+
+// 批量创建：一次变更建 N 个节点（一次重启）、端口自动分配互不冲突、
+// 指定起始端口撞占用时整体拒绝；批量删除：一次变更删 N 个、任一 id
+// 不存在整体拒绝。全成或全不动，不做部分成功。
+func TestPanelNodeBatchCreateAndDelete(t *testing.T) {
+	ts, nodesFile, restarts, applies, _ := newNodeCRUDTestServer(t)
+	restartsBefore, appliesBefore := *restarts, *applies
+
+	code, body := doJSON(t, ts, http.MethodPost, "/api/nodes/batch",
+		`{"type":"shadowsocks","name_prefix":"员工","count":3}`)
+	if code != http.StatusOK {
+		t.Fatalf("batch create status=%d body=%v", code, body)
+	}
+	created, ok := body["created"].([]any)
+	if !ok || len(created) != 3 {
+		t.Fatalf("应创建 3 个节点: %#v", body)
+	}
+	ports := map[float64]bool{}
+	for i, raw := range created {
+		n := raw.(map[string]any)
+		want := fmt.Sprintf("员工-%d", i+1)
+		if n["name"] != want {
+			t.Errorf("第 %d 个节点名应为 %s，实得 %v", i+1, want, n["name"])
+		}
+		p := n["port"].(float64)
+		if p < 30000 || ports[p] {
+			t.Errorf("端口 %v 越界或重复", p)
+		}
+		ports[p] = true
+	}
+	if *restarts != restartsBefore+1 || *applies != appliesBefore+1 {
+		t.Fatalf("批量创建应只触发一次变更: restart=%d apply=%d", *restarts-restartsBefore, *applies-appliesBefore)
+	}
+	var saved []map[string]any
+	b, _ := os.ReadFile(nodesFile)
+	_ = json.Unmarshal(b, &saved)
+	if len(saved) != 3 {
+		t.Fatalf("nodes.json 应有 3 个节点，实得 %d", len(saved))
+	}
+	if saved[0]["password"] == saved[1]["password"] {
+		t.Fatal("各节点密码必须互不相同")
+	}
+
+	// 指定起始端口撞占用 → 422 整体拒绝
+	var usedPort int
+	for p := range ports {
+		usedPort = int(p)
+		break
+	}
+	code, body = doJSON(t, ts, http.MethodPost, "/api/nodes/batch",
+		fmt.Sprintf(`{"type":"shadowsocks","count":1,"port_start":%d}`, usedPort))
+	if code != http.StatusUnprocessableEntity {
+		t.Fatalf("端口占用应 422，实得 %d: %v", code, body)
+	}
+
+	// 批量删除：含不存在的 id → 422 整体拒绝
+	code, body = doJSON(t, ts, http.MethodPost, "/api/nodes/delete-batch", `{"ids":["1","999"]}`)
+	if code != http.StatusUnprocessableEntity {
+		t.Fatalf("删除不存在节点应 422，实得 %d", code)
+	}
+
+	restartsBefore, appliesBefore = *restarts, *applies
+	code, body = doJSON(t, ts, http.MethodPost, "/api/nodes/delete-batch", `{"ids":["1","3"]}`)
+	if code != http.StatusOK {
+		t.Fatalf("batch delete status=%d body=%v", code, body)
+	}
+	if deleted, _ := body["deleted"].([]any); len(deleted) != 2 {
+		t.Fatalf("应删除 2 个: %#v", body)
+	}
+	if *restarts != restartsBefore+1 {
+		t.Fatalf("批量删除应只触发一次重启")
+	}
+	b, _ = os.ReadFile(nodesFile)
+	_ = json.Unmarshal(b, &saved)
+	if len(saved) != 1 || saved[0]["id"] != float64(2) {
+		t.Fatalf("应只剩节点 2: %s", b)
+	}
+}

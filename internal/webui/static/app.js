@@ -447,7 +447,12 @@ function renderManageNodes() {
     if (Array.isArray(n.allow) && n.allow.length) meta.push('仅允许 ' + n.allow.length + ' 项服务');
     var peers = Array.isArray(n.port_conflict_with) ? n.port_conflict_with : [];
     if (peers.length) meta.push('端口重复，与节点 #' + peers.join(', #') + ' 冲突');
-    return '<article class="manage-node' + (n.paused ? ' paused' : '') + (peers.length ? ' conflict' : '') + '">' +
+    var checkbox = manageSelectMode
+      ? '<input type="checkbox" class="node-pick" data-node-pick="' + esc(n.id) + '"' +
+        (manageSelected[String(n.id)] ? ' checked' : '') + ' aria-label="选择 ' + esc(n.name) + '">'
+      : '';
+    return '<article class="manage-node' + (n.paused ? ' paused' : '') + (peers.length ? ' conflict' : '') + (manageSelected[String(n.id)] ? ' picked' : '') + '">' +
+      checkbox +
       '<div class="manage-node-main"><strong>' + esc(n.name) + '</strong>' +
       '<span>' + esc(meta.join(' · ')) + '</span></div>' +
       '<div class="manage-node-actions">' +
@@ -457,6 +462,25 @@ function renderManageNodes() {
       '</div></article>';
   }).join('');
   host.innerHTML = warning + cards;
+  var delBtn = document.getElementById('node-batch-delete');
+  if (delBtn) {
+    var count = Object.keys(manageSelected).length;
+    delBtn.classList.toggle('hidden', !manageSelectMode || count === 0);
+    delBtn.textContent = '删除所选（' + count + '）';
+  }
+}
+
+/* ---- 批量管理模式：勾选节点后一次删除。默认关闭。 ---- */
+var manageSelectMode = false;
+var manageSelected = {};
+
+function setManageSelectMode(on) {
+  manageSelectMode = on;
+  if (!on) manageSelected = {};
+  document.getElementById('node-batch-manage').textContent = on ? '退出批量管理' : '批量管理';
+  document.getElementById('node-batch-manage').classList.toggle('on', on);
+  document.getElementById('node-batch-delete').classList.toggle('hidden', true);
+  renderManageNodes();
 }
 
 function findManageNode(id) {
@@ -804,6 +828,29 @@ function deleteNodeConfig(id) {
   }).catch(function (e) { if (e.message !== '未登录') toast(e.message); });
 }
 
+var nodeLinkTexts = [];
+
+// copyText 在 http 明文环境（navigator.clipboard 不可用）下退回到
+// execCommand；两条路都失败时让用户手动长按复制。
+function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text);
+  }
+  return new Promise(function (resolve, reject) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    document.body.removeChild(ta);
+    if (ok) resolve(); else reject(new Error('复制失败，请长按文本手动复制'));
+  });
+}
+
 function showNodeLinks(id) {
   var n = findManageNode(id);
   document.getElementById('node-links-title').textContent = n ? n.name : '节点分享';
@@ -811,9 +858,19 @@ function showNodeLinks(id) {
   host.innerHTML = '<div class="empty">正在加载分享链接…</div>';
   openDrawer('node-links-drawer');
   nodeRequest('/api/nodes/' + id + '/links', 'GET').then(function (d) {
-    var html = '<div class="link-field"><small>分享链接</small><pre>' + esc(d.ipv4) + '</pre></div>';
-    if (d.ipv6) html += '<div class="link-field"><small>IPv6</small><pre>' + esc(d.ipv6) + '</pre></div>';
-    (d.surge || []).forEach(function (line, i) { html += '<div class="link-field"><small>Surge' + (i ? ' IPv6' : '') + '</small><pre>' + esc(line) + '</pre></div>'; });
+    // 面板走 http 明文时 navigator.clipboard 不可用（安全上下文限制），
+    // 统一走 execCommand 回退；iOS Safari 也支持。
+    var items = [{ label: '分享链接', text: d.ipv4 }];
+    if (d.ipv6) items.push({ label: 'IPv6', text: d.ipv6 });
+    (d.surge || []).forEach(function (line, i) {
+      items.push({ label: 'Surge' + (i ? ' IPv6' : ''), text: line });
+    });
+    nodeLinkTexts = items.map(function (it) { return it.text; });
+    var html = items.map(function (it, i) {
+      return '<div class="link-field"><small>' + esc(it.label) + '</small>' +
+        '<div class="link-row"><pre>' + esc(it.text) + '</pre>' +
+        '<button type="button" class="mini-btn" data-copy-link="' + i + '">复制</button></div></div>';
+    }).join('');
     host.innerHTML = html;
   }).catch(function (e) {
     if (e.message !== '未登录') host.innerHTML = '<div class="err">' + esc(e.message) + '</div>';
@@ -833,11 +890,71 @@ function bindNodeManageUI() {
   document.getElementById('node-editor-close').addEventListener('click', function () { closeDrawer('node-editor-drawer'); });
   document.getElementById('node-links-close').addEventListener('click', function () { closeDrawer('node-links-drawer'); });
   document.getElementById('node-links-done').addEventListener('click', function () { closeDrawer('node-links-drawer'); });
+  document.getElementById('node-links-list').addEventListener('click', function (e) {
+    var btn = e.target.closest('[data-copy-link]');
+    if (!btn) return;
+    var text = nodeLinkTexts[Number(btn.getAttribute('data-copy-link'))];
+    if (text == null) return;
+    copyText(text).then(function () { toast('已复制到剪贴板'); })
+      .catch(function (err) { toast(err.message || '复制失败'); });
+  });
   document.getElementById('node-manage-list').addEventListener('click', function (e) {
     var el = e.target.closest('[data-node-links]'); if (el) { showNodeLinks(el.getAttribute('data-node-links')); return; }
     el = e.target.closest('[data-node-edit]'); if (el) { openNodeEditor(el.getAttribute('data-node-edit')); return; }
     el = e.target.closest('[data-node-delete]'); if (el) deleteNodeConfig(el.getAttribute('data-node-delete'));
   });
+  document.getElementById('node-manage-list').addEventListener('change', function (e) {
+    var box = e.target.closest('[data-node-pick]');
+    if (!box) return;
+    var id = box.getAttribute('data-node-pick');
+    if (box.checked) manageSelected[id] = true; else delete manageSelected[id];
+    renderManageNodes();
+  });
+  document.getElementById('node-batch-manage').addEventListener('click', function () {
+    setManageSelectMode(!manageSelectMode);
+  });
+  document.getElementById('node-batch-delete').addEventListener('click', function () {
+    var ids = Object.keys(manageSelected);
+    if (!ids.length) return;
+    if (!window.confirm('确定删除选中的 ' + ids.length + ' 个节点？\n默认保留其历史流量记录。')) return;
+    nodeRequest('/api/nodes/delete-batch', 'POST', { ids: ids }).then(function (d) {
+      toast('已删除 ' + ids.length + ' 个节点');
+      setManageSelectMode(false);
+      loadManageNodes();
+      if (d.warning) toast(d.warning);
+    }).catch(function (e) { if (e.message !== '未登录') toast(e.message); });
+  });
+  document.getElementById('node-batch-open').addEventListener('click', function () {
+    document.getElementById('node-batch-prefix').value = '';
+    document.getElementById('node-batch-count').value = 3;
+    document.getElementById('node-batch-port').value = '';
+    openDrawer('node-batch-drawer');
+  });
+  document.getElementById('node-batch-close').addEventListener('click', function () { closeDrawer('node-batch-drawer'); });
+  document.getElementById('node-batch-cancel').addEventListener('click', function () { closeDrawer('node-batch-drawer'); });
+  document.getElementById('node-batch-save').addEventListener('click', saveNodeBatch);
+}
+
+function saveNodeBatch() {
+  var type = document.getElementById('node-batch-type').value;
+  var prefix = document.getElementById('node-batch-prefix').value.trim();
+  var count = Number(document.getElementById('node-batch-count').value);
+  var portRaw = document.getElementById('node-batch-port').value.trim();
+  var body = { type: type, name_prefix: prefix, count: count };
+  if (portRaw !== '') {
+    if (!/^\d+$/.test(portRaw)) { toast('起始端口必须是数字'); return; }
+    body.port_start = Number(portRaw);
+  }
+  var btn = document.getElementById('node-batch-save');
+  btn.disabled = true;
+  nodeRequest('/api/nodes/batch', 'POST', body).then(function (d) {
+    closeDrawer('node-batch-drawer');
+    toast('已创建 ' + d.count + ' 个节点');
+    loadManageNodes();
+    if (d.warning) toast(d.warning);
+  }).catch(function (e) {
+    if (e.message !== '未登录') toast(e.message);
+  }).finally(function () { btn.disabled = false; });
 }
 
 /* ---------- 事件 ---------- */
@@ -1073,7 +1190,7 @@ document.getElementById('node-cards').addEventListener('click', function (e) {
   if (mg) { showPolicy(mg.getAttribute('data-manage')); return; }
 });
 document.getElementById('drawer-close').addEventListener('click', function () { closeDrawer('policy-drawer'); });
-document.getElementById('drawer-mask').addEventListener('click', function () { closeDrawer('policy-drawer'); closeDrawer('ips-drawer'); closeDrawer('node-editor-drawer'); closeDrawer('node-links-drawer'); });
+document.getElementById('drawer-mask').addEventListener('click', function () { closeDrawer('policy-drawer'); closeDrawer('ips-drawer'); closeDrawer('node-editor-drawer'); closeDrawer('node-links-drawer'); closeDrawer('node-batch-drawer'); });
 document.getElementById('pol-cancel').addEventListener('click', function () { closeDrawer('policy-drawer'); });
 document.getElementById('pol-save').addEventListener('click', savePolicy);
 document.getElementById('ips-close').addEventListener('click', function () { closeDrawer('ips-drawer'); });

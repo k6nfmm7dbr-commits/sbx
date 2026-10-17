@@ -411,6 +411,325 @@ func (s *Server) createNode(w http.ResponseWriter, r *http.Request) {
 	s.sendJSON(w, r, http.StatusOK, mutationResponse{Node: dto, Warning: warning})
 }
 
+// nodeBatchCreateRequest 是批量创建的请求体。
+// 端口可以指定起始值，也可以留空由服务端自动挑选连续空闲段。
+type nodeBatchCreateRequest struct {
+	Type       string `json:"type"`
+	NamePrefix string `json:"name_prefix"`
+	Count      int    `json:"count"`
+	PortStart  int    `json:"port_start,omitempty"`
+}
+
+// listeningTCPPorts 返回本机当前处于 LISTEN 状态的 TCP 端口（v4+v6）。
+// 批量建节点选端口时用它避开系统里已有的服务，防止把端口分给一个
+// 已经被别人监听的号——那会让 sing-box check 通过但重启起不来。
+func listeningTCPPorts() (map[int]bool, error) {
+	out := map[int]bool{}
+	for _, path := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue // tcp6 不存在（未启用 IPv6）是正常情况
+		}
+		for i, line := range strings.Split(string(data), "\n") {
+			if i == 0 || line == "" {
+				continue
+			}
+			fields := strings.Fields(line)
+			if len(fields) < 4 || fields[3] != "0A" { // 0A = LISTEN
+				continue
+			}
+			local := strings.Split(fields[1], ":")
+			if len(local) != 2 {
+				continue
+			}
+			p, err := strconv.ParseInt(local[1], 16, 32)
+			if err == nil && p > 0 && p < 65536 {
+				out[int(p)] = true
+			}
+		}
+	}
+	return out, nil
+}
+
+func (s *Server) createNodeBatch(w http.ResponseWriter, r *http.Request) {
+	auditResult := "failure"
+	defer func() { auditEvent(r, "node_batch_create", auditResult) }()
+	var req nodeBatchCreateRequest
+	if err := decodeNodeBody(r, &req); err != nil {
+		s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	req.NamePrefix = strings.TrimSpace(req.NamePrefix)
+	if !nodes.ValidType(req.Type) {
+		s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": "节点类型不支持"})
+		return
+	}
+	if req.Count < 1 || req.Count > 50 {
+		s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": "数量需在 1-50"})
+		return
+	}
+	if req.NamePrefix == "" {
+		req.NamePrefix = req.Type
+	}
+	if len(req.NamePrefix) > 40 {
+		s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": "名称前缀过长（≤40 字符）"})
+		return
+	}
+
+	list, err := nodes.LoadPanelNodesStrict(s.cfg.NodesFile)
+	if err != nil {
+		s.failUnavailable(w, r, codeNodesFileUnavailable, "", "节点配置文件不可用", err)
+		return
+	}
+	usedPorts := map[int]bool{}
+	for _, n := range list {
+		for _, pr := range nodes.ParsePorts(n) {
+			for p := pr[0]; p <= pr[1]; p++ {
+				usedPorts[int(p)] = true
+			}
+		}
+	}
+	listeners, err := listeningTCPPorts()
+	if err != nil {
+		s.failInternal(w, r, codeNodesFileUnavailable, err)
+		return
+	}
+	for p := range listeners {
+		usedPorts[p] = true
+	}
+
+	// 分配 count 个互不冲突的端口。
+	ports := make([]int, 0, req.Count)
+	if req.PortStart > 0 {
+		if req.PortStart < 1024 || req.PortStart+req.Count-1 > 65535 {
+			s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": "起始端口无效或区间越界（1024-65535）"})
+			return
+		}
+		for i := 0; i < req.Count; i++ {
+			p := req.PortStart + i
+			if usedPorts[p] {
+				s.sendJSON(w, r, http.StatusUnprocessableEntity,
+					map[string]string{"error": fmt.Sprintf("端口 %d 已被占用；请换起始端口或留空自动分配", p)})
+				return
+			}
+			ports = append(ports, p)
+		}
+	} else {
+		for p := 30000; p <= 65535 && len(ports) < req.Count; p++ {
+			if !usedPorts[p] {
+				ports = append(ports, p)
+			}
+		}
+		if len(ports) < req.Count {
+			s.sendJSON(w, r, http.StatusUnprocessableEntity, map[string]string{"error": "30000-65535 内找不到足够的空闲端口"})
+			return
+		}
+	}
+
+	store := s.nodeStore()
+	sni := ""
+	if req.Type == "trojan" || req.Type == "anytls" {
+		sni = "www.bing.com"
+		if err := ensureNodeCerts(r.Context(), store, sni); err != nil {
+			s.sendJSON(w, r, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+
+	type spec = nodes.BatchNodeSpec
+	specs := make([]spec, 0, req.Count)
+	for i := 0; i < req.Count; i++ {
+		sp := spec{Type: req.Type, Port: int64(ports[i]), Name: fmt.Sprintf("%s-%d", req.NamePrefix, i+1)}
+		switch req.Type {
+		case "vless":
+			uid, err := uuidForNode()
+			if err != nil {
+				s.failInternal(w, r, codeNodesFileUnavailable, err)
+				return
+			}
+			priv, pub, err := keyPairFromSingBox(r.Context())
+			if err != nil {
+				s.sendJSON(w, r, http.StatusUnprocessableEntity, map[string]string{"error": "生成 Reality 密钥失败"})
+				return
+			}
+			sid, err := nodes.GenerateHex(8)
+			if err != nil {
+				s.failInternal(w, r, codeNodesFileUnavailable, err)
+				return
+			}
+			sp.UUID, sp.SNI, sp.Flow, sp.PrivateKey, sp.PublicKey, sp.ShortID = uid, "www.microsoft.com", "xtls-rprx-vision", priv, pub, sid
+		case "shadowsocks":
+			pw, err := nodes.GenerateSS2022Password(nodes.SS2022Method128)
+			if err != nil {
+				s.sendJSON(w, r, http.StatusUnprocessableEntity, map[string]string{"error": "生成密码失败"})
+				return
+			}
+			sp.Method, sp.Password = nodes.SS2022Method128, pw
+		case "trojan", "anytls":
+			pw, err := nodes.GenerateHex(12)
+			if err != nil {
+				s.failInternal(w, r, codeNodesFileUnavailable, err)
+				return
+			}
+			sp.SNI, sp.Password = sni, pw
+		case "snell":
+			psk, err := nodes.GenerateHex(32)
+			if err != nil {
+				s.failInternal(w, r, codeNodesFileUnavailable, err)
+				return
+			}
+			sp.PSK, sp.Version = psk, 5
+		}
+		specs = append(specs, sp)
+	}
+	specJSON, err := json.Marshal(specs)
+	if err != nil {
+		s.failInternal(w, r, codeNodesFileUnavailable, err)
+		return
+	}
+
+	cli, _, _ := s.newNodeCLI()
+	result, warning, err := s.withNodeMutationBuild(r.Context(), cli, func() ([]string, error) {
+		return []string{"add-batch", "--spec=" + string(specJSON)}, nil
+	})
+	if err != nil {
+		s.sendJSON(w, r, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
+	var out struct {
+		Created []struct {
+			ID   json.Number `json:"id"`
+			Name string      `json:"name"`
+			Port json.Number `json:"port"`
+		} `json:"created"`
+	}
+	if err := json.Unmarshal([]byte(result), &out); err != nil {
+		s.failInternal(w, r, codeNodesFileUnavailable, err)
+		return
+	}
+	ids := make([]string, 0, len(out.Created))
+	for _, c := range out.Created {
+		ids = append(ids, c.ID.String())
+	}
+	auditResult = fmt.Sprintf("success:%d", len(ids))
+	dt, err := s.publicNodesByIDs(ids)
+	if err != nil {
+		s.failInternal(w, r, codeNodesFileUnavailable, err)
+		return
+	}
+	s.invalidateCache()
+	s.sendJSON(w, r, http.StatusOK, map[string]any{"created": dt, "count": len(ids), "warning": warning})
+}
+
+func (s *Server) publicNodesByIDs(ids []string) ([]nodes.PublicNodeDTO, error) {
+	list, err := nodes.LoadPanelNodesStrict(s.cfg.NodesFile)
+	if err != nil {
+		return nil, err
+	}
+	want := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		want[id] = true
+	}
+	out := make([]nodes.PublicNodeDTO, 0, len(ids))
+	for _, n := range list {
+		if want[nodes.IDString(n)] {
+			out = append(out, nodes.PublicNodes([]nodes.Node{n})[0])
+		}
+	}
+	return out, nil
+}
+
+// nodeBatchDeleteRequest：ids 必须全部存在，否则整体拒绝（与 CLI 语义一致）。
+type nodeBatchDeleteRequest struct {
+	IDs          []string `json:"ids"`
+	ClearHistory bool     `json:"clear_history,omitempty"`
+}
+
+func (s *Server) deleteNodeBatch(w http.ResponseWriter, r *http.Request) {
+	auditResult := "failure"
+	defer func() { auditEvent(r, "node_batch_delete", auditResult) }()
+	var req nodeBatchDeleteRequest
+	if err := decodeNodeBody(r, &req); err != nil {
+		s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	if len(req.IDs) < 1 || len(req.IDs) > 50 {
+		s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": "ids 数量需在 1-50"})
+		return
+	}
+	clean := make([]string, 0, len(req.IDs))
+	seen := map[string]bool{}
+	for _, id := range req.IDs {
+		id, err := parsePositiveNodeID(strings.TrimSpace(id))
+		if err != nil {
+			s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if seen[id] {
+			s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": "重复的节点 id: " + id})
+			return
+		}
+		seen[id] = true
+		clean = append(clean, id)
+	}
+	names := make(map[string]string, len(clean))
+	for _, id := range clean {
+		names[id] = s.nodeDisplayName(id)
+	}
+	if !s.requireNodesForBatchMutation(w, r, clean) {
+		return
+	}
+	cli, _, _ := s.newNodeCLI()
+	joined := strings.Join(clean, ",")
+	_, warning, err := s.withNodeMutation(r.Context(), cli, "remove-batch", joined)
+	if err != nil {
+		s.sendJSON(w, r, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
+	auditResult = fmt.Sprintf("success:%d", len(clean))
+	for _, id := range clean {
+		s.rememberNodeName(id, names[id])
+	}
+	historyCleared := false
+	if req.ClearHistory {
+		for _, id := range clean {
+			if err := s.clearNodeDailyAndSampleHistory(r.Context(), id); err != nil {
+				if warning != "" {
+					warning += "; "
+				}
+				warning += "节点 #" + id + " 的历史清理失败；累计流量已保留"
+				continue
+			}
+			historyCleared = true
+		}
+	}
+	s.invalidateCache()
+	s.sendJSON(w, r, http.StatusOK, map[string]any{
+		"deleted": clean, "history_cleared": historyCleared, "cumulative_preserved": true, "warning": warning,
+	})
+}
+
+// requireNodesForBatchMutation 是 requireNodeForRepairMutation 的批量版：
+// 全部存在才放行，任何一个不存在都整体拒绝。
+func (s *Server) requireNodesForBatchMutation(w http.ResponseWriter, r *http.Request, ids []string) bool {
+	existing := map[string]bool{}
+	for _, n := range nodes.LoadPanelNodes(s.cfg.NodesFile) {
+		existing[nodes.IDString(n)] = true
+	}
+	var missing []string
+	for _, id := range ids {
+		if !existing[id] {
+			missing = append(missing, "#"+id)
+		}
+	}
+	if len(missing) > 0 {
+		s.sendJSON(w, r, http.StatusUnprocessableEntity,
+			map[string]string{"error": "以下节点不存在，整体未改动: " + strings.Join(missing, ", ")})
+		return false
+	}
+	return true
+}
+
 func (s *Server) newNodeArgs(ctx context.Context, store *nodes.Store, req nodeCreateRequest, allow []string) ([]string, error) {
 	args := []string{"add", req.Type, "--port=" + strconv.Itoa(req.Port)}
 	if strings.TrimSpace(req.Name) != "" {
@@ -693,6 +1012,14 @@ func (s *Server) nodeLinks(w http.ResponseWriter, r *http.Request, id string) {
 func (s *Server) tryNodeAdminRoute(w http.ResponseWriter, r *http.Request, route string) bool {
 	if route == "/api/nodes" && r.Method == http.MethodPost {
 		s.createNode(w, r)
+		return true
+	}
+	if route == "/api/nodes/batch" && r.Method == http.MethodPost {
+		s.createNodeBatch(w, r)
+		return true
+	}
+	if route == "/api/nodes/delete-batch" && r.Method == http.MethodPost {
+		s.deleteNodeBatch(w, r)
 		return true
 	}
 	const prefix = "/api/nodes/"
