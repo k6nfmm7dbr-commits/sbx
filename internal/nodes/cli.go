@@ -50,6 +50,10 @@ func (c *CLI) runCommand(args []string, lockMutations bool) int {
 	switch cmd {
 	case "add":
 		return mutate(func() int { return c.cmdAdd(rest) })
+	case "add-batch":
+		return mutate(func() int { return c.cmdAddBatch(rest) })
+	case "remove-batch":
+		return mutate(func() int { return c.cmdRemoveBatch(rest) })
 	case "remove":
 		return mutate(func() int { return c.cmdRemove(rest) })
 	case "edit":
@@ -93,7 +97,7 @@ func (c *CLI) runCommand(args []string, lockMutations bool) int {
 
 func (c *CLI) usageError(msg string) int {
 	fmt.Fprintln(c.Stderr, msg)
-	fmt.Fprintln(c.Stderr, "用法: sbx-core node <add|edit|remove|list|count|last|info|links|sync|commit|rollback|rulesets|ss2022-key|port-used|set-host|get-host|set-host6|get-host6>")
+	fmt.Fprintln(c.Stderr, "用法: sbx-core node <add|add-batch|edit|remove|remove-batch|list|count|last|info|links|sync|commit|rollback|rulesets|ss2022-key|port-used|set-host|get-host|set-host6|get-host6>")
 	return exitUsage
 }
 
@@ -334,6 +338,189 @@ func (c *CLI) writeCandidates(list []Node) (string, string, int) {
 		return "", "", c.fail(err.Error())
 	}
 	return cand, nodesCand, exitOK
+}
+
+// batchNodeSpec 是 add-batch 的单个节点规格。
+// 凭据由面板生成后传入，CLI 只做校验、id 分配与候选生成——
+// 与单节点 add 的职责划分一致（密钥生成在 API 层）。
+type BatchNodeSpec struct {
+	Type       string `json:"type"`
+	Name       string `json:"name"`
+	Port       int64  `json:"port"`
+	Method     string `json:"method,omitempty"`
+	Password   string `json:"password,omitempty"`
+	UUID       string `json:"uuid,omitempty"`
+	SNI        string `json:"sni,omitempty"`
+	Flow       string `json:"flow,omitempty"`
+	PrivateKey string `json:"private_key,omitempty"`
+	PublicKey  string `json:"public_key,omitempty"`
+	ShortID    string `json:"short_id,omitempty"`
+	PSK        string `json:"psk,omitempty"`
+	Version    int64  `json:"version,omitempty"`
+}
+
+// cmdAddBatch 一次变更里添加多个节点：只生成一份候选、跑一次 sing-box check、
+// 重启一次 sing-box。N 次逐个 add 会让员工断连 N 次。
+func (c *CLI) cmdAddBatch(args []string) int {
+	specJSON := ""
+	for _, a := range args {
+		if strings.HasPrefix(a, "--spec=") {
+			specJSON = strings.TrimPrefix(a, "--spec=")
+		}
+	}
+	if specJSON == "" {
+		return c.usageError("用法: add-batch --spec='<json 数组>'")
+	}
+	dec := json.NewDecoder(strings.NewReader(specJSON))
+	dec.UseNumber()
+	var specs []BatchNodeSpec
+	if err := dec.Decode(&specs); err != nil {
+		return c.fail("--spec 不是合法 JSON 数组: " + err.Error())
+	}
+	if len(specs) < 1 || len(specs) > 50 {
+		return c.fail("批量数量需在 1-50")
+	}
+	list, rc := c.repairLoadForMutation()
+	if rc != exitOK {
+		return rc
+	}
+	// 已占用端口集合：既有节点的全部监听端口（含多端口节点）。
+	used := map[int64]bool{}
+	for _, n := range list {
+		for _, pr := range ParsePorts(n) {
+			for p := pr[0]; p <= pr[1]; p++ {
+				used[p] = true
+			}
+		}
+	}
+	created := make([]map[string]any, 0, len(specs))
+	for i, sp := range specs {
+		if !ValidType(sp.Type) {
+			return c.fail(fmt.Sprintf("第 %d 个节点类型不支持: %s", i+1, sp.Type))
+		}
+		if sp.Port < 1 || sp.Port > 65535 {
+			return c.fail(fmt.Sprintf("第 %d 个节点端口无效: %d", i+1, sp.Port))
+		}
+		if used[sp.Port] {
+			return c.fail(fmt.Sprintf("端口 %d 已被占用（第 %d 个节点）", sp.Port, i+1))
+		}
+		nid, err := NextID(c.Store, list)
+		if err != nil {
+			return c.fail("分配节点 id 失败: " + err.Error())
+		}
+		node := Node{
+			"id":   json.Number(strconv.FormatInt(nid, 10)),
+			"type": sp.Type, "port": json.Number(strconv.FormatInt(sp.Port, 10)),
+		}
+		if name := strings.TrimSpace(sp.Name); name != "" {
+			node["name"] = name
+		} else {
+			node["name"] = fmt.Sprintf("%s-%d", sp.Type, nid)
+		}
+		switch sp.Type {
+		case "vless":
+			if sp.UUID == "" || sp.PrivateKey == "" || sp.PublicKey == "" || sp.ShortID == "" {
+				return c.fail(fmt.Sprintf("第 %d 个节点缺少 Reality 凭据", i+1))
+			}
+			node["uuid"] = sp.UUID
+			node["sni"] = sp.SNI
+			node["flow"] = sp.Flow
+			node["private_key"] = sp.PrivateKey
+			node["public_key"] = sp.PublicKey
+			node["short_id"] = sp.ShortID
+		case "shadowsocks":
+			if sp.Password == "" {
+				return c.fail(fmt.Sprintf("第 %d 个节点缺少密码", i+1))
+			}
+			method := sp.Method
+			if method == "" {
+				method = SS2022Method128
+			}
+			node["method"] = method
+			node["password"] = sp.Password
+		case "trojan", "anytls":
+			if sp.Password == "" {
+				return c.fail(fmt.Sprintf("第 %d 个节点缺少密码", i+1))
+			}
+			node["sni"] = sp.SNI
+			node["password"] = sp.Password
+			node["cert"] = c.Store.CertDir() + "/cert.pem"
+			node["key"] = c.Store.CertDir() + "/key.pem"
+		case "snell":
+			if sp.PSK == "" || (sp.Version != 5 && sp.Version != 6) {
+				return c.fail(fmt.Sprintf("第 %d 个节点 Snell 参数无效", i+1))
+			}
+			node["psk"] = sp.PSK
+			node["version"] = json.Number(strconv.FormatInt(sp.Version, 10))
+		}
+		list = append(list, node)
+		used[sp.Port] = true
+		created = append(created, map[string]any{
+			"id": json.Number(strconv.FormatInt(nid, 10)), "name": node["name"],
+			"port": json.Number(strconv.FormatInt(sp.Port, 10)),
+		})
+	}
+	cand, nodesCand, rc := c.writeCandidates(list)
+	if rc != exitOK {
+		return rc
+	}
+	return c.outJSON(map[string]any{
+		"candidate": cand, "nodes_candidate": nodesCand, "created": created,
+	})
+}
+
+// cmdRemoveBatch 一次变更里删除多个节点。任何一个 id 不存在都整体拒绝：
+// 批量操作要么全成要么不动，不做部分成功——那会让用户对着结果猜哪些删了。
+func (c *CLI) cmdRemoveBatch(args []string) int {
+	if len(args) != 1 || strings.TrimSpace(args[0]) == "" {
+		return c.usageError("用法: remove-batch <id,id,...>")
+	}
+	ids := strings.Split(args[0], ",")
+	list, rc := c.repairLoadForMutation()
+	if rc != exitOK {
+		return rc
+	}
+	kill := map[string]bool{}
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return c.fail("存在空 id")
+		}
+		if !strings.HasPrefix(id, "node:") && !isValidNodeID(id) {
+			return c.fail("无效节点 id: " + id)
+		}
+		plain := strings.TrimPrefix(id, "node:")
+		if findByID(list, plain) < 0 {
+			return c.fail(fmt.Sprintf("未找到节点 id=%s，整体未改动", plain))
+		}
+		if kill[plain] {
+			return c.fail("重复的节点 id: " + plain)
+		}
+		kill[plain] = true
+	}
+	keep := make([]Node, 0, len(list))
+	for _, n := range list {
+		if !kill[IDString(n)] {
+			keep = append(keep, n)
+		}
+	}
+	if len(keep) == len(list) {
+		return c.fail("没有任何节点被删除")
+	}
+	cand, nodesCand, rc := c.writeCandidates(keep)
+	if rc != exitOK {
+		return rc
+	}
+	return c.outJSON(map[string]any{"candidate": cand, "nodes_candidate": nodesCand, "removed": len(kill)})
+}
+
+func isValidNodeID(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return s != ""
 }
 
 func (c *CLI) cmdRemove(args []string) int {

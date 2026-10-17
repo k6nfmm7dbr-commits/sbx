@@ -118,7 +118,12 @@
     <div class="panel glass manage-panel">
       <div class="panel-head manage-head">
         <h2>节点配置</h2>
-        <button class="btn primary" id="node-create-open" type="button">添加节点</button>
+        <div class="manage-actions">
+          <button class="btn primary" id="node-create-open" type="button">添加节点</button>
+          <button class="btn ghost" id="node-batch-open" type="button">批量添加</button>
+          <button class="btn ghost" id="node-batch-manage" type="button">批量管理</button>
+          <button class="btn ghost danger hidden" id="node-batch-delete" type="button">删除所选</button>
+        </div>
       </div>
       <div id="node-manage-list" class="manage-list"></div>
     </div>
@@ -259,6 +264,35 @@
 </aside>
 
 <!-- ===== 节点分享链接抽屉 ===== -->
+<aside class="drawer" id="node-batch-drawer" role="dialog" aria-modal="true">
+  <header class="drawer-head"><div><small>节点配置</small><h3>批量添加节点</h3></div><button class="icon-btn" id="node-batch-close" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></header>
+  <div class="drawer-body">
+    <section class="sect">
+      <label>协议类型
+        <select id="node-batch-type">
+          <option value="shadowsocks">Shadowsocks 2022</option>
+          <option value="trojan">Trojan</option>
+          <option value="vless">VLESS (Reality)</option>
+          <option value="anytls">AnyTLS</option>
+          <option value="snell">Snell</option>
+        </select>
+        <small class="node-secret-note">所有节点使用同一协议，密钥逐个独立生成。</small>
+      </label>
+      <label>名称前缀
+        <input type="text" id="node-batch-prefix" maxlength="40" placeholder="例如：员工" autocomplete="off">
+        <small class="node-secret-note">节点将命名为「前缀-1」「前缀-2」……留空则用协议名。</small>
+      </label>
+      <label>数量
+        <input type="number" id="node-batch-count" min="1" max="50" value="3" inputmode="numeric">
+      </label>
+      <label>起始端口
+        <input type="number" id="node-batch-port" min="1024" max="65535" placeholder="留空自动分配" inputmode="numeric">
+        <small class="node-secret-note">留空时自动挑选连续的空闲端口；指定则使用「起始端口、起始端口+1、…」。</small>
+      </label>
+    </section>
+  </div>
+  <footer class="drawer-foot"><button class="btn primary" id="node-batch-save">创建</button><button class="btn ghost" id="node-batch-cancel">取消</button></footer>
+</aside>
 <aside class="drawer" id="node-links-drawer" role="dialog" aria-modal="true">
   <header class="drawer-head"><div><small>节点分享</small><h3 id="node-links-title">—</h3></div><button class="icon-btn" id="node-links-close" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></header>
   <div class="drawer-body"><div id="node-links-list" class="node-links-list"></div></div>
