@@ -705,7 +705,7 @@ select, input[type="number"], input[type="password"], input[type="text"] { backg
   .manage-head { flex-direction: column; align-items: stretch; gap: 10px; }
   .manage-head h2 { margin: 0; font-size: 17px; }
   .manage-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-  .manage-actions .btn { padding: 9px 10px; }
+  .manage-actions .btn { padding: 10px 6px; white-space: nowrap; }
   /* 第三个按钮独占整行：否则 2 列网格里它会孤零零占半行，右边空一块 */
   .manage-actions .btn:nth-child(3) { grid-column: 1 / -1; }
   /* 危险操作独占整行，和常用按钮分开 */
@@ -721,4 +721,12 @@ select, input[type="number"], input[type="password"], input[type="text"] { backg
   .manage-node.selectable .manage-node-main { grid-area: main; text-align: left; }
   .manage-node.selectable .manage-node-actions { grid-area: actions; width: 100%; justify-self: stretch; }
   .manage-node.selectable .manage-node-actions .mini-btn { flex: 1; }
+}
+
+/* 常见手机宽度（≥360px）：三个常用按钮排成一行三等分。
+   此前是「两个一行 + 批量管理独占一行」，虽然每行都填满，但一宽两窄仍然显得散。
+   360px 以下（极窄机）保持两列，因为「退出批量管理」六个字在三等分里会挤。 */
+@media (max-width: 600px) and (min-width: 360px) {
+  .manage-actions { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .manage-actions .btn:nth-child(3) { grid-column: auto; }
 }
