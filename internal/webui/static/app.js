@@ -463,13 +463,27 @@ function renderManageNodes() {
       '<button type="button" class="mini-btn danger" data-node-delete="' + esc(n.id) + '">删除</button>' +
       '</div></article>';
   }).join('');
-  host.innerHTML = warning + cards;
-  var delBtn = document.getElementById('node-batch-delete');
-  if (delBtn) {
-    var count = Object.keys(manageSelected).length;
-    delBtn.classList.toggle('hidden', !manageSelectMode || count === 0);
-    if (!pendingBatchDelete) delBtn.textContent = '删除所选（' + count + '）';
+  // 列表内容没变就不重建：定时刷新与视图切换都会调到这里，
+  // 无脑 innerHTML 替换会让浏览器重新解析、布局整份列表（节点多时可见掉帧）。
+  var signature = JSON.stringify(manageNodes.map(function (n) {
+    return [n.id, n.name, n.type, n.port, n.paused, (n.allow || []).length,
+            (n.port_conflict_with || []).join(',')];
+  })) + (manageSelectMode ? '|sel' : '|view');
+  if (host._sig !== signature) {
+    host._sig = signature;
+    host.innerHTML = warning + cards;
   }
+  updateBatchDeleteButton();
+}
+
+// updateBatchDeleteButton 单独抽出：勾选变化只改这一行按钮，
+// 不必重建整份列表（重建会让刚点过的复选框失焦，也是一次不必要的重排）。
+function updateBatchDeleteButton() {
+  var delBtn = document.getElementById('node-batch-delete');
+  if (!delBtn) return;
+  var count = Object.keys(manageSelected).length;
+  delBtn.classList.toggle('hidden', !manageSelectMode || count === 0);
+  if (!pendingBatchDelete) delBtn.textContent = '删除所选（' + count + '）';
 }
 
 /* ---- 批量管理模式：勾选节点后一次删除。默认关闭。 ---- */
@@ -542,9 +556,12 @@ function openNodeEditor(id) {
   document.getElementById('node-form-psk').value = '';
   document.getElementById('node-form-error').classList.add('hidden');
   var allow = (editingNode && Array.isArray(editingNode.allow)) ? editingNode.allow : [];
-  document.getElementById('node-form-allow-on').checked = allow.length > 0;
-  document.getElementById('node-form-allow-body').classList.toggle('hidden', allow.length === 0);
-  renderAllowPicker(allow);
+  var allowOn = allow.length > 0;
+  document.getElementById('node-form-allow-on').checked = allowOn;
+  document.getElementById('node-form-allow-body').classList.toggle('hidden', !allowOn);
+  // 只有真的开着白名单才构建那四百多项。以前无论开没开都渲染一次，
+  // 每次点「编辑」都要解析 + 布局 400 多个 checkbox，低端机上就是一次可见的掉帧。
+  if (allowOn) renderAllowPicker(allow); else clearAllowPicker();
   var btn = document.getElementById('node-form-save');
   btn.disabled = false; btn.textContent = editingNode ? '保存修改' : '添加节点';
   updateNodeFormFields();
@@ -711,6 +728,27 @@ function loadRuleSets() {
   });
 }
 
+// clearAllowPicker 把选择器清空并把状态复位（打开未启用白名单的节点时用）。
+function clearAllowPicker() {
+  allowSelected = {};
+  allowQuery = '';
+  allowExpanded = false;
+  var host = document.getElementById('node-form-allow-list');
+  if (host) host.innerHTML = '';
+  var search = document.getElementById('node-form-allow-search');
+  if (search) search.value = '';
+  var toggle = document.getElementById('node-form-allow-toggle');
+  if (toggle) toggle.textContent = '展开全部';
+  updateAllowCount();
+}
+
+// ensureAllowPicker 在用户第一次打开开关时才真正构建列表（之后复用已有 DOM）。
+function ensureAllowPicker() {
+  var host = document.getElementById('node-form-allow-list');
+  if (!host || host.childNodes.length) return;
+  renderAllowPicker(Object.keys(allowSelected));
+}
+
 function renderAllowPicker(selected) {
   allowSelected = {};
   (selected || []).forEach(function (n) { allowSelected[n] = true; });
@@ -731,6 +769,15 @@ function renderAllowPicker(selected) {
   });
 }
 
+// allowItemsHTML 生成某一组的复选框列表，供首次绘制与「展开时才填充」共用。
+function allowItemsHTML(items) {
+  return items.map(function (it) {
+    var on = allowSelected[it.name] ? ' checked' : '';
+    return '<label class="ruleset-item"><input type="checkbox" value="' + esc(it.name) + '"' +
+      on + '><span>' + esc(it.label || it.name) + '</span></label>';
+  }).join('');
+}
+
 // drawAllowPicker 只负责按当前搜索词与折叠状态重绘。
 // 勾选状态存在 allowSelected 里，重绘不会丢用户已经点过的选择。
 function drawAllowPicker() {
@@ -738,27 +785,24 @@ function drawAllowPicker() {
   if (!host) return;
   var q = allowQuery.trim().toLowerCase();
   var parts = [];
-  allowGroups.forEach(function (g) {
+  allowGroups.forEach(function (g, gi) {
     var items = (g.items || []).filter(function (it) {
       if (!q) return true;
       return (it.name + ' ' + (it.label || '')).toLowerCase().indexOf(q) >= 0;
     });
     if (!items.length) return;
     var picked = 0;
-    var body = items.map(function (it) {
-      var on = allowSelected[it.name] ? true : false;
-      if (on) picked++;
-      return '<label class="ruleset-item"><input type="checkbox" value="' + esc(it.name) + '"' +
-        (on ? ' checked' : '') + '><span>' + esc(it.label || it.name) + '</span></label>';
-    }).join('');
-    // 搜索时一律展开（用户在找东西）；平时只展开有已选项的组，避免四百多项铺满屏幕。
+    items.forEach(function (it) { if (allowSelected[it.name]) picked++; });
+    // 搜索时一律展开（用户在找东西）；平时只展开有已选项的组。
     var open = q !== '' || allowExpanded || picked > 0;
-    parts.push('<section class="ruleset-group' + (open ? ' open' : '') + '">' +
+    // 折叠的组只渲染标题，子项等展开时再填（见 bindAllowPicker 的点击处理）。
+    // 之前四百多项全部进 DOM、只用 CSS 隐藏，每次重绘都要重新解析与布局。
+    parts.push('<section class="ruleset-group' + (open ? ' open' : '') + '" data-gi="' + gi + '">' +
       '<button type="button" class="ruleset-group-head">' +
       '<i class="rs-caret" aria-hidden="true"></i>' +
       '<span>' + esc(g.name) + '</span>' +
       '<b>' + (picked ? picked + '/' : '') + items.length + '</b></button>' +
-      '<div class="ruleset-items">' + body + '</div></section>');
+      '<div class="ruleset-items">' + (open ? allowItemsHTML(items) : '') + '</div></section>');
   });
   host.innerHTML = parts.length
     ? parts.join('')
@@ -795,16 +839,33 @@ function bindAllowPicker() {
       var head = e.target && e.target.closest ? e.target.closest('.ruleset-group-head') : null;
       if (!head) return;
       e.preventDefault();
-      head.parentNode.classList.toggle('open');
+      var sec = head.parentNode;
+      var box = sec.querySelector('.ruleset-items');
+      // 折叠组没有子项 DOM：首次展开时按当前搜索词补渲染。
+      if (!sec.classList.contains('open') && box && !box.childNodes.length) {
+        var g = allowGroups[Number(sec.getAttribute('data-gi'))];
+        if (g) {
+          var q = allowQuery.trim().toLowerCase();
+          var items = (g.items || []).filter(function (it) {
+            if (!q) return true;
+            return (it.name + ' ' + (it.label || '')).toLowerCase().indexOf(q) >= 0;
+          });
+          box.innerHTML = allowItemsHTML(items);
+        }
+      }
+      sec.classList.toggle('open');
     });
   }
   if (search && !search.dataset.bound) {
     search.dataset.bound = '1';
     // 回车在表单里会触发提交，这里必须拦掉。
     search.addEventListener('keydown', function (e) { if (e.key === 'Enter') e.preventDefault(); });
+    // 每次按键都重建匹配列表，在几百项上会明显卡顿；给 120ms 防抖。
+    var searchTimer = null;
     search.addEventListener('input', function () {
       allowQuery = search.value || '';
-      drawAllowPicker();
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(drawAllowPicker, 120);
     });
   }
   if (toggle && !toggle.dataset.bound) {
@@ -899,6 +960,7 @@ function bindNodeManageUI() {
   document.getElementById('node-form-save').addEventListener('click', saveNodeConfig);
   document.getElementById('node-form-allow-on').addEventListener('change', function (e) {
     document.getElementById('node-form-allow-body').classList.toggle('hidden', !e.target.checked);
+    if (e.target.checked) ensureAllowPicker();
     updateAllowCount();
   });
   document.getElementById('node-form-allow-list').addEventListener('change', updateAllowCount);
@@ -925,7 +987,9 @@ function bindNodeManageUI() {
     var id = box.getAttribute('data-node-pick');
     if (box.checked) manageSelected[id] = true; else delete manageSelected[id];
     resetBatchDeleteConfirm();
-    renderManageNodes();
+    var card = box.closest ? box.closest('.manage-node') : null;
+    if (card) card.classList.toggle('picked', box.checked);
+    updateBatchDeleteButton();
   });
   document.getElementById('node-batch-manage').addEventListener('click', function () {
     setManageSelectMode(!manageSelectMode);
