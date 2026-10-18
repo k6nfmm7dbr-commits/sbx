@@ -140,7 +140,8 @@ button { -webkit-tap-highlight-color: transparent; }
   box-shadow: 0 2px 8px rgba(28,43,68,.035);
   transition: border-color .16s ease, box-shadow .16s ease, transform .16s ease;
 }
-.node-card:hover { border-color: #d6deeb; box-shadow: 0 5px 16px rgba(28,43,68,.07); transform: translateY(-1px); }
+/* hover 只做边框/阴影变化：移动端 :hover 会粘滞在最后触碰的卡片上，transform 还会多建合成层 */
+.node-card:hover { border-color: #d6deeb; box-shadow: 0 5px 16px rgba(28,43,68,.07); }
 .node-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .node-title { min-width: 0; }
 .node-name { overflow: hidden; color: var(--text); font-size: 16px; font-weight: 700; letter-spacing: .005em; text-overflow: ellipsis; white-space: nowrap; }
@@ -758,4 +759,16 @@ select, input[type="number"], input[type="password"], input[type="text"] { backg
   .manage-node.selectable .node-pick { grid-area: pick; }
   .manage-node.selectable .manage-node-main { grid-area: main; text-align: left; }
   .manage-node.selectable .manage-node-actions { grid-area: actions; }
+}
+
+/* ===== 移动端绘制开销 =====
+   .dock 是 position:fixed 且带 backdrop-filter: blur(16px)。固定层每帧都要
+   重新采样背后的内容再做模糊，低端 GPU 上滚动与任何重绘都会掉帧。移动端用
+   足够不透明的底色替代，视觉几乎无差别，开销直接归零。 */
+@media (max-width: 600px) {
+  .dock {
+    background: rgba(255, 255, 255, .97);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
 }
