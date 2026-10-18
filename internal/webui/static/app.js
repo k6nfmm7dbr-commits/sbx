@@ -444,7 +444,7 @@ function renderManageNodes() {
     var protocol = n.protocol || n.type;
     var meta = [n.type || protocol, '端口 ' + n.port];
     if (n.paused) meta.push('已暂停');
-    if (Array.isArray(n.allow) && n.allow.length) meta.push('仅允许 ' + n.allow.length + ' 项服务');
+    if (Array.isArray(n.allow) && n.allow.length) meta.push('白名单 ' + n.allow.length + ' 项');
     var peers = Array.isArray(n.port_conflict_with) ? n.port_conflict_with : [];
     if (peers.length) meta.push('端口重复，与节点 #' + peers.join(', #') + ' 冲突');
     var checkbox = manageSelectMode

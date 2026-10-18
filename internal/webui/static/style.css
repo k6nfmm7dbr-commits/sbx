@@ -560,7 +560,9 @@ select, input[type="number"], input[type="password"], input[type="text"] { backg
 .node-conflict-notice { line-height: 1.5; }
 .manage-node-main { display: grid; gap: 3px; min-width: 0; }
 .manage-node-main strong { overflow: hidden; color: var(--text); font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
-.manage-node-main span { overflow: hidden; color: var(--text-3); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+/* 元信息允许换行：以前是 nowrap + ellipsis，窄屏下「仅允许 7 项服务」会被截成
+   「仅…」，用户看不到白名单数量。名字（strong）仍保持单行截断。 */
+.manage-node-main span { color: var(--text-3); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
 .manage-node-actions { display: flex; flex: none; gap: 6px; }
 .mini-btn.danger { color: var(--bad); }
 .mini-btn.danger:hover { border-color: rgba(201,75,86,.35); background: rgba(201,75,86,.06); }
@@ -729,4 +731,31 @@ select, input[type="number"], input[type="password"], input[type="text"] { backg
 @media (max-width: 600px) and (min-width: 360px) {
   .manage-actions { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .manage-actions .btn:nth-child(3) { grid-column: auto; }
+}
+
+/* ===== 节点配置卡片：窄屏统一「上信息 / 下按钮」 =====
+   此前普通模式把三个操作按钮排在右侧，把主信息列挤到约 100px，
+   「trojan · 端口 30012 · 白名单 7 项」只能折行，还会把「白名单」拆开。
+   统一成上下结构后，主信息列拿到整行宽度（≥282px 于 360px 屏），
+   元信息稳定一行；按钮三等分，和批量模式完全同构。
+   桌面端（>600px）空间充足，仍保持左右布局。 */
+@media (max-width: 600px) {
+  .manage-node {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "main" "actions";
+    align-items: start;
+    row-gap: 10px;
+  }
+  .manage-node .manage-node-main { grid-area: main; }
+  .manage-node .manage-node-actions { grid-area: actions; width: 100%; }
+  .manage-node .manage-node-actions .mini-btn { flex: 1; }
+
+  .manage-node.selectable {
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-areas: "pick main" "actions actions";
+  }
+  .manage-node.selectable .node-pick { grid-area: pick; }
+  .manage-node.selectable .manage-node-main { grid-area: main; text-align: left; }
+  .manage-node.selectable .manage-node-actions { grid-area: actions; }
 }
