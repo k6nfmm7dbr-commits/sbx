@@ -451,7 +451,9 @@ function renderManageNodes() {
       ? '<input type="checkbox" class="node-pick" data-node-pick="' + esc(n.id) + '"' +
         (manageSelected[String(n.id)] ? ' checked' : '') + ' aria-label="选择 ' + esc(n.name) + '">'
       : '';
-    return '<article class="manage-node' + (n.paused ? ' paused' : '') + (peers.length ? ' conflict' : '') + (manageSelected[String(n.id)] ? ' picked' : '') + '">' +
+    return '<article class="manage-node' + (manageSelectMode ? ' selectable' : '') +
+      (n.paused ? ' paused' : '') + (peers.length ? ' conflict' : '') +
+      (manageSelected[String(n.id)] ? ' picked' : '') + '">' +
       checkbox +
       '<div class="manage-node-main"><strong>' + esc(n.name) + '</strong>' +
       '<span>' + esc(meta.join(' · ')) + '</span></div>' +
@@ -466,17 +468,31 @@ function renderManageNodes() {
   if (delBtn) {
     var count = Object.keys(manageSelected).length;
     delBtn.classList.toggle('hidden', !manageSelectMode || count === 0);
-    delBtn.textContent = '删除所选（' + count + '）';
+    if (!pendingBatchDelete) delBtn.textContent = '删除所选（' + count + '）';
   }
 }
 
 /* ---- 批量管理模式：勾选节点后一次删除。默认关闭。 ---- */
 var manageSelectMode = false;
 var manageSelected = {};
+// 批量删除的两步确认状态：第一次点击只进入「待确认」，5 秒内再点才真正删除。
+// 不用 window.confirm：部分手机浏览器/内置 WebView 会直接屏蔽它，
+// 用户点了没反应，看起来就像「删了也没确认」。
+var pendingBatchDelete = null;
+
+function resetBatchDeleteConfirm() {
+  if (pendingBatchDelete && pendingBatchDelete.timer) clearTimeout(pendingBatchDelete.timer);
+  pendingBatchDelete = null;
+  var btn = document.getElementById('node-batch-delete');
+  if (!btn) return;
+  btn.classList.remove('confirming');
+  btn.textContent = '删除所选（' + Object.keys(manageSelected).length + '）';
+}
 
 function setManageSelectMode(on) {
   manageSelectMode = on;
   if (!on) manageSelected = {};
+  resetBatchDeleteConfirm();
   document.getElementById('node-batch-manage').textContent = on ? '退出批量管理' : '批量管理';
   document.getElementById('node-batch-manage').classList.toggle('on', on);
   document.getElementById('node-batch-delete').classList.toggle('hidden', true);
@@ -908,21 +924,40 @@ function bindNodeManageUI() {
     if (!box) return;
     var id = box.getAttribute('data-node-pick');
     if (box.checked) manageSelected[id] = true; else delete manageSelected[id];
+    resetBatchDeleteConfirm();
     renderManageNodes();
   });
   document.getElementById('node-batch-manage').addEventListener('click', function () {
     setManageSelectMode(!manageSelectMode);
   });
   document.getElementById('node-batch-delete').addEventListener('click', function () {
+    var btn = this;
     var ids = Object.keys(manageSelected);
     if (!ids.length) return;
-    if (!window.confirm('确定删除选中的 ' + ids.length + ' 个节点？\n默认保留其历史流量记录。')) return;
-    nodeRequest('/api/nodes/delete-batch', 'POST', { ids: ids }).then(function (d) {
-      toast('已删除 ' + ids.length + ' 个节点');
+
+    if (!pendingBatchDelete) {
+      // 第一步：进入待确认。按钮变红并写明数量，5 秒不操作自动退回。
+      pendingBatchDelete = { ids: ids.slice(), timer: setTimeout(resetBatchDeleteConfirm, 5000) };
+      btn.classList.add('confirming');
+      btn.textContent = '确认删除 ' + ids.length + ' 个节点？';
+      return;
+    }
+
+    // 第二步：真正删除。执行前先取消计时器，避免中途被重置。
+    var toDelete = pendingBatchDelete.ids;
+    clearTimeout(pendingBatchDelete.timer);
+    pendingBatchDelete = null;
+    btn.classList.remove('confirming');
+    btn.disabled = true;
+    nodeRequest('/api/nodes/delete-batch', 'POST', { ids: toDelete }).then(function (d) {
+      toast('已删除 ' + toDelete.length + ' 个节点，历史流量已保留');
       setManageSelectMode(false);
       loadManageNodes();
       if (d.warning) toast(d.warning);
-    }).catch(function (e) { if (e.message !== '未登录') toast(e.message); });
+    }).catch(function (e) {
+      if (e.message !== '未登录') toast(e.message);
+      resetBatchDeleteConfirm();
+    }).finally(function () { btn.disabled = false; });
   });
   document.getElementById('node-batch-open').addEventListener('click', function () {
     document.getElementById('node-batch-prefix').value = '';
