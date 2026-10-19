@@ -163,10 +163,20 @@ grep -qF '是否同时清除该节点的累计与每日流量历史' "$ROOT/inte
 DELETE_FN=$(sed -n '/^function deleteNodeConfig/,/^}/p' "$ROOT/internal/webui/static/app.js")
 DELETE_PROMPT_COUNT=$(printf '%s\n' "$DELETE_FN" | grep -c 'window.prompt' || true)
 DELETE_CONFIRM_COUNT=$(printf '%s\n' "$DELETE_FN" | grep -c 'window.confirm' || true)
-ck "删除节点使用一次文字验证" 1 "$DELETE_PROMPT_COUNT"
+DELETE_TYPED_COUNT=$(printf '%s\n' "$DELETE_FN" | grep -c 'typedConfirm(' || true)
+ck "删除节点走页内文字验证（不受 WebView 屏蔽）" 1 "$DELETE_TYPED_COUNT"
+ck "删除节点不再用 window.prompt" 0 "$DELETE_PROMPT_COUNT"
 ck "删除节点不使用手滑可误触的按钮确认" 0 "$DELETE_CONFIRM_COUNT"
-grep -qF '请输入“我已确定”以继续删除' "$ROOT/internal/webui/static/app.js"
+grep -qF "typedConfirmPhrase = '我已确定'" "$ROOT/internal/webui/static/app.js"
 ck "删除验证要求输入我已确定" 0 $?
+# 批量删除必须复用同一个对话框：两处删除的确认语义不能分叉。
+BATCH_DEL_FN=$(sed -n "/getElementById('node-batch-delete').addEventListener/,/^  });/p" "$ROOT/internal/webui/static/app.js")
+printf '%s\n' "$BATCH_DEL_FN" | grep -q 'typedConfirm('
+ck "批量删除复用同一文字验证" 0 $?
+printf '%s\n' "$BATCH_DEL_FN" | grep -q 'window.confirm'
+[[ $? -ne 0 ]]; ck "批量删除不再用 window.confirm" 0 $?
+printf '%s\n' "$BATCH_DEL_FN" | grep -q 'clear_history: false'
+ck "批量删除显式保留历史" 0 $?
 
 # ---- P. v3.0.29 热路径分配削减（防止无谓重复解析/深拷贝被写回） ----
 grep -q 'panelTolerantCache.lookup' "$ROOT/internal/nodes/store.go"
