@@ -1059,11 +1059,23 @@ function bindNodeManageUI() {
     document.getElementById('node-batch-prefix').value = '';
     document.getElementById('node-batch-count').value = 3;
     document.getElementById('node-batch-port').value = '';
+    document.getElementById('node-batch-method').value = '2022-blake3-aes-128-gcm';
+    document.getElementById('node-batch-version').value = '5';
+    updateBatchTypeFields();
     openDrawer('node-batch-drawer');
   });
+  document.getElementById('node-batch-type').addEventListener('change', updateBatchTypeFields);
   document.getElementById('node-batch-close').addEventListener('click', function () { closeDrawer('node-batch-drawer'); });
   document.getElementById('node-batch-cancel').addEventListener('click', function () { closeDrawer('node-batch-drawer'); });
   document.getElementById('node-batch-save').addEventListener('click', saveNodeBatch);
+}
+
+function updateBatchTypeFields() {
+  var type = document.getElementById('node-batch-type').value;
+  var ss = document.querySelectorAll('.node-batch-ss');
+  for (var i = 0; i < ss.length; i++) ss[i].classList.toggle('hidden', type !== 'shadowsocks');
+  var snell = document.querySelectorAll('.node-batch-snell');
+  for (var j = 0; j < snell.length; j++) snell[j].classList.toggle('hidden', type !== 'snell');
 }
 
 function saveNodeBatch() {
@@ -1072,6 +1084,11 @@ function saveNodeBatch() {
   var count = Number(document.getElementById('node-batch-count').value);
   var portRaw = document.getElementById('node-batch-port').value.trim();
   var body = { type: type, name_prefix: prefix, count: count };
+  if (type === 'shadowsocks') {
+    body.method = document.getElementById('node-batch-method').value;
+  } else if (type === 'snell') {
+    body.version = Number(document.getElementById('node-batch-version').value);
+  }
   if (portRaw !== '') {
     if (!/^\d+$/.test(portRaw)) { toast('起始端口必须是数字'); return; }
     body.port_start = Number(portRaw);

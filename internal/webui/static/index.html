@@ -268,7 +268,7 @@
   <header class="drawer-head"><div><small>节点配置</small><h3>批量添加节点</h3></div><button class="icon-btn" id="node-batch-close" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></header>
   <div class="drawer-body">
     <section class="sect">
-      <label>协议类型
+      <label class="field">协议类型
         <select id="node-batch-type">
           <option value="shadowsocks">Shadowsocks 2022</option>
           <option value="trojan">Trojan</option>
@@ -278,14 +278,28 @@
         </select>
         <small class="node-secret-note">所有节点使用同一协议，密钥逐个独立生成。</small>
       </label>
-      <label>名称前缀
+      <label class="field node-batch-ss hidden">加密算法
+        <select id="node-batch-method">
+          <option value="2022-blake3-aes-128-gcm">2022-blake3-aes-128-gcm（默认）</option>
+          <option value="2022-blake3-aes-256-gcm">2022-blake3-aes-256-gcm</option>
+        </select>
+        <small class="node-secret-note">每个节点的密码按该算法独立生成；建好后不支持换算法。</small>
+      </label>
+      <label class="field node-batch-snell hidden">Snell 版本
+        <select id="node-batch-version">
+          <option value="5">Snell v5</option>
+          <option value="6">Snell v6</option>
+        </select>
+        <small class="node-secret-note">v6 的 PSK 要求 12–255 字节，自动生成时已满足。</small>
+      </label>
+      <label class="field">名称前缀
         <input type="text" id="node-batch-prefix" maxlength="40" placeholder="例如：员工" autocomplete="off">
         <small class="node-secret-note">节点将命名为「前缀-1」「前缀-2」……留空则用协议名。</small>
       </label>
-      <label>数量
+      <label class="field">数量
         <input type="number" id="node-batch-count" min="1" max="50" value="3" inputmode="numeric">
       </label>
-      <label>起始端口
+      <label class="field">起始端口
         <input type="number" id="node-batch-port" min="1024" max="65535" placeholder="留空自动分配" inputmode="numeric">
         <small class="node-secret-note">留空时自动挑选连续的空闲端口；指定则使用「起始端口、起始端口+1、…」。</small>
       </label>

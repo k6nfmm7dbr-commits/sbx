@@ -436,6 +436,9 @@ func (c *CLI) cmdAddBatch(args []string) int {
 			if method == "" {
 				method = SS2022Method128
 			}
+			if !IsSS2022Method(method) {
+				return c.fail(fmt.Sprintf("第 %d 个节点加密算法不支持: %s", i+1, method))
+			}
 			node["method"] = method
 			node["password"] = sp.Password
 		case "trojan", "anytls":

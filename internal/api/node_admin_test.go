@@ -659,3 +659,61 @@ func TestPanelNodeBatchCreateAndDelete(t *testing.T) {
 		t.Fatalf("应只剩节点 2: %s", b)
 	}
 }
+
+// TestPanelNodeBatchCreateHonorsMethodAndVersion：批量创建必须尊重选择的
+// 加密算法 / Snell 版本，而不是一律用默认值；非法值在入口处 400 拒绝。
+func TestPanelNodeBatchCreateHonorsMethodAndVersion(t *testing.T) {
+	ts, nodesFile, _, _, _ := newNodeCRUDTestServer(t)
+	code, body := doJSON(t, ts, http.MethodPost, "/api/nodes/batch",
+		`{"type":"shadowsocks","name_prefix":"ss256","count":2,"method":"2022-blake3-aes-256-gcm"}`)
+	if code != http.StatusOK {
+		t.Fatalf("batch create ss status=%d body=%v", code, body)
+	}
+	var saved []map[string]any
+	raw, err := os.ReadFile(nodesFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if len(saved) != 2 {
+		t.Fatalf("应创建 2 个节点: %s", raw)
+	}
+	for _, n := range saved {
+		if n["method"] != "2022-blake3-aes-256-gcm" {
+			t.Errorf("加密算法应为 256-gcm, 实得 %v", n["method"])
+		}
+		// 256 位算法的密码必须是 32 字节密钥的 base64（44 字符）；用错算法
+		// 生成会在 sing-box 启动时才失败，所以这里按长度钉死。
+		if pw, _ := n["password"].(string); len(pw) != 44 {
+			t.Errorf("256-gcm 密码长度应为 44, 实得 %d (%q)", len(pw), pw)
+		}
+	}
+
+	// 非法算法：明确 400，且不落盘。
+	code, body = doJSON(t, ts, http.MethodPost, "/api/nodes/batch",
+		`{"type":"shadowsocks","count":1,"method":"aes-256-gcm"}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("非法加密算法应 400，实得 %d: %v", code, body)
+	}
+
+	// Snell v6：nodes.json 里 version 必须是 6。
+	code, body = doJSON(t, ts, http.MethodPost, "/api/nodes/batch",
+		`{"type":"snell","name_prefix":"sn","count":1,"version":6}`)
+	if code != http.StatusOK {
+		t.Fatalf("batch create snell status=%d body=%v", code, body)
+	}
+	raw, _ = os.ReadFile(nodesFile)
+	_ = json.Unmarshal(raw, &saved)
+	last := saved[len(saved)-1]
+	if last["version"] != float64(6) {
+		t.Errorf("Snell 版本应为 6, 实得 %v", last["version"])
+	}
+	// 非法版本：400。
+	code, body = doJSON(t, ts, http.MethodPost, "/api/nodes/batch",
+		`{"type":"snell","count":1,"version":4}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("非法 Snell 版本应 400，实得 %d: %v", code, body)
+	}
+}

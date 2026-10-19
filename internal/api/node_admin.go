@@ -413,11 +413,14 @@ func (s *Server) createNode(w http.ResponseWriter, r *http.Request) {
 
 // nodeBatchCreateRequest 是批量创建的请求体。
 // 端口可以指定起始值，也可以留空由服务端自动挑选连续空闲段。
+// method / version 只对 shadowsocks / snell 生效，缺省时取各自默认值。
 type nodeBatchCreateRequest struct {
 	Type       string `json:"type"`
 	NamePrefix string `json:"name_prefix"`
 	Count      int    `json:"count"`
 	PortStart  int    `json:"port_start,omitempty"`
+	Method     string `json:"method,omitempty"`
+	Version    int    `json:"version,omitempty"`
 }
 
 // listeningTCPPorts 返回本机当前处于 LISTEN 状态的 TCP 端口（v4+v6）。
@@ -474,6 +477,26 @@ func (s *Server) createNodeBatch(w http.ResponseWriter, r *http.Request) {
 	if len(req.NamePrefix) > 40 {
 		s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": "名称前缀过长（≤40 字符）"})
 		return
+	}
+	// 加密算法 / Snell 版本按协议取默认值，并在入口处校验：
+	// 让非法值在这里得到明确报错，而不是等到 sing-box check 才失败。
+	switch req.Type {
+	case "shadowsocks":
+		if req.Method == "" {
+			req.Method = nodes.SS2022Method128
+		}
+		if !nodes.IsSS2022Method(req.Method) {
+			s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": "加密算法不支持: " + req.Method})
+			return
+		}
+	case "snell":
+		if req.Version == 0 {
+			req.Version = 5
+		}
+		if req.Version != 5 && req.Version != 6 {
+			s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": "Snell 版本只支持 5 或 6"})
+			return
+		}
 	}
 
 	list, err := nodes.LoadPanelNodesStrict(s.cfg.NodesFile)
@@ -559,12 +582,12 @@ func (s *Server) createNodeBatch(w http.ResponseWriter, r *http.Request) {
 			}
 			sp.UUID, sp.SNI, sp.Flow, sp.PrivateKey, sp.PublicKey, sp.ShortID = uid, "www.microsoft.com", "xtls-rprx-vision", priv, pub, sid
 		case "shadowsocks":
-			pw, err := nodes.GenerateSS2022Password(nodes.SS2022Method128)
+			pw, err := nodes.GenerateSS2022Password(req.Method)
 			if err != nil {
 				s.sendJSON(w, r, http.StatusUnprocessableEntity, map[string]string{"error": "生成密码失败"})
 				return
 			}
-			sp.Method, sp.Password = nodes.SS2022Method128, pw
+			sp.Method, sp.Password = req.Method, pw
 		case "trojan", "anytls":
 			pw, err := nodes.GenerateHex(12)
 			if err != nil {
@@ -578,7 +601,7 @@ func (s *Server) createNodeBatch(w http.ResponseWriter, r *http.Request) {
 				s.failInternal(w, r, codeNodesFileUnavailable, err)
 				return
 			}
-			sp.PSK, sp.Version = psk, 5
+			sp.PSK, sp.Version = psk, int64(req.Version)
 		}
 		specs = append(specs, sp)
 	}
