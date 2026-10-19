@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -85,6 +86,10 @@ type putPolicyRequest struct {
 // 防止误填天文数字导致 nft 计算的 bytes/second 溢出或无意义。
 const maxRateLimitMbps = 100000 // 100 Gbps
 
+// maxIPLimitCount 是单节点「最大同时在线 IP」上界。在线 IP 是 nft set 的
+// 成员数，产品语境下不可能超过一个 /16；上界同样挡住误填的天文数字。
+const maxIPLimitCount = 65535
+
 // maxPolicyBody 限制策略请求体大小（实际请求只有 4 个字段，1 MiB 已极宽裕）。
 const maxPolicyBody = 1 << 20
 
@@ -104,10 +109,12 @@ func (s *Server) putPolicy(w http.ResponseWriter, r *http.Request, nodeID string
 		s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
-	// 参数校验：启用 IP limit 时 max 必须 >= 1；限速需在合理上限内。
-	if req.IPLimitEnabled && req.IPLimitMax < 1 {
+	// 参数校验：启用 IP limit 时 max 必须在 1..maxIPLimitCount；限速需在合理上限内。
+	// max 给上界：它会被换算进 nft 规则与在线 IP 集合，无限上界的输入
+	// 等于没有约束（此前与 rate_limit_mbps 的口径不一致）。
+	if req.IPLimitEnabled && (req.IPLimitMax < 1 || req.IPLimitMax > maxIPLimitCount) {
 		s.sendJSON(w, r, http.StatusBadRequest,
-			map[string]string{"error": "ip_limit_max 必须 >= 1"})
+			map[string]string{"error": fmt.Sprintf("ip_limit_max 必须在 1 ~ %d 之间", maxIPLimitCount)})
 		return
 	}
 	if req.RateLimitEnabled && (req.RateLimitMbps < 1 || req.RateLimitMbps > maxRateLimitMbps) {

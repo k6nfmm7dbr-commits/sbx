@@ -281,13 +281,11 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	// daily 表无清理策略、随运行年限增长（50 节点 × 3 年 ≈ 5.5 万行），
 	// 旧实现「全表读进 []exportRow + strings.Builder 拼完再写」在大库上有
 	// 数 MB 到数十 MB 的瞬时内存尖峰；流式后驻留内存与单行等价。
-	rows, err := s.db.QueryContext(r.Context(),
-		"SELECT day,scope,rx,tx,rx_pkts,tx_pkts FROM daily ORDER BY day,scope")
-	if err != nil {
-		s.failInternal(w, r, codeExportFailed, err)
-		return
-	}
-	defer rows.Close()
+	//
+	// 分批查询：库连接池只有 1 条连接（见 database.SetMaxOpenConns 的注释），
+	// 一条不关的 rows 会把它占满，慢客户端下载期间采集入账、策略 reconcile
+	// 全部排队。按 LIMIT/OFFSET 分批，每批读完立即 Close 归还连接——daily
+	// 主键是 (day, scope)，ORDER BY + OFFSET 分页是稳定的。
 
 	w.Header().Set("Content-Disposition", "attachment; filename=sbx-traffic.csv")
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
@@ -311,38 +309,61 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	if !writeLine(line) {
 		return
 	}
-	for rows.Next() {
-		var e exportRow
-		if err := rows.Scan(&e.day, &e.scope, &e.rx, &e.tx, &e.rxPkts, &e.txPkts); err != nil {
-			// 响应头已发出，无法改写状态码：截断输出即"导出不完整"，
-			// CSV 语义上比 500 更诚实（客户端拿到的就是残缺文件）。记录错误
-			// 供运维诊断，避免数据库扫描故障静默表现为成功下载。
-			slog.Warn("CSV 导出扫描中断", "error_code", codeExportFailed, "err", err)
-			return
+
+	const batchSize = 1000
+	exportBatch := func(offset int) (int, bool) {
+		rows, err := s.db.QueryContext(r.Context(),
+			"SELECT day,scope,rx,tx,rx_pkts,tx_pkts FROM daily ORDER BY day,scope LIMIT ? OFFSET ?",
+			batchSize, offset)
+		if err != nil {
+			slog.Warn("CSV 导出查询中断", "error_code", codeExportFailed, "offset", offset, "err", err)
+			return 0, false
 		}
-		line = line[:0]
-		line = append(line, e.day...)
-		line = append(line, ',')
-		line = append(line, e.scope...)
-		line = append(line, ',')
-		line = strconv.AppendInt(line, e.rx, 10)
-		line = append(line, ',')
-		line = strconv.AppendInt(line, e.tx, 10)
-		line = append(line, ',')
-		line = strconv.AppendInt(line, e.rxPkts, 10)
-		line = append(line, ',')
-		line = strconv.AppendInt(line, e.txPkts, 10)
-		line = append(line, '\n')
-		if !writeLine(line) {
-			return
+		defer rows.Close()
+		n := 0
+		for rows.Next() {
+			var e exportRow
+			if err := rows.Scan(&e.day, &e.scope, &e.rx, &e.tx, &e.rxPkts, &e.txPkts); err != nil {
+				// 响应头已发出，无法改写状态码：截断输出即"导出不完整"，
+				// CSV 语义上比 500 更诚实（客户端拿到的就是残缺文件）。
+				slog.Warn("CSV 导出扫描中断", "error_code", codeExportFailed, "err", err)
+				return 0, false
+			}
+			line = line[:0]
+			line = append(line, e.day...)
+			line = append(line, ',')
+			line = append(line, e.scope...)
+			line = append(line, ',')
+			line = strconv.AppendInt(line, e.rx, 10)
+			line = append(line, ',')
+			line = strconv.AppendInt(line, e.tx, 10)
+			line = append(line, ',')
+			line = strconv.AppendInt(line, e.rxPkts, 10)
+			line = append(line, ',')
+			line = strconv.AppendInt(line, e.txPkts, 10)
+			line = append(line, '\n')
+			if !writeLine(line) {
+				return 0, false
+			}
+			n++
 		}
+		if err := rows.Err(); err != nil {
+			// QueryContext 会在请求断开时取消；客户端断开导致的取消无需再记成服务错误。
+			if r.Context().Err() == nil {
+				slog.Warn("CSV 导出查询中断", "error_code", codeExportFailed, "err", err)
+			}
+			return 0, false
+		}
+		return n, true
 	}
-	if err := rows.Err(); err != nil {
-		// QueryContext 会在请求断开时取消；客户端断开导致的取消无需再记成服务错误。
-		if r.Context().Err() == nil {
-			slog.Warn("CSV 导出查询中断", "error_code", codeExportFailed, "err", err)
+	for offset := 0; ; offset += batchSize {
+		n, ok := exportBatch(offset)
+		if !ok {
+			return
 		}
-		return
+		if n < batchSize { // 最后一批：不足即到表尾
+			break
+		}
 	}
 	auditResult = "success"
 }

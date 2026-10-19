@@ -137,12 +137,16 @@ func Serve() int {
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- hs.Serve(ln) }()
 
+	// exitCode：HTTP 异常退出时进程仍以 1 退出，但**必须**走完下面的统一
+	// 收尾——此前该分支直接 return 1，defer 只 cancel 不等待，db.Close()
+	// 可能正好切在 collector/policy 的事务中间，留下半写的库。
+	exitCode := 0
 	select {
 	case <-ctx.Done():
 	case err := <-serveErr:
 		if err != nil && err != http.ErrServerClosed {
 			slog.Error("HTTP 服务异常退出", "err", err)
-			return 1
+			exitCode = 1
 		}
 	}
 
@@ -175,7 +179,7 @@ func Serve() int {
 	if err := hs.Shutdown(hsCtx); err != nil {
 		slog.Warn("HTTP 关闭超时", "err", err)
 	}
-	return 0
+	return exitCode
 }
 
 // listenIsPublic 判断监听地址是否面向非本机（fail-closed 口径）：

@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -117,6 +118,24 @@ func runNodeCLI(cli *nodes.CLI, args ...string) (string, error) {
 		return "", errors.New(strings.TrimSpace(b.String()))
 	}
 	return "", fmt.Errorf("node operation failed (exit %d)", rc)
+}
+
+// localPathRe 匹配错误文本中的本机绝对路径（/etc/sbx/...、/var/lib/... 等）。
+// CLI 的底层错误（*fs.PathError）会带完整路径一路透传到 422 响应体；
+// 直接回显会把部署布局泄露给浏览器，与 errors.go「细节只进日志」的口径冲突。
+var localPathRe = regexp.MustCompile(`/(?:etc|root|var|usr|run|home|tmp|opt|srv)/[^\s"',;:）)】]*`)
+
+// respondNodeMutationError 把节点变更失败以 422 回显：文案保留 CLI 的可操作
+// 信息（如「端口 X 已被占用」），但本地路径先脱敏——原文随结构化日志落盘，
+// 客户端只拿到占位符。
+func (s *Server) respondNodeMutationError(w http.ResponseWriter, r *http.Request, err error) {
+	msg := err.Error()
+	clean := localPathRe.ReplaceAllString(msg, "«内部路径»")
+	if clean != msg {
+		slog.Warn("节点变更失败：错误详情含本地路径，响应已脱敏",
+			"request_id", requestID(r), "path", r.URL.Path, "err", msg)
+	}
+	s.sendJSON(w, r, http.StatusUnprocessableEntity, map[string]string{"error": clean})
 }
 
 func withNodeFileLock(ctx context.Context) (*os.File, error) {
@@ -397,7 +416,7 @@ func (s *Server) createNode(w http.ResponseWriter, r *http.Request) {
 		return s.newNodeArgs(r.Context(), cli.Store, req, allow)
 	})
 	if err != nil {
-		s.sendJSON(w, r, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		s.respondNodeMutationError(w, r, err)
 		return
 	}
 	id := s.mutationID(result, "")
@@ -554,7 +573,7 @@ func (s *Server) createNodeBatch(w http.ResponseWriter, r *http.Request) {
 	if req.Type == "trojan" || req.Type == "anytls" {
 		sni = "www.bing.com"
 		if err := ensureNodeCerts(r.Context(), store, sni); err != nil {
-			s.sendJSON(w, r, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			s.respondNodeMutationError(w, r, err)
 			return
 		}
 	}
@@ -613,10 +632,16 @@ func (s *Server) createNodeBatch(w http.ResponseWriter, r *http.Request) {
 
 	cli, _, _ := s.newNodeCLI()
 	result, warning, err := s.withNodeMutationBuild(r.Context(), cli, func() ([]string, error) {
+		// 外层的端口扫描在变更锁之外，并发变更可能在锁内提交了同端口的
+		// 节点；commit 前在锁内复检一次，任一端口被占即整体拒绝——
+		// 宁可让用户看到明确 422，也不留端口歧义候选。
+		if verr := s.verifyBatchPortsFree(ports); verr != nil {
+			return nil, verr
+		}
 		return []string{"add-batch", "--spec=" + string(specJSON)}, nil
 	})
 	if err != nil {
-		s.sendJSON(w, r, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		s.respondNodeMutationError(w, r, err)
 		return
 	}
 	var out struct {
@@ -642,6 +667,36 @@ func (s *Server) createNodeBatch(w http.ResponseWriter, r *http.Request) {
 	}
 	s.invalidateCache()
 	s.sendJSON(w, r, http.StatusOK, map[string]any{"created": dt, "count": len(ids), "warning": warning})
+}
+
+// verifyBatchPortsFree 在变更锁内复检待用端口：nodes.json 与本机 LISTEN
+// 都不能再包含它们。与 createNodeBatch 外层的初次扫描同一套口径。
+func (s *Server) verifyBatchPortsFree(ports []int) error {
+	list, err := nodes.LoadPanelNodesStrict(s.cfg.NodesFile)
+	if err != nil {
+		return err
+	}
+	used := map[int]bool{}
+	for _, n := range list {
+		for _, pr := range nodes.ParsePorts(n) {
+			for p := pr[0]; p <= pr[1]; p++ {
+				used[int(p)] = true
+			}
+		}
+	}
+	listeners, err := listeningTCPPorts()
+	if err != nil {
+		return err
+	}
+	for p := range listeners {
+		used[p] = true
+	}
+	for _, p := range ports {
+		if used[p] {
+			return fmt.Errorf("端口 %d 已被占用；请换起始端口或留空自动分配", p)
+		}
+	}
+	return nil
 }
 
 func (s *Server) publicNodesByIDs(ids []string) ([]nodes.PublicNodeDTO, error) {
@@ -706,24 +761,30 @@ func (s *Server) deleteNodeBatch(w http.ResponseWriter, r *http.Request) {
 	joined := strings.Join(clean, ",")
 	_, warning, err := s.withNodeMutation(r.Context(), cli, "remove-batch", joined)
 	if err != nil {
-		s.sendJSON(w, r, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		s.respondNodeMutationError(w, r, err)
 		return
 	}
 	auditResult = fmt.Sprintf("success:%d", len(clean))
 	for _, id := range clean {
 		s.rememberNodeName(id, names[id])
 	}
+	// history_cleared 语义 = 「本次确实清理了历史」：
+	//   未请求清理            → false；
+	//   请求清理且全部成功     → true；
+	//   请求清理但部分/全部失败 → false（半清理状态不能报成已完成），
+	// 失败明细走 warning。默认保留的路径不受影响。
 	historyCleared := false
 	if req.ClearHistory {
+		historyCleared = true
 		for _, id := range clean {
 			if err := s.clearNodeDailyAndSampleHistory(r.Context(), id); err != nil {
+				historyCleared = false
 				if warning != "" {
 					warning += "; "
 				}
 				warning += "节点 #" + id + " 的历史清理失败；累计流量已保留"
 				continue
 			}
-			historyCleared = true
 		}
 	}
 	s.invalidateCache()
@@ -879,7 +940,7 @@ func (s *Server) editNode(w http.ResponseWriter, r *http.Request, id string) {
 	cli, _, _ := s.newNodeCLI()
 	_, warning, err := s.withNodeMutation(r.Context(), cli, args...)
 	if err != nil {
-		s.sendJSON(w, r, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		s.respondNodeMutationError(w, r, err)
 		return
 	}
 	auditResult = "success"
@@ -923,7 +984,7 @@ func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request, id string) {
 	cli, _, _ := s.newNodeCLI()
 	_, warning, err := s.withNodeMutation(r.Context(), cli, "remove", id)
 	if err != nil {
-		s.sendJSON(w, r, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		s.respondNodeMutationError(w, r, err)
 		return
 	}
 	auditResult = "success"

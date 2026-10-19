@@ -48,6 +48,17 @@ func (s *Server) handleNodeDomains(w http.ResponseWriter, r *http.Request) {
 			s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": "day 需为 YYYY-MM-DD"})
 			return
 		}
+		// 与 days 上限同口径：day 也不能越过保留期（记录只存 180 天，
+		// 更早的日期查了也是空），未来日期则纯属无效输入。
+		// YYYY-MM-DD 字典序即时间序，直接比较。
+		if t, perr := time.ParseInLocation("2006-01-02", today, loc); perr == nil {
+			earliest := t.AddDate(0, 0, -(domainQueryMaxDays - 1)).Format("2006-01-02")
+			if raw < earliest || raw > today {
+				s.sendJSON(w, r, http.StatusBadRequest,
+					map[string]string{"error": "day 需在最近 " + strconv.Itoa(domainQueryMaxDays) + " 天内"})
+				return
+			}
+		}
 		from, to = raw, raw
 	} else {
 		n, valid := clampQueryInt(r, "days", 1, 1, domainQueryMaxDays)

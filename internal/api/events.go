@@ -57,6 +57,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		if snapVer == payloadVer {
 			break
 		}
+		// 两版本同源（policy version），正常一两次就收敛；万一上游语义被改
+		// 出永久错位，这里退避一下而不是白烧 CPU。
+		time.Sleep(time.Millisecond)
 	}
 
 	// 首包完整 snapshot。
