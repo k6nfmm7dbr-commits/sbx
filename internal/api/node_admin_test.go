@@ -472,6 +472,75 @@ func TestPanelDeletePreservesHistoryByDefault(t *testing.T) {
 	}
 }
 
+// TestPanelBatchDeletePreservesHistory：批量删除与单个删除必须同一语义。
+//
+// 批量入口是"一次删好几个"，用户更容易在删完才发现历史没了；所以这里
+// 逐项锁死：每日明细、采样、累计全部保留，展示名留档，且日报仍查得到。
+func TestPanelBatchDeletePreservesHistory(t *testing.T) {
+	ts, nodesFile, _, _, srv := newNodeCRUDTestServer(t)
+	for i, name := range []string{"batch-a", "batch-b", "batch-c"} {
+		code, _ := doJSON(t, ts, http.MethodPost, "/api/nodes",
+			fmt.Sprintf(`{"type":"shadowsocks","name":%q,"port":%d}`, name, 8391+i))
+		if code != http.StatusOK {
+			t.Fatalf("create %s failed: %d", name, code)
+		}
+	}
+	for _, id := range []string{"1", "2"} {
+		for _, query := range []string{
+			fmt.Sprintf("INSERT INTO daily(day,scope,rx,tx,rx_pkts,tx_pkts) VALUES('2026-10-06','node:%s',7,3,0,0)", id),
+			fmt.Sprintf("INSERT INTO totals(scope,rx,tx,rx_pkts,tx_pkts) VALUES('node:%s',7,3,0,0)", id),
+			fmt.Sprintf("INSERT INTO samples(ts,scope,rx,tx,duration_ms,valid) VALUES(1,'node:%s',7,3,2000,1)", id),
+		} {
+			if _, err := srv.db.Exec(query); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	code, result := doJSON(t, ts, http.MethodPost, "/api/nodes/delete-batch", `{"ids":["1","2"]}`)
+	if code != http.StatusOK || result["history_cleared"] != false || result["cumulative_preserved"] != true {
+		t.Fatalf("批量删除默认必须保留历史: %d %#v", code, result)
+	}
+	if deleted, _ := result["deleted"].([]any); len(deleted) != 2 {
+		t.Fatalf("应删除 2 个节点: %#v", result)
+	}
+	for _, id := range []string{"1", "2"} {
+		for _, table := range []string{"daily", "samples", "totals"} {
+			var count int
+			if err := srv.db.QueryRow("SELECT COUNT(*) FROM " + table + " WHERE scope='node:" + id + "'").Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != 1 {
+				t.Errorf("批量删除必须保留 node:%s 的 %s 历史, 实得 %d 行", id, table, count)
+			}
+		}
+		var name string
+		if err := srv.db.QueryRow("SELECT v FROM meta WHERE k='node_name:" + id + "'").Scan(&name); err != nil {
+			t.Fatalf("批量删除应为 node:%s 留档展示名: %v", id, err)
+		}
+		if name == "" {
+			t.Errorf("node:%s 的留档名称不应为空", id)
+		}
+	}
+	// 未选中的节点必须原样保留。
+	var saved []any
+	data, err := os.ReadFile(nodesFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &saved); err != nil || len(saved) != 1 {
+		t.Fatalf("批量删除应只删掉选中的 2 个: %s err=%v", data, err)
+	}
+	// 日报下拉的历史节点入口同样要能看到这两个节点。
+	code, sum := doJSON(t, ts, http.MethodGet, "/api/summary", "")
+	if code != http.StatusOK {
+		t.Fatalf("summary 查询失败: %d", code)
+	}
+	if hlist, _ := sum["history_nodes"].([]any); len(hlist) != 2 {
+		t.Fatalf("history_nodes 应含 2 个已删除节点, 实得 %#v", sum["history_nodes"])
+	}
+}
+
 // TestPanelDeleteCanExplicitlyClearHistory 覆盖显式清理这条逃生通道。
 //
 // 它只应被显式请求（clear_history=1）触发，用来清掉"建错了/试试看的"节点。

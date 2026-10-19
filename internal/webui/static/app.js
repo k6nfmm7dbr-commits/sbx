@@ -413,6 +413,53 @@ function loadManageNodes() {
   });
 }
 
+/* ---------- 删除确认：输入「我已确定」 ----------
+   面板可能跑在 App 的 WebView 里，window.confirm / window.prompt 会被静默
+   屏蔽（返回 undefined 或直接不弹），删除动作就变成「点了没反应」。所以
+   确认界面自己画：单节点删除与批量删除共用，文案与交互完全一致。 */
+var typedConfirmResolve = null;
+var typedConfirmPhrase = '我已确定';
+
+function typedConfirm(opts) {
+  var o = opts || {};
+  typedConfirmPhrase = o.phrase || '我已确定';
+  document.getElementById('typed-confirm-title').textContent = o.title || '确认删除';
+  document.getElementById('typed-confirm-body').innerHTML = o.body || '';
+  document.getElementById('typed-confirm-hint').textContent = '请输入「' + typedConfirmPhrase + '」以继续：';
+  document.getElementById('typed-confirm-ok').textContent = o.okText || '确定';
+  var input = document.getElementById('typed-confirm-input');
+  input.value = '';
+  document.getElementById('typed-confirm-ok').disabled = true;
+  document.getElementById('typed-confirm-mask').classList.add('on');
+  document.getElementById('typed-confirm').classList.add('on');
+  return new Promise(function (resolve) { typedConfirmResolve = resolve; });
+}
+
+function syncTypedConfirm() {
+  var input = document.getElementById('typed-confirm-input');
+  document.getElementById('typed-confirm-ok').disabled = input.value.trim() !== typedConfirmPhrase;
+}
+
+function closeTypedConfirm(ok) {
+  document.getElementById('typed-confirm-mask').classList.remove('on');
+  document.getElementById('typed-confirm').classList.remove('on');
+  var fn = typedConfirmResolve;
+  typedConfirmResolve = null;
+  if (fn) fn(ok);
+}
+
+function typedConfirmList(names, limit) {
+  var shown = names.slice(0, limit || 6);
+  var items = shown.map(function (n) { return '<li>' + esc(n) + '</li>'; }).join('');
+  if (names.length > shown.length) {
+    items += '<li class="more">等共 ' + names.length + ' 个节点</li>';
+  }
+  return '<ul class="typed-confirm-list">' + items + '</ul>';
+}
+
+var deleteHistoryNote = '该节点的流量历史会完整保留（每日明细与累计都留着），之后仍可在「日报 → 节点」下拉的「历史节点（已删除）」里查看。';
+var batchDeleteHistoryNote = '这些节点的流量历史会完整保留（每日明细与累计都留着），之后仍可在「日报 → 节点」下拉的「历史节点（已删除）」里查看。';
+
 function refreshAfterNodeMutation() {
   cache.daily = null;
   cache.dailyFetchedAt = 0;
@@ -483,33 +530,19 @@ function updateBatchDeleteButton() {
   if (!delBtn) return;
   var count = Object.keys(manageSelected).length;
   delBtn.classList.toggle('hidden', !manageSelectMode || count === 0);
-  if (!pendingBatchDelete) delBtn.textContent = '删除所选（' + count + '）';
+  delBtn.textContent = '删除所选（' + count + '）';
 }
 
 /* ---- 批量管理模式：勾选节点后一次删除。默认关闭。 ---- */
 var manageSelectMode = false;
 var manageSelected = {};
-// 批量删除的两步确认状态：第一次点击只进入「待确认」，5 秒内再点才真正删除。
-// 不用 window.confirm：部分手机浏览器/内置 WebView 会直接屏蔽它，
-// 用户点了没反应，看起来就像「删了也没确认」。
-var pendingBatchDelete = null;
-
-function resetBatchDeleteConfirm() {
-  if (pendingBatchDelete && pendingBatchDelete.timer) clearTimeout(pendingBatchDelete.timer);
-  pendingBatchDelete = null;
-  var btn = document.getElementById('node-batch-delete');
-  if (!btn) return;
-  btn.classList.remove('confirming');
-  btn.textContent = '删除所选（' + Object.keys(manageSelected).length + '）';
-}
 
 function setManageSelectMode(on) {
   manageSelectMode = on;
   if (!on) manageSelected = {};
-  resetBatchDeleteConfirm();
   document.getElementById('node-batch-manage').textContent = on ? '退出批量管理' : '批量管理';
   document.getElementById('node-batch-manage').classList.toggle('on', on);
-  document.getElementById('node-batch-delete').classList.toggle('hidden', true);
+  document.getElementById('node-batch-delete').classList.add('hidden');
   renderManageNodes();
 }
 
@@ -896,13 +929,17 @@ function updateAllowCount() {
 function deleteNodeConfig(id) {
   var n = findManageNode(id);
   if (!n) return;
-  var confirmation = window.prompt('即将删除节点“' + n.name + '”。\n\n该节点的流量历史会完整保留（每日明细与累计都留着），之后仍可在「日报 → 节点」下拉的「历史节点（已删除）」里查看。\n\n请输入“我已确定”以继续删除：');
-  if (confirmation === null) return;
-  if (confirmation.trim() !== '我已确定') { toast('验证文字不匹配，已取消删除'); return; }
-  nodeRequest('/api/nodes/' + id, 'DELETE').then(function (d) {
-    toast(d.warning || (d.history_cleared ? '节点已删除；每日与采样历史已按要求清理，累计流量保留' : '节点已删除；流量历史与累计均已保留'));
-    return refreshAfterNodeMutation();
-  }).catch(function (e) { if (e.message !== '未登录') toast(e.message); });
+  typedConfirm({
+    title: '删除节点',
+    body: '<p>即将删除节点「' + esc(n.name) + '」。</p>' +
+      '<p class="muted">' + deleteHistoryNote + '</p>'
+  }).then(function (ok) {
+    if (!ok) return;
+    return nodeRequest('/api/nodes/' + id, 'DELETE').then(function (d) {
+      toast(d.warning || (d.history_cleared ? '节点已删除；每日与采样历史已按要求清理，累计流量保留' : '节点已删除；流量历史与累计均已保留'));
+      return refreshAfterNodeMutation();
+    }).catch(function (e) { if (e.message !== '未登录') toast(e.message); });
+  });
 }
 
 var nodeLinkTexts = [];
@@ -986,7 +1023,6 @@ function bindNodeManageUI() {
     if (!box) return;
     var id = box.getAttribute('data-node-pick');
     if (box.checked) manageSelected[id] = true; else delete manageSelected[id];
-    resetBatchDeleteConfirm();
     var card = box.closest ? box.closest('.manage-node') : null;
     if (card) card.classList.toggle('picked', box.checked);
     updateBatchDeleteButton();
@@ -995,33 +1031,29 @@ function bindNodeManageUI() {
     setManageSelectMode(!manageSelectMode);
   });
   document.getElementById('node-batch-delete').addEventListener('click', function () {
-    var btn = this;
     var ids = Object.keys(manageSelected);
     if (!ids.length) return;
-
-    if (!pendingBatchDelete) {
-      // 第一步：进入待确认。按钮变红并写明数量，5 秒不操作自动退回。
-      pendingBatchDelete = { ids: ids.slice(), timer: setTimeout(resetBatchDeleteConfirm, 5000) };
-      btn.classList.add('confirming');
-      btn.textContent = '确认删除 ' + ids.length + ' 个节点？';
-      return;
-    }
-
-    // 第二步：真正删除。执行前先取消计时器，避免中途被重置。
-    var toDelete = pendingBatchDelete.ids;
-    clearTimeout(pendingBatchDelete.timer);
-    pendingBatchDelete = null;
-    btn.classList.remove('confirming');
-    btn.disabled = true;
-    nodeRequest('/api/nodes/delete-batch', 'POST', { ids: toDelete }).then(function (d) {
-      toast('已删除 ' + toDelete.length + ' 个节点，历史流量已保留');
-      setManageSelectMode(false);
-      loadManageNodes();
-      if (d.warning) toast(d.warning);
-    }).catch(function (e) {
-      if (e.message !== '未登录') toast(e.message);
-      resetBatchDeleteConfirm();
-    }).finally(function () { btn.disabled = false; });
+    if (ids.length > 50) { toast('一次最多删除 50 个节点，请分批操作'); return; }
+    var names = ids.map(function (id) {
+      var n = findManageNode(id);
+      return n ? n.name : '节点 #' + id;
+    });
+    typedConfirm({
+      title: '删除 ' + ids.length + ' 个节点',
+      body: '<p>即将删除以下节点：</p>' + typedConfirmList(names, 6) +
+        '<p class="muted">' + batchDeleteHistoryNote + '</p>'
+    }).then(function (ok) {
+      if (!ok) return;
+      var btn = document.getElementById('node-batch-delete');
+      btn.disabled = true;
+      return nodeRequest('/api/nodes/delete-batch', 'POST', { ids: ids, clear_history: false }).then(function (d) {
+        toast(d.warning || ('已删除 ' + ids.length + ' 个节点；流量历史与累计均已保留'));
+        setManageSelectMode(false);
+        return refreshAfterNodeMutation();
+      }).catch(function (e) {
+        if (e.message !== '未登录') toast(e.message);
+      }).finally(function () { btn.disabled = false; });
+    });
   });
   document.getElementById('node-batch-open').addEventListener('click', function () {
     document.getElementById('node-batch-prefix').value = '';
@@ -1290,6 +1322,29 @@ document.getElementById('node-cards').addEventListener('click', function (e) {
 });
 document.getElementById('drawer-close').addEventListener('click', function () { closeDrawer('policy-drawer'); });
 document.getElementById('drawer-mask').addEventListener('click', function () { closeDrawer('policy-drawer'); closeDrawer('ips-drawer'); closeDrawer('node-editor-drawer'); closeDrawer('node-links-drawer'); closeDrawer('node-batch-drawer'); });
+
+/* 删除确认框：输入匹配才放行；Enter 提交、Esc / 点遮罩取消。 */
+(function bindTypedConfirm() {
+  var input = document.getElementById('typed-confirm-input');
+  var ok = document.getElementById('typed-confirm-ok');
+  input.addEventListener('input', syncTypedConfirm);
+  input.addEventListener('compositionend', syncTypedConfirm);
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && !ok.disabled) { e.preventDefault(); closeTypedConfirm(true); }
+  });
+  // 移动端软键盘会盖住下半屏：聚焦后把输入框滚到视口中部。
+  input.addEventListener('focus', function () {
+    setTimeout(function () { input.scrollIntoView({ block: 'center', behavior: 'smooth' }); }, 260);
+  });
+  ok.addEventListener('click', function () { if (!ok.disabled) closeTypedConfirm(true); });
+  document.getElementById('typed-confirm-cancel').addEventListener('click', function () { closeTypedConfirm(false); });
+  document.getElementById('typed-confirm-mask').addEventListener('click', function (e) {
+    if (e.target === document.getElementById('typed-confirm-mask')) closeTypedConfirm(false);
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && document.getElementById('typed-confirm').classList.contains('on')) closeTypedConfirm(false);
+  });
+})();
 document.getElementById('pol-cancel').addEventListener('click', function () { closeDrawer('policy-drawer'); });
 document.getElementById('pol-save').addEventListener('click', savePolicy);
 document.getElementById('ips-close').addEventListener('click', function () { closeDrawer('ips-drawer'); });

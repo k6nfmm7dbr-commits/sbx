@@ -348,8 +348,60 @@ select.unit { padding-right: 12px; background-image: none; }
 .drawer-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 13px 18px calc(13px + env(safe-area-inset-bottom)); border-top: 1px solid var(--line); }
 .btn { padding: 9px 17px; border: 1px solid var(--line-2); border-radius: 9px; color: var(--text); background: var(--surface-2); font-size: 13px; font-weight: 650; cursor: pointer; }
 .btn.primary { border-color: var(--accent); color: #fff; background: var(--accent); }
+.btn.ghost { border-color: var(--line); color: var(--text-2); background: var(--surface-2); }
+.btn.danger { border-color: var(--bad); color: #fff; background: var(--bad); }
 .btn:active { transform: translateY(1px); }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn:disabled:active { transform: none; }
+
+/* 删除确认（输入「我已确定」）：独立于底部抽屉的一层，避免与抽屉滚动耦合 */
+.typed-confirm-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  opacity: 0;
+  pointer-events: none;
+  background: rgba(23,26,31,.42);
+  transition: opacity .16s ease;
+}
+.typed-confirm-mask.on { opacity: 1; pointer-events: auto; }
+.typed-confirm {
+  width: min(360px, 100%);
+  max-height: calc(100dvh - 48px);
+  overflow-y: auto;
+  padding: 20px 18px 16px;
+  border-radius: 20px;
+  background: var(--surface);
+  box-shadow: 0 24px 64px rgba(23,26,31,.24);
+  opacity: 0;
+  transform: translateY(10px) scale(.97);
+  transition: opacity .16s ease, transform .16s ease;
+}
+.typed-confirm.on { opacity: 1; transform: none; }
+.typed-confirm h3 { font-size: 17px; font-weight: 700; line-height: 1.35; }
+.typed-confirm-body { display: grid; gap: 8px; margin-top: 10px; color: var(--text-2); font-size: 13px; line-height: 1.62; }
+.typed-confirm-body .muted { color: var(--text-3); font-size: 12px; }
+.typed-confirm-list { display: grid; gap: 3px; margin: 0; padding-left: 17px; color: var(--text); font-size: 13px; }
+.typed-confirm-list .more { color: var(--text-3); list-style: none; margin-left: -17px; }
+.typed-confirm-hint { display: block; margin: 14px 0 7px; color: var(--text-2); font-size: 12.5px; font-weight: 600; }
+#typed-confirm-input {
+  width: 100%;
+  height: 42px;
+  padding: 0 12px;
+  border: 1px solid var(--line-2);
+  border-radius: 11px;
+  color: var(--text);
+  background: var(--surface-2);
+  font-size: 15px;
+}
+#typed-confirm-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.typed-confirm-actions { display: grid; gap: 8px; margin-top: 14px; }
+.typed-confirm-actions .btn { width: 100%; height: 43px; border-radius: 12px; font-size: 14.5px; }
+@media (max-width: 400px) { .typed-confirm-mask { padding: 18px; } }
 
 /* IP list */
 .ips-list { display: grid; gap: 7px; }
@@ -694,14 +746,6 @@ select, input[type="number"], input[type="password"], input[type="text"] { backg
   background: rgba(201,75,86,.06);
 }
 #node-batch-delete:hover { border-color: rgba(201,75,86,.5); background: rgba(201,75,86,.1); }
-
-/* 两步确认态：按钮变红实底，明确「再点一次才真的删」 */
-#node-batch-delete.confirming {
-  border-color: var(--bad);
-  color: #fff;
-  background: var(--bad);
-}
-#node-batch-delete.confirming:hover { background: #b8404b; }
 
 @media (max-width: 600px) {
   /* 标题一行、按钮两列网格：三个按钮不再换行后挤成参差的两行 */
