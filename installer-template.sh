@@ -109,7 +109,7 @@ validate_env() {
 
   # SBX_SB_VERSION：设置时必须是纯版本号（会拼进下载 URL）。
   if [[ -n "${SBX_SB_VERSION:-}" && ! "${SBX_SB_VERSION}" =~ ^[0-9]+(\.[0-9]+)*(-[A-Za-z0-9.]+)?$ ]]; then
-    err "SBX_SB_VERSION 格式非法（应形如 1.14.0 或 1.14.0-rc.1）: $SBX_SB_VERSION"
+    err "SBX_SB_VERSION 格式非法（应形如 1.14.0 或 1.14.3）: $SBX_SB_VERSION"
     bad=1
   fi
 
@@ -515,21 +515,21 @@ gh_url() { [[ -n "$GH_PROXY" ]] && echo "${GH_PROXY%/}/$1" || echo "$1"; }
 
 # sing-box 供应链校验：官方 Release 不提供逐文件 checksum，本项目 pin 版本 + sha256。
 # 升级 sing-box 版本时必须同步更新此表（下载官方包后 sha256sum）。
-SB_VERSION_DEFAULT="1.14.0-rc.1"
+SB_VERSION_DEFAULT="1.14.3"
 sb_expected_sha() {  # sb_expected_sha <filename> → 打印期望 sha256（无则输出空）
   awk -v n="$1" '$2==n{print $1}' <<'SBHASH'
-342f6e3b4ab79abe470d1516b35dced9bc8dfe62dc43a459a53d97960108afeb  sing-box-1.14.0-rc.1-linux-amd64.tar.gz
-98a5bd1f7bf5063f908461eb47ccb68d6df08571c62051f467c395a270a5e3c9  sing-box-1.14.0-rc.1-linux-arm64.tar.gz
-a48e8b92e31dbc8fbec25e46feebefde4362024971ca645a222b0d98bcac4145  sing-box-1.14.0-rc.1-linux-armv7.tar.gz
-d2083ea91f7637152b82639acc297a069675500b9f299560223196ceb19633a2  sing-box-1.14.0-rc.1-linux-armv6.tar.gz
-7d551d6e766b886b9f439fdf1a4ebb1873cfb77ae2f9b03a66ab5e86c109ca5f  sing-box-1.14.0-rc.1-linux-386.tar.gz
-aa99c75aa286d0c4e8808bd003f144a864aea5dd99a083314dddbacc50ae2772  sing-box-1.14.0-rc.1-linux-s390x.tar.gz
-f227c4b2e85c6a8be5216a77476e55feffd9e01543c2a5b89d2d95061a924dd9  sing-box-1.14.0-rc.1-linux-riscv64.tar.gz
-e057d850417b0f86b0da0c169adc552b7fd8b40012884435e9e7aaecf03aa9a8  sing-box-1.14.0-rc.1-linux-amd64-musl.tar.gz
-3b0eda64906e7274a42b6829462ae910b1ccb3c89c0a2f01c65179c50e27b3d5  sing-box-1.14.0-rc.1-linux-arm64-musl.tar.gz
-50c2e81fb0ac3281d8e9bb5224b45d9e2be5372d0a81c2cf7375a9891296de77  sing-box-1.14.0-rc.1-linux-armv7-musl.tar.gz
-a9e642d8b2ea19626002193b8faf900e3365e9c1dcf81840534f89ef58c39221  sing-box-1.14.0-rc.1-linux-386-musl.tar.gz
-55925652c1d6fdd50fc3baac40072becc22e12ac3f08fbef6219f3dcaabb6bec  sing-box-1.14.0-rc.1-linux-riscv64-musl.tar.gz
+eba8cb5fac26a7f9a03ea974dfa7334ce2f21d5d99e9bb8cbf599fb3ef00fc02  sing-box-1.14.3-linux-386-musl.tar.gz
+92dad4663615d2cb30fb8feba48787e8529b1940004341712b0d0d4548cb42ff  sing-box-1.14.3-linux-386.tar.gz
+41fc81fd041134d4d7d850a928d7d2cde17a7d6563953f406b22d32a68bfab1f  sing-box-1.14.3-linux-amd64-musl.tar.gz
+e2bdf179c15a3652955dc44867e33ca0965c9c9b91b34267dcc5a5d639a5feee  sing-box-1.14.3-linux-amd64.tar.gz
+12d6d67a4edf0dd54590865b1f4f79cd09ae043a02d648e9d1b5fccc8446ee07  sing-box-1.14.3-linux-arm64-musl.tar.gz
+29dae24d76bea3bc62d07dd3e60cfc12003de7debbd6b768df9be9c68360174e  sing-box-1.14.3-linux-arm64.tar.gz
+63d91abdde9b9de2d1ef9d607d17779e4d9b4c23bef0ffa06bbb8bacb82311f2  sing-box-1.14.3-linux-armv6.tar.gz
+8c0cf39dc51221a9df90d432f95825a3eef25a8513cc1e80e83f23caaa84cab7  sing-box-1.14.3-linux-armv7-musl.tar.gz
+8e81ee6bc1db6fec6e0342360e1de7bfabecec8d2e9c480a3563d129f84fb034  sing-box-1.14.3-linux-armv7.tar.gz
+aa4e608a6379308c9ba84109512bd84fb6d0055ec616b36ea89d47b435ac3d2f  sing-box-1.14.3-linux-riscv64-musl.tar.gz
+fe3620f67cac8e8d69f911116e255cb4e301fe2883cecd4b478cbe5dd97e2ba8  sing-box-1.14.3-linux-riscv64.tar.gz
+6f63ecbdda61fbdd9ae4609f03a05e5d4e15b41bf08de51878e83b94967af74e  sing-box-1.14.3-linux-s390x.tar.gz
 SBHASH
 }
 
