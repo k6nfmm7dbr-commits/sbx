@@ -2119,7 +2119,8 @@ sb_version_key() {  # <ver> → 输出四段数字
 }
 sb_version_ge() {
   local ka kb
-  ka=($(sb_version_key "$1")); kb=($(sb_version_key "$2"))
+  read -ra ka <<< "$(sb_version_key "$1")"
+  read -ra kb <<< "$(sb_version_key "$2")"
   local i
   for i in 0 1 2 3; do
     (( ${ka[i]} > ${kb[i]} )) && return 0
