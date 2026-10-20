@@ -535,12 +535,22 @@ SBHASH
 
 install_sing_box() {
   local force="${1:-}"
-  # 正常安装：已安装即跳过；force（如 Snell 需要升级内核）则强制重装
-  if [[ -z "$force" ]] && [[ -x "$SB_BIN" ]] && "$SB_BIN" version >/dev/null 2>&1; then
-    ok "sing-box 已安装: $("$SB_BIN" version | head -1)"
-    return 0
-  fi
-  if [[ -z "$force" ]] && [[ -n "${SBX_SB_BIN:-}" && -x "${SBX_SB_BIN}" ]]; then
+  # 已安装：正常跳过。但若版本低于发布基线 SB_VERSION_DEFAULT（如老机器
+  # 停在 1.14.0-rc.1），随面板安装/升级一并把内核带上去——用户显式设置了
+  # SB_VERSION_PIN 时尊重其选择，不自动动内核。
+  if [[ -x "$SB_BIN" ]] && "$SB_BIN" version >/dev/null 2>&1; then
+    local cur_sb
+    cur_sb=$("$SB_BIN" version 2>/dev/null | awk 'NR==1{print $3}')
+    if [[ -n "$cur_sb" && -z "$force" && -z "${SB_VERSION_PIN:-}" ]] \
+       && ! sb_version_ge "$cur_sb" "$SB_VERSION_DEFAULT"; then
+      info "sing-box 内核 $cur_sb 低于发布基线 $SB_VERSION_DEFAULT，自动升级..."
+      force=1
+    fi
+    if [[ -z "$force" ]]; then
+      ok "sing-box 已安装: $("$SB_BIN" version | head -1)"
+      return 0
+    fi
+  elif [[ -z "$force" ]] && [[ -n "${SBX_SB_BIN:-}" && -x "${SBX_SB_BIN}" ]]; then
     install -d -m 0755 "$BIN_DIR"
     cat "$SBX_SB_BIN" > "$SB_BIN"; chmod 0755 "$SB_BIN"
     ok "使用本地 sing-box: $("$SB_BIN" version | head -1)"
@@ -2097,6 +2107,27 @@ ver_ge() {  # ver_ge A B  → A >= B ?（点分版本比较）
   return 0
 }
 
+# sb_version_ge 处理带预发布后缀的版本（1.14.0-rc.1）：ver_ge 会把
+# "0-rc.1" 交给算术运算直接报错。规则：按「主.次.补丁 + 预发布序」四段
+# 数值比较，同主干下正式版(1) > 预发布(0)——即 1.14.3 > 1.14.0-rc.1 > 1.14.0-rc.0。
+sb_version_key() {  # <ver> → 输出四段数字
+  local base="$1" rel=0
+  if [[ "$base" == *-* ]]; then base="${base%%-*}"; else rel=1; fi
+  local a b c
+  IFS=. read -r a b c <<< "$base"
+  echo "$((10#$a)) $((10#$b)) $((10#${c:-0})) $rel"
+}
+sb_version_ge() {
+  local ka kb
+  ka=($(sb_version_key "$1")); kb=($(sb_version_key "$2"))
+  local i
+  for i in 0 1 2 3; do
+    (( ${ka[i]} > ${kb[i]} )) && return 0
+    (( ${ka[i]} < ${kb[i]} )) && return 1
+  done
+  return 0
+}
+
 do_update() {
   local force="${1:-}"
   banner
@@ -2215,6 +2246,20 @@ apply_update() {
 
   install_sbx_core                    # 原子替换 + SHA256 校验 + 失败回滚
   "$CORE_BIN" version >/dev/null 2>&1 || die "升级后 sbx-core 不可用，已中止（原二进制保留）"
+
+  # 内核基线随升级：老机器 sing-box 低于新版发布基线（如 1.14.0-rc.1 → 1.14.3）
+  # 时顺带升级。install_sing_box 失败会 die，所以放子 shell 里跑：下载/校验失败
+  # 只降级为警告——旧内核仍能跑，不该让面板升级整体失败；结尾统一按服务状态判定。
+  local cur_sb
+  cur_sb=$("$SB_BIN" version 2>/dev/null | awk 'NR==1{print $3}')
+  if [[ -n "$cur_sb" && -z "${SB_VERSION_PIN:-}" ]] && ! sb_version_ge "$cur_sb" "$SB_VERSION_DEFAULT"; then
+    info "sing-box 内核 $cur_sb 低于发布基线 $SB_VERSION_DEFAULT，随升级更新内核..."
+    if ( install_sing_box force ) && "$SB_BIN" version >/dev/null 2>&1; then
+      ok "sing-box 内核已升级: $("$SB_BIN" version | head -1)"
+    else
+      warn "sing-box 内核升级未完成，继续使用现有内核 $cur_sb；网络恢复后可重跑 sbx --update"
+    fi
+  fi
 
   # nftables-only 升级路径（v3.0.9）：nftables 从「优先」变成硬依赖。
   # 老机器可能只有 iptables，因此这里必须确认/安装 nftables，装不上即中止——
