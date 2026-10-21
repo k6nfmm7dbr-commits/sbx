@@ -825,12 +825,16 @@ select, input[type="number"], input[type="password"], input[type="text"] { backg
    宣纸为底、浓墨为字、朱砂作印。只做视觉：布局尺寸与 JS 钩子不动。
    body 的墨晕用两层 radial-gradient 叠在宣纸底色上；远山是内嵌 SVG
    （fixed、z-index:-1、pointer-events:none），不请求任何外部资源。 */
-body {
+body { background: var(--bg); }
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  pointer-events: none;
   background:
     radial-gradient(1100px 560px at 88% -12%, rgba(42,37,28,.055), transparent 62%),
-    radial-gradient(900px 480px at -12% 112%, rgba(42,37,28,.045), transparent 58%),
-    var(--bg);
-  background-attachment: fixed;
+    radial-gradient(900px 480px at -12% 112%, rgba(42,37,28,.045), transparent 58%);
 }
 body::after {
   content: "";
@@ -885,17 +889,6 @@ body::after {
 .tab { color: var(--text-3); }
 .tab.on { color: var(--text); background: var(--surface-3); }
 .tab.on svg { color: var(--text); }
-.tab.on::before {
-  content: "";
-  position: absolute;
-  top: 5px;
-  left: calc(50% + 20px);
-  width: 5px;
-  height: 5px;
-  border-radius: 1.5px;
-  background: var(--seal);
-}
-.tab { position: relative; }
 
 /* 按钮：primary 墨底纸字，danger 朱砂 */
 .btn.primary { border-color: var(--accent); background: var(--accent); }
@@ -905,10 +898,13 @@ body::after {
 /* 开关选中：墨 */
 .sw-input:checked + .sw { border-color: var(--accent); background: var(--accent); }
 
-/* 日历：今天用朱砂点，选中日用墨底纸字 */
+/* 日历：记录点朱砂；「今天」朱砂数字 + 细描边（印章圈意象），
+   选中日墨底纸字——两种状态一眼可分 */
 .cal-cell .dot { background: var(--seal); }
 .cal-cell.today b { color: var(--seal); }
+.cal-cell.today { border-color: rgba(177,58,48,.4); }
 .cal-cell.sel { background: var(--accent); border-color: var(--accent); }
+.cal-cell.sel b { color: var(--paper); }
 .cal-cell.sel .dot { background: var(--paper); }
 
 /* focus 统一朱砂淡圈 */
