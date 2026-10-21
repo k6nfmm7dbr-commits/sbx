@@ -159,6 +159,17 @@ func TestRulesGolden(t *testing.T) {
 		t.Errorf("ss 节点应生成 4 条规则(tcp+udp × in+out), got %d",
 			strings.Count(gotNft, "counter name sbx_n2_"))
 	}
+	// 出站回包必须同时限定 conntrack 原始方向的目的端口。
+	// 只按 sport 匹配会把本机其它进程（含 sing-box 访问上游）的随机临时
+	// 端口碰撞误计成节点流量——用户可见症状是「没人连节点也在消耗流量」。
+	inBlock := gotNft[strings.Index(gotNft, "chain sbx_in"):strings.Index(gotNft, "chain sbx_out")]
+	outBlock := gotNft[strings.Index(gotNft, "chain sbx_out"):strings.Index(gotNft, "counter sbx_ct_activate")]
+	if strings.Count(outBlock, "ct original proto-dst") != 3 {
+		t.Errorf("出站规则必须带 ct original proto-dst 限定（3 条：n1 tcp + n2 tcp/udp），实际:\n%s", outBlock)
+	}
+	if strings.Contains(inBlock, "proto-dst") {
+		t.Errorf("入站规则不应引入 conntrack 依赖:\n%s", inBlock)
+	}
 	// nftables-only：规则里不得再出现任何 iptables 痕迹
 	for _, bad := range []string{"iptables", "ip6tables", "SBX_IN", "SBX_OUT", "-A ", "-N "} {
 		if strings.Contains(gotNft, bad) {

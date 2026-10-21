@@ -64,6 +64,17 @@ func GenNFT(list []nodes.Node, epoch uint64) string {
 				continue
 			}
 			for _, proto := range nodes.Protocols(n) {
+				if cd.chain == "sbx_out" {
+					// 出站（服务端→客户端回包）只按源端口匹配会误计：本机任何
+					// 进程的随机临时端口（32768-60999，与节点默认分配区重叠）
+					// 一旦撞上节点端口，整条无关连接（含 sing-box 自己访问上游、
+					// 下载规则集、系统更新）的字节都会记到该节点头上，表现为
+					// 「没人连节点也有流量」。加上 conntrack 原始方向的目的端口
+					// ——这条连接当初就是连到这个节点端口的——才是真正的回包。
+					fmt.Fprintf(&b, "        %s %s %s ct original proto-dst %s counter name sbx_n%s_%s\n",
+						proto, cd.dirKw, portSet(ranges), portSet(ranges), nodes.IDString(n), cd.suffix)
+					continue
+				}
 				fmt.Fprintf(&b, "        %s %s %s counter name sbx_n%s_%s\n",
 					proto, cd.dirKw, portSet(ranges), nodes.IDString(n), cd.suffix)
 			}

@@ -22,9 +22,9 @@ table inet sbx_traffic {
         type filter hook output priority 300; policy accept;
         oifname "lo" return
         counter name sbx_sys_o
-        tcp sport { 443 } counter name sbx_n1_o
-        tcp sport { 8388 } counter name sbx_n2_o
-        udp sport { 8388 } counter name sbx_n2_o
+        tcp sport { 443 } ct original proto-dst { 443 } counter name sbx_n1_o
+        tcp sport { 8388 } ct original proto-dst { 8388 } counter name sbx_n2_o
+        udp sport { 8388 } ct original proto-dst { 8388 } counter name sbx_n2_o
     }
     counter sbx_ct_activate { }
     chain sbx_ct {
