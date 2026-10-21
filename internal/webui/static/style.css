@@ -960,3 +960,21 @@ html { scrollbar-color: #b6ad99 transparent; }
 
 /* 底部远山与墨晕在深底抽屉打开时不干扰内容（遮罩已是半透明墨色） */
 .drawer, .typed-confirm { background: var(--surface); }
+
+/* ===== iOS / 触屏渲染开销收口 =====
+   fixed 装饰层（墨晕 body::before、远山 body::after）带负 z-index，
+   iOS Safari 无法把它们缓存为独立合成层：滚动时每帧重新合成整页，
+   直接表现为滑动抽帧。装饰本身极淡，触屏设备（iPhone/iPad）直接不放，
+   宣纸纯色底视觉依然成立；桌面端保留。
+   同时：卡片阴影减为无（墨线边框已足够），底部导航改不透明底色，
+   免去滚动时每帧对背后内容的半透明混合。 */
+@media (hover: none) and (pointer: coarse) {
+  body::before, body::after { display: none; }
+  .glass, .node-card { box-shadow: none; }
+  .dock {
+    background: var(--surface);
+    box-shadow: 0 4px 16px rgba(42,37,28,.14);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
