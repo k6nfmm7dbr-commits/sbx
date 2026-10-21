@@ -8,7 +8,7 @@ netfilter 后端是 **nftables-only**:流量统计、节点暂停、在线 IP �
 
 <p>
   <img alt="version" src="https://img.shields.io/badge/version-v3.0.30-blue">
-  <img alt="go" src="https://img.shields.io/badge/Go-1.27.2%2B-00ADD8">
+  <img alt="go" src="https://img.shields.io/badge/Go-1.27.3%2B-00ADD8">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
   <img alt="backend" src="https://img.shields.io/badge/netfilter-nftables--only-orange">
   <img alt="cgo" src="https://img.shields.io/badge/CGO-disabled-lightgrey">
@@ -637,7 +637,7 @@ docs/AUDIT.md            行为审计(历史存档)
 FUTURE_IMPROVEMENTS.md   已知取舍与待办(诚实标注未做的部分)
 ```
 
-构建要求 **Go 1.27.2+**,产物为静态单二进制、`CGO_ENABLED=0`、无 cgo(连 SQLite 都是纯 Go)。
+构建要求 **Go 1.27.3+**,产物为静态单二进制、`CGO_ENABLED=0`、无 cgo(连 SQLite 都是纯 Go)。
 
 ```bash
 go test ./... && go test -race ./...      # 单测 + 竞态检测
