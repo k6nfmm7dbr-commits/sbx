@@ -790,18 +790,16 @@ ensure_panel_conf() {
   port=$(pick_port)
   # 先以 0600 预创建（不受 umask 影响），避免含 token 的内容出现短暂暴露窗口
   install -m 0600 /dev/null "$PANEL_CONF"
-  # listen 必须是 127.0.0.1：必须与 internal/config 的 defaultConf() 和 README 保持一致。
-  # 这里若写 0.0.0.0，全新安装会把面板直接暴露到公网（明文 HTTP + Cookie 携带 token），
-  # 而 README/安全性章节宣称"默认仅本机可访问"——文档与实现不符比默认值本身更危险。
-  # 需要外网访问时由用户在「面板设置」中显式切换（menu_panel_settings 的第 3 项），
-  # 并应同时配置 HTTPS 反代或 secure_cookie。
+  # listen 默认 0.0.0.0（与 internal/config 的 defaultConf() 一致）：面板自带
+  # 随机强令牌认证。明文 HTTP 下 Cookie 携带令牌，公网部署建议在「面板设置」
+  # 切回 127.0.0.1 并配置 HTTPS 反代，或启用 secure_cookie。
   cat > "$PANEL_CONF" <<EOF
 {
   "db": "$APP_DIR/traffic.db",
   "nodes_file": "$NODES_JSON",
   "nft_conf": "$APP_DIR/nft.conf",
   "web_root": "$WEB_DIR",
-  "listen": "127.0.0.1",
+  "listen": "0.0.0.0",
   "port": $port,
   "token": "$token",
   "interval": 2,
