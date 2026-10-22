@@ -303,7 +303,7 @@ sudo apt-get update
 
 因此 SBX 会为 sing-box 写入一个管理接口(`experimental.clash_api`),它的安全约束是:
 
-- **只监听回环地址**(127.0.0.1),端口由内核分配
+- **默认对外监听**(0.0.0.0),端口由内核分配,自带随机强令牌认证
 - **带 32 字节随机密钥**,无密钥访问返回 401
 
 这个接口具备控制能力(可切断连接、切换出站),所以绝不能对外暴露。已有配置不会被覆盖;
@@ -471,7 +471,7 @@ sbx-core node list|links|add|edit|remove|sync   # 节点管理
 /etc/systemd/system/sbx-{panel,firewall}.service
 ```
 
-`panel.json` 主要键:`listen`(默认 `127.0.0.1`,仅本机可访问)、`port`(默认 `8080`)、`token`、`interval`(采集秒数,默认 `2`)、`tz`(默认 `Asia/Shanghai`)、`db`、`nodes_file`、`nft_conf`。需从外网访问时，显式将 `listen` 配为 `0.0.0.0` 或具体网卡地址，并强烈建议置于 HTTPS 反代之后、设置 `secure_cookie=true`。路径类键在 `LoadStrict` 阶段强校验:必须为绝对路径、不含 `..`、不位于 `/proc` `/sys` `/dev`,非法配置 fail-closed。
+`panel.json` 主要键:`listen`(默认 `0.0.0.0`,对外监听,自带随机强令牌认证)、`port`(默认 `8080`)、`token`、`interval`(采集秒数,默认 `2`)、`tz`(默认 `Asia/Shanghai`)、`db`、`nodes_file`、`nft_conf`。需从外网访问时，显式将 `listen` 配为 `0.0.0.0` 或具体网卡地址，并强烈建议置于 HTTPS 反代之后、设置 `secure_cookie=true`。路径类键在 `LoadStrict` 阶段强校验:必须为绝对路径、不含 `..`、不位于 `/proc` `/sys` `/dev`,非法配置 fail-closed。
 
 `trusted_origin`(默认不配置)与 `secure_cookie=true` 一样属于**可选键**，不写就没有这个键。它的作用是声明"浏览器实际访问面板的公开地址"，只影响状态变更接口的 CSRF 来源校验：默认要求 Origin/Referer 与请求 Host 的 host 与端口都一致；当反向代理把 Host 改写成带后端端口（如 `panel.example.com:8080`）时，浏览器发出的 Origin 是 `https://panel.example.com`，严格比较会拒绝请求，此时把 `trusted_origin` 配成 `https://panel.example.com` 即可放行该来源。取值必须是绝对 `http(s)` URL，可带路径但会被忽略；非法取值在 `LoadStrict` 阶段 fail-closed 拒绝启动（避免"配了却没生效"这种更难排查的状态）。它只放宽到"这一个确切的来源"，不影响其它校验。
 
@@ -488,10 +488,10 @@ sbx-core node list|links|add|edit|remove|sync   # 节点管理
 - **内部错误不外泄**:500/503 只返回稳定的 `error_code` + 通用文案 + `request_id`(响应头 `X-Request-Id`),健康探针降级时只回布尔状态、采样年龄，完整错误只写服务端日志,不泄漏文件路径 / SQL 片段 / nft 报错。报障时把 `request_id` 提供给运维即可对齐日志。
 - **敏感文件权限**:`nodes.json` / `state.json` / sing-box config 创建即 `0600`,已存在的宽权限文件会被收紧(即使 `umask 000` 也不留暴露窗口)。
 - **最小能力**:面板服务 capability 收敛为 `CAP_NET_ADMIN`(nft 走 netlink)+ `CAP_NET_BIND_SERVICE`(绑定端口)。
-- **HTTPS**:面板本身跑 HTTP。默认只监听 `127.0.0.1`,通过本机或 SSH 隧道访问；需要外网访问时显式把 `listen` 改为 `0.0.0.0` 或具体地址，并强烈建议置于 HTTPS 反代之后、设置 `secure_cookie=true`。设置后 Cookie 带 `Secure` 与 HSTS 响应头；不设置时 HTTP Cookie 会以明文传输。
+- **HTTPS**:面板本身跑 HTTP。默认对外监听 `0.0.0.0`（自带随机强令牌认证）；需要收回本机时把 `listen` 改为 `127.0.0.1` 并经 SSH 隧道访问；公网部署强烈建议置于 HTTPS 反代之后、设置 `secure_cookie=true`。设置后 Cookie 带 `Secure` 与 HSTS 响应头；不设置时 HTTP Cookie 会以明文传输。设置后 Cookie 带 `Secure` 与 HSTS 响应头；不设置时 HTTP Cookie 会以明文传输。
 - **供应链**: `sbx-core` 大文件可经 `SBX_GH_PROXY` / `SBX_RAW_BASE` 加速下载，但**信任决策依据一律不经镜像**：`SHA256SUMS` 与 `sbx.sh.sha256` 固定从官方 RAW 源直连获取，防止自定义镜像同时投毒二进制和清单形成自证式校验。在线升级固定直连官方脚本 URL 并用官方 `sbx.sh.sha256` 校验，校验失败或取不到可信哈希时 fail-closed，不覆盖现有安装。用 `curl | bash` / `bash <(curl ...)` 一键安装时，需要重新落盘的那份安装器副本同样直连官方源并在校验通过后才写入（它随后会成为常驻的 `sbx` 命令）；校验不通过或官方源不可达时只告警并跳过落盘，不会装入未经验证的脚本。显式 `SBX_SCRIPT_SHA256` 可作为独立哈希锚。此校验仍信任 GitHub 官方仓库/账号，官方源被攻破不在哈希清单本身的防护范围内；后续可增加独立签名密钥。CI 用 `govulncheck` 扫描依赖漏洞，GitHub Actions 全部 pin 到完整 commit SHA。
 
-> ⚠️ 面板默认只监听 `127.0.0.1:8080`,仅本机可访问。需外网访问时必须显式配置 `listen` 为 `0.0.0.0` 或具体地址；如启用公网监听,请设置强 token 并强烈建议置于 HTTPS 反代之后、启用 `secure_cookie=true`。
+> ⚠️ 面板默认监听 `0.0.0.0`,自带随机强令牌认证。公网部署请确认令牌强度,并强烈建议置于 HTTPS 反代之后、启用 `secure_cookie=true`;需要仅本机访问时把 `listen` 改为 `127.0.0.1`。
 
 ---
 
