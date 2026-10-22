@@ -34,7 +34,9 @@ func TestLoadStrictMissingFileAllowsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("文件不存在应允许 defaults, 得到错误: %v", err)
 	}
-	if c.Listen != "127.0.0.1" || c.Token != "" {
+	// 默认对外监听（0.0.0.0）：面板自带随机强令牌；token 留空表示
+	// 「尚未生成」，由安装器/菜单写入。
+	if c.Listen != "0.0.0.0" || c.Token != "" {
 		t.Fatalf("defaults 不正确: listen=%q token=%q", c.Listen, c.Token)
 	}
 	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {

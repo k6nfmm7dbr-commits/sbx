@@ -614,6 +614,13 @@ func (s *Server) createNodeBatch(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			sp.SNI, sp.Password = sni, pw
+		case "socks":
+			pw, err := nodes.GenerateHex(16)
+			if err != nil {
+				s.failInternal(w, r, codeNodesFileUnavailable, err)
+				return
+			}
+			sp.Username, sp.Password = "u", pw
 		case "snell":
 			psk, err := nodes.GenerateHex(32)
 			if err != nil {
@@ -862,6 +869,12 @@ func (s *Server) newNodeArgs(ctx context.Context, store *nodes.Store, req nodeCr
 			return nil, errors.New("生成节点密码失败")
 		}
 		args = append(args, "--sni="+sni, "--password="+pw)
+	case "socks":
+		pw, err := nodes.GenerateHex(16)
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, "--username=u", "--password="+pw)
 	case "snell":
 		version := req.Version
 		if version == 0 {

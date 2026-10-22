@@ -19,7 +19,7 @@ var managedTagRe = regexp.MustCompile(`^sbx-n[0-9]+$`)
 func isManagedTag(tag string) bool { return managedTagRe.MatchString(tag) }
 
 // Types 与旧 TYPES 一致（含 Snell）。
-var Types = []string{"vless", "shadowsocks", "trojan", "anytls", "snell"}
+var Types = []string{"vless", "shadowsocks", "trojan", "anytls", "snell", "socks"}
 
 // ValidType 报告类型是否受支持。
 func ValidType(t string) bool {
@@ -81,6 +81,17 @@ func BuildInbound(n Node) (map[string]any, error) {
 	case "anytls":
 		base["users"] = []any{map[string]any{"name": "u", "password": Str(n, "password")}}
 		base["tls"] = tlsSelfsigned(n)
+	case "socks":
+		// sing-box socks inbound：设置 users 即启用用户名/密码认证。
+		// 面板/CLI 创建的节点总是带随机密码；手工写入空密码则生成开放代理
+		// （sing-box 语义：无 users 即不认证），由使用者自行承担暴露风险。
+		u := Str(n, "username")
+		if u == "" {
+			u = "u"
+		}
+		if pw := Str(n, "password"); pw != "" {
+			base["users"] = []any{map[string]any{"username": u, "password": pw}}
+		}
 	case "snell":
 		v, _ := toInt(n["version"])
 		base["version"] = v

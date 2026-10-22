@@ -191,7 +191,7 @@ func (c *CLI) outJSON(v any) int {
 var addKnown = map[string]bool{
 	"port": true, "name": true, "uuid": true, "password": true, "method": true,
 	"sni": true, "flow": true, "private-key": true, "public-key": true, "short-id": true,
-	"version": true, "psk": true, "obfs-mode": true, "mode": true,
+	"version": true, "psk": true, "obfs-mode": true, "mode": true, "username": true,
 	// allow：逗号分隔的规则集名（"只允许访问这些服务"）。空值表示不限制。
 	"allow": true,
 }
@@ -239,7 +239,7 @@ func (c *CLI) cmdAdd(args []string) int {
 		node["name"] = fmt.Sprintf("%s-%d", typ, nid)
 	}
 	for _, key := range []string{"uuid", "password", "method", "sni", "flow",
-		"private_key", "public_key", "short_id", "psk", "obfs_mode", "mode"} {
+		"private_key", "public_key", "short_id", "psk", "obfs_mode", "mode", "username"} {
 		flag := strings.ReplaceAll(key, "_", "-")
 		if v := p.flags[flag]; v != "" {
 			node[key] = v
@@ -263,6 +263,19 @@ func (c *CLI) cmdAdd(args []string) int {
 	if typ == "trojan" || typ == "anytls" {
 		node["cert"] = c.Store.CertDir() + "/cert.pem"
 		node["key"] = c.Store.CertDir() + "/key.pem"
+	}
+	if typ == "socks" {
+		// SOCKS5：用户名默认 "u"，密码缺省时自动生成——公网开放代理是安全事故源。
+		if Str(node, "username") == "" {
+			node["username"] = "u"
+		}
+		if Str(node, "password") == "" {
+			pw, gerr := GenerateHex(16)
+			if gerr != nil {
+				return c.fail("生成密码失败: " + gerr.Error())
+			}
+			node["password"] = pw
+		}
 	}
 	if raw, has := p.flags["allow"]; has {
 		names, aerr := parseAllowFlag(raw)
@@ -356,6 +369,7 @@ type BatchNodeSpec struct {
 	PublicKey  string `json:"public_key,omitempty"`
 	ShortID    string `json:"short_id,omitempty"`
 	PSK        string `json:"psk,omitempty"`
+	Username   string `json:"username,omitempty"`
 	Version    int64  `json:"version,omitempty"`
 }
 
@@ -449,6 +463,16 @@ func (c *CLI) cmdAddBatch(args []string) int {
 			node["password"] = sp.Password
 			node["cert"] = c.Store.CertDir() + "/cert.pem"
 			node["key"] = c.Store.CertDir() + "/key.pem"
+		case "socks":
+			if sp.Password == "" {
+				return c.fail(fmt.Sprintf("第 %d 个节点缺少密码", i+1))
+			}
+			u := sp.Username
+			if u == "" {
+				u = "u"
+			}
+			node["username"] = u
+			node["password"] = sp.Password
 		case "snell":
 			if sp.PSK == "" || (sp.Version != 5 && sp.Version != 6) {
 				return c.fail(fmt.Sprintf("第 %d 个节点 Snell 参数无效", i+1))

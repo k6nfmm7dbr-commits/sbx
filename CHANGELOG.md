@@ -663,3 +663,7 @@ profile 优化后 50×50 reconcile pprof Top 从 `NodeIPState.Reconcile`（约 3
 - 计数表与策略表分离（`sbx_traffic` / `sbx_policy`），互不覆盖。
 
 （更早版本的变更见 git log 与 `docs/AUDIT.md` 的历史存档说明。）
+
+- **新增 SOCKS5 协议支持**：面板与 CLI 可创建 SOCKS5 节点（sing-box `socks` inbound，TCP+UDP）。凭据策略：用户名默认 `u`，密码缺省自动生成随机 32 位十六进制——**刻意不提供「无认证」选项**，公网开放代理是安全事故源（手工编辑 nodes.json 写空密码则生成开放代理，由使用者自担风险）。分享链接输出 `socks5://user:pass@host:port`。已用真实 sing-box 1.14.3 端到端验证：配置 `sing-box check` 通过、带认证连接、512KB/2MB 下载计数对账、域名记录逐字节一致。
+- **面板默认对外监听（0.0.0.0）**：新安装与默认配置不再锁回环，装完即可用「IP:端口」从外网打开面板（自带随机强令牌认证）。明文 HTTP 下 Cookie 携带令牌，公网部署仍建议 HTTPS 反代或 secure_cookie；安装完成提示会按实际监听地址给出对应建议，需要收回本机时在「面板设置 → 监听地址」切回 127.0.0.1。
+- **登录页移除朱砂印章装饰**（视觉反馈）。

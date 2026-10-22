@@ -99,6 +99,17 @@ func (s *Store) LinkFor(n Node, host, labelSuffix string) string {
 		return "anytls://" + PyQuote(Str(n, "password"), "/") + "@" + h + ":" + port +
 			"?" + EncodeQuery(q) + "#" + name
 
+	case "socks":
+		u, pw := Str(n, "username"), Str(n, "password")
+		if u == "" {
+			u = "u"
+		}
+		auth := ""
+		if pw != "" {
+			auth = PyQuote(u, "/") + ":" + PyQuote(pw, "/") + "@"
+		}
+		return "socks5://" + auth + h + ":" + port + "#" + name
+
 	case "snell":
 		// URI 格式（Shadowrocket / sing-box / Stash / Loon 等支持 snell:// 导入的客户端）
 		// 名称含版本后缀（v5/v6），且整个 fragment 需一并百分号编码——

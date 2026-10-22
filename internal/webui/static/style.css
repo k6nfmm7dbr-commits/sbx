@@ -928,36 +928,6 @@ html { scrollbar-color: #b6ad99 transparent; }
 /* 选中文字：朱砂淡底 */
 ::selection { background: rgba(177,58,48,.16); }
 
-/* 登录卡：右上角朱砂印章（纯 CSS，无资源请求） */
-.login {
-  position: relative;
-  box-shadow: 0 1px 3px rgba(42,37,28,.05), 0 14px 34px rgba(42,37,28,.06);
-}
-.login::after {
-  content: "流量";
-  position: absolute;
-  top: -15px;
-  right: 14px;
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 46px;
-  border-radius: 5px;
-  color: var(--paper);
-  background: var(--seal);
-  box-shadow: 0 2px 6px rgba(42,37,28,.2);
-  font-family: "Kaiti SC", "STKaiti", "KaiTi", "Songti SC", "Noto Serif CJK SC", serif;
-  font-size: 13px;
-  font-weight: 700;
-  line-height: 1.05;
-  letter-spacing: .05em;
-  text-align: center;
-  transform: rotate(4deg);
-  white-space: pre-line;
-  word-break: break-all;
-  padding: 2px;
-}
-
 /* 底部远山与墨晕在深底抽屉打开时不干扰内容（遮罩已是半透明墨色） */
 .drawer, .typed-confirm { background: var(--surface); }
 

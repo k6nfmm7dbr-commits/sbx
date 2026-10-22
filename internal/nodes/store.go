@@ -525,6 +525,7 @@ var protoTransports = map[string][]string{
 	"anytls":      {"tcp"},
 	"shadowsocks": {"tcp", "udp"},
 	"snell":       {"tcp", "udp"},
+	"socks":       {"tcp", "udp"},
 }
 
 // Protocols 对齐 node_protocols：计数规则与连接数显示的传输层归属；
