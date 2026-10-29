@@ -21,7 +21,7 @@ import (
 // New 构造配置好超时参数的 HTTP Server（不启动监听）。
 // 超时设置：慢头部/慢请求不会长期占用连接；写超时放宽以兼容 CSV 导出。
 func New(cfg *config.Config, db *database.DB, src traffic.LiveSource, pol *policy.Service) (*Server, *http.Server) {
-	s := &Server{cfg: cfg, db: db, src: src, policy: pol}
+	s := &Server{cfg: cfg, db: db, src: src, policy: pol, subToken: cfg.SubToken}
 	hs := &http.Server{
 		// IPv6 监听地址必须用 net.JoinHostPort 拼接（"::" → "[::]:8080"），
 		// 不能用 cfg.Listen + ":" + port 得到非法 ":::8080"。
@@ -71,6 +71,11 @@ type Server struct {
 	nodeRestart func(context.Context) error
 	nodeFwApply func(context.Context) error
 	mutationMu  sync.Mutex // 同进程保护 candidate/backup 区间；跨进程使用 SBX_LOCK
+
+	// subMu 保护订阅令牌缓存。订阅令牌可在运行中轮换（面板「重置订阅地址」），
+	// 轮换后必须立刻对新请求生效，因此不能用启动时读取的 cfg 副本。
+	subMu    sync.RWMutex
+	subToken string
 }
 
 // SetNodeMutationHooks 设置节点配置变更后的服务动作；仅 Serve 启动流程调用。
@@ -171,6 +176,29 @@ func (s *Server) serveRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 订阅路由必须先于 /api 与静态资源判定：它刻意不走 Cookie 鉴权
+	// （客户端不会带 Cookie），令牌放在路径里。约束说明见 sub.go 顶部。
+	if strings.HasPrefix(route, "/sub/") {
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			s.handleSub(w, r, strings.TrimPrefix(route, "/sub/"))
+			return
+		}
+		s.sendText(w, r, http.StatusNotFound, "not found")
+		return
+	}
+
+	// 图标目录：只放行 .png 且拒绝路径穿越（embed FS 本身也不接受 ".."，
+	// 这里再挡一层，避免把异常路径透传到 fs.Open）。
+	if strings.HasPrefix(route, "/icons/") {
+		name := strings.TrimPrefix(route, "/")
+		if strings.Contains(name, "..") || !strings.HasSuffix(name, ".png") {
+			s.sendText(w, r, http.StatusNotFound, "not found")
+			return
+		}
+		s.serveAsset(w, r, name, "image/png")
+		return
+	}
+
 	// GET/HEAD 处理只读 API；POST 仅开放节点管理与登出 API，以及独立的 /login 表单。
 	switch r.Method {
 	case http.MethodGet, http.MethodHead:
@@ -180,7 +208,9 @@ func (s *Server) serveRoutes(w http.ResponseWriter, r *http.Request) {
 		}
 		s.handleGet(w, r, route)
 	case http.MethodPost:
-		if strings.HasPrefix(route, "/api/nodes") || route == "/api/logout" {
+		// /api/sub/reset 必须是 POST：把"改状态"挂在 GET 上，浏览器预取或
+		// 爬虫扫到链接就可能把用户的订阅地址重置掉。
+		if strings.HasPrefix(route, "/api/nodes") || route == "/api/logout" || route == "/api/sub/reset" {
 			s.handleAPI(w, r, route)
 			return
 		}
@@ -251,6 +281,11 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, route string)
 
 	case "/style.css":
 		s.serveAsset(w, r, "style.css", "text/css; charset=utf-8")
+
+	case "/manifest.json":
+		// 刻意免登录：iOS/Android 在「添加到主屏幕」时会抓 manifest 与图标，
+		// 此时用户可能停在登录页。这些文件不含任何环境信息。
+		s.serveAsset(w, r, "manifest.json", "application/manifest+json; charset=utf-8")
 
 	case "/login":
 		// 兼容性修复：登录失败重定向到 /login?error=1 后，旧实现返回 404

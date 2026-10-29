@@ -1,0 +1,8 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+<rect width="1024" height="1024" fill="#f1ede3"/>
+<circle cx="512" cy="512" r="430" fill="#2a251c" opacity="0.045"/>
+<circle cx="512" cy="512" r="300" fill="#2a251c" opacity="0.03"/>
+<rect x="297" y="297" width="430" height="430" rx="30" fill="#b13a30"/>
+<rect x="313" y="313" width="398" height="398" rx="23" fill="none" stroke="#f1ede3" stroke-opacity="0.5" stroke-width="5"/>
+<text x="512" y="592" font-family="Noto Serif CJK SC" font-weight="700" font-size="230" fill="#fbf7ee" text-anchor="middle" letter-spacing="-6">墨</text>
+</svg>

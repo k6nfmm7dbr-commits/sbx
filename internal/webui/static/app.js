@@ -1130,7 +1130,11 @@ document.getElementById('node-select').addEventListener('change', function (e) {
     }
     if (name === 'daily') loadDaily();
     if (name === 'node') loadNodeDaily();
-    if (name === 'manage') loadManageNodes();
+    if (name === 'manage') {
+      loadManageNodes();
+      // 订阅令牌可能在别的设备上重置过，每次进配置页都重新取一次。
+      if (window.loadSubInfo) window.loadSubInfo();
+    }
   }
   document.querySelectorAll('.tab[data-view]').forEach(function (b) {
     b.addEventListener('click', function () { show(b.dataset.view, true); });
@@ -1374,3 +1378,116 @@ document.getElementById('pol-rate-enable').addEventListener('change', function (
 bindNodeManageUI();
 bindAllowPicker();
 bindCalendar();
+
+/* ---------- 客户端订阅 ---------- */
+(function initSubPanel() {
+  var urlEl = document.getElementById('sub-url');
+  var sbEl = document.getElementById('sub-url-singbox');
+  var metaEl = document.getElementById('sub-meta');
+  var warnEl = document.getElementById('sub-warn');
+  var resetBtn = document.getElementById('sub-reset');
+  if (!urlEl || !sbEl) return;
+
+  function loadSubInfo() {
+    api('/api/sub').then(function (d) {
+      urlEl.value = d.url || '';
+      sbEl.value = d.singbox_url || '';
+      // input 宽度有限，地址必然被截断；title 让长按/悬停能看到全文。
+      urlEl.title = urlEl.value;
+      sbEl.title = sbEl.value;
+      var n = Number(d.exportable || 0);
+      setText('sub-meta', n + ' 个节点可导入');
+      var skipped = d.skipped || [];
+      if (skipped.length) {
+        warnEl.textContent = '已跳过 ' + skipped.length + ' 个节点：' + skipped.join('；');
+        warnEl.classList.remove('hidden');
+      } else {
+        warnEl.classList.add('hidden');
+      }
+      if (d.singbox_error) {
+        warnEl.textContent = 'sing-box 配置生成失败：' + d.singbox_error;
+        warnEl.classList.remove('hidden');
+      }
+    }).catch(function () { setText('sub-meta', '读取失败'); });
+  }
+
+  // 复制：面板通常是 http 明文直连，navigator.clipboard 在非安全上下文
+  // 直接不存在，必须回退到 execCommand。iOS Safari 对 textarea 的
+  // select + execCommand('copy') 仍有效，但必须处在用户手势的调用栈里。
+  function copyText(text, btn) {
+    if (!text) { toast('地址还没加载出来'); return; }
+    var prev = btn.textContent;
+    function ok() { btn.textContent = '已复制'; toast('已复制到剪贴板'); setTimeout(function () { btn.textContent = prev; }, 1600); }
+    function fallback() {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.top = '-1000px';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      var done = false;
+      try { done = document.execCommand('copy'); } catch (e) { done = false; }
+      document.body.removeChild(ta);
+      if (done) { ok(); return; }
+      // 兜底：让用户手动复制，而不是静默失败。
+      btn.textContent = '请长按';
+      setTimeout(function () { btn.textContent = prev; }, 2000);
+      toast('自动复制被浏览器拦截，请长按地址手动复制');
+    }
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(ok, fallback);
+    } else {
+      fallback();
+    }
+  }
+
+  document.getElementById('sub-copy').addEventListener('click', function () {
+    copyText(urlEl.value, this);
+  });
+  document.getElementById('sub-copy-singbox').addEventListener('click', function () {
+    copyText(sbEl.value, this);
+  });
+
+  // 两步确认而非弹窗：iOS WebView 里 window.confirm 会被静默屏蔽，
+  // 这是本项目此前踩过的坑（批量删除按钮点了没反应）。
+  var armed = false, armTimer = null;
+  resetBtn.addEventListener('click', function () {
+    if (!armed) {
+      armed = true;
+      resetBtn.textContent = '再点一次确认';
+      resetBtn.classList.add('armed');
+      armTimer = setTimeout(function () {
+        armed = false;
+        resetBtn.textContent = '重置订阅地址';
+        resetBtn.classList.remove('armed');
+      }, 4000);
+      return;
+    }
+    clearTimeout(armTimer);
+    armed = false;
+    resetBtn.disabled = true;
+    resetBtn.textContent = '重置中…';
+    fetch('/api/sub/reset', { method: 'POST', cache: 'no-store', credentials: 'same-origin' })
+      .then(function (r) {
+        if (r.status === 401) { location.replace('/login'); throw new Error('未登录'); }
+        if (!r.ok) throw new Error('重置失败 ' + r.status);
+        return r.json();
+      })
+      .then(function () {
+        toast('订阅地址已重置，旧地址立即失效');
+        loadSubInfo();
+      })
+      .catch(function (e) { toast(e.message); })
+      .finally(function () {
+        resetBtn.disabled = false;
+        resetBtn.textContent = '重置订阅地址';
+        resetBtn.classList.remove('armed');
+      });
+  });
+
+  window.loadSubInfo = loadSubInfo;
+  loadSubInfo();
+})();

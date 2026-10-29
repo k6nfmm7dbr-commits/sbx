@@ -1,0 +1,30 @@
+# XcodeGen 备用工程描述：`brew install xcodegen && xcodegen generate`
+# 手写的 project.pbxproj 已经可直接打开，本文件仅用于需要重新生成时的对照。
+name: SbxPanel
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  SbxPanel:
+    type: application
+    platform: iOS
+    sources:
+      - path: SbxPanel
+    info:
+      path: SbxPanel/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.sbxpanel
+        INFOPLIST_FILE: SbxPanel/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        CODE_SIGN_STYLE: Automatic

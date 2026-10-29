@@ -68,6 +68,17 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request, route string)
 		}
 		s.handleLogout(w, r)
 
+	case "/api/sub":
+		// 面板内查看/复制订阅地址（Cookie 鉴权）。真正的订阅下载走 /sub/<token>。
+		s.handleSubInfo(w, r)
+
+	case "/api/sub/reset":
+		if r.Method != http.MethodPost {
+			s.sendJSON(w, r, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		s.handleSubReset(w, r)
+
 	case "/api/summary":
 		s.serveCachedJSON(w, r, codeSummaryFailed, s.cacheKey("summary"), func() (any, error) {
 			sum, err := traffic.BuildSummary(s.cfg, s.db.DB, s.src)

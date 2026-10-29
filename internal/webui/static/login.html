@@ -5,6 +5,15 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="light">
 <title>登录 · SBX 流量面板</title>
+<!-- 登录页也要完整的主屏元信息：用户很可能是在登录页上点「添加到主屏幕」，
+     此时若没有 apple-touch-icon，主屏图标会是页面的截图缩略图。 -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="SBX">
+<meta name="theme-color" content="#f1ede3">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
 <link rel="stylesheet" href="style.css">
 </head>
 <body class="login-body">

@@ -5,6 +5,16 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="light">
 <title>SBX · 流量面板</title>
+<!-- 主屏 App 模式：「添加到主屏幕」后全屏打开，无 Safari 地址栏。
+     status-bar-style 用 default 而非 black-translucent——水墨底是浅色，
+     沉浸式会让状态栏文字与宣纸色撞在一起。 -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="SBX">
+<meta name="theme-color" content="#f1ede3">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -126,6 +136,35 @@
         </div>
       </div>
       <div id="node-manage-list" class="manage-list"></div>
+    </div>
+
+    <div class="panel glass sub-panel">
+      <div class="panel-head">
+        <h2>客户端订阅</h2>
+        <small id="sub-meta">—</small>
+      </div>
+      <p class="sub-tip">粘进 <b>sing-box</b>（配置 → 添加远程配置）或 Shadowrocket 即可在手机上使用。地址内含独立令牌，<b>泄露等于泄露全部节点</b>，不要发给别人。</p>
+      <p class="sub-warn hidden" id="sub-warn"></p>
+
+      <div class="sub-field">
+        <span>sing-box 配置（推荐）</span>
+        <div class="sub-row">
+          <input id="sub-url-singbox" type="text" readonly spellcheck="false" autocapitalize="off" autocomplete="off">
+          <button class="btn ghost" id="sub-copy-singbox" type="button">复制</button>
+        </div>
+      </div>
+
+      <div class="sub-field">
+        <span>通用订阅（base64）</span>
+        <div class="sub-row">
+          <input id="sub-url" type="text" readonly spellcheck="false" autocapitalize="off" autocomplete="off">
+          <button class="btn ghost" id="sub-copy" type="button">复制</button>
+        </div>
+      </div>
+
+      <div class="sub-actions">
+        <button class="btn ghost sub-reset" id="sub-reset" type="button">重置订阅地址</button>
+      </div>
     </div>
   </section>
 

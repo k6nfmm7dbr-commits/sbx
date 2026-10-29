@@ -9,6 +9,8 @@ import (
 )
 
 //go:embed static/index.html static/login.html static/app.js static/login.js static/style.css
+//go:embed static/manifest.json
+//go:embed static/icons
 var embedded embed.FS
 
 // FS 返回以 "web/" 为根的前端文件系统。
