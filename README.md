@@ -245,9 +245,9 @@ sudo apt-get update
 | `/api/sub/reset` | POST | 轮换订阅令牌,旧地址立即失效(需登录) |
 | `/sub/<token>` | GET | 订阅下载,**不走 Cookie 鉴权**,令牌在路径里;默认返回 base64 链接列表,`?target=singbox` 返回 sing-box 完整配置 |
 
-> 想把订阅托管到 GitHub 上分发,先读 [`deploy/sub-hosting/`](deploy/sub-hosting/README.md)。
-> 公开仓库等于公开密码,私有仓库客户端又拉不了——那里给了「私有仓库镜像 + Worker 鉴权」
-> 的完整做法,以及四种方案的取舍。
+> **不建议把订阅托管到 GitHub 上分发**:公开仓库等于公开密码;私有仓库的 raw 又必须带
+> `Authorization` 头,而 sing-box 远程配置与 Shadowrocket 订阅都不支持自定义请求头。
+> 两条路都堵,直接用面板的 `/sub/<token>`,需要时在前面套一层 Cloudflare 代理即可。
 
 ---
 
