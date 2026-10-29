@@ -1,0 +1,274 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		200000000000000000000018 /* TrafficMeterApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000010 /* TrafficMeterApp.swift */; };
+		200000000000000000000019 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000011 /* AppDelegate.swift */; };
+		20000000000000000000001A /* InterfaceStats.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000012 /* InterfaceStats.swift */; };
+		20000000000000000000001B /* TrafficStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000013 /* TrafficStore.swift */; };
+		20000000000000000000001C /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000014 /* ContentView.swift */; };
+		20000000000000000000001D /* TrafficIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000015 /* TrafficIntents.swift */; };
+		20000000000000000000001E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000016 /* Assets.xcassets */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		200000000000000000000005 /* TrafficMeter.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TrafficMeter.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		200000000000000000000010 /* TrafficMeterApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrafficMeterApp.swift; sourceTree = "<group>"; };
+		200000000000000000000011 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		200000000000000000000012 /* InterfaceStats.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InterfaceStats.swift; sourceTree = "<group>"; };
+		200000000000000000000013 /* TrafficStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrafficStore.swift; sourceTree = "<group>"; };
+		200000000000000000000014 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		200000000000000000000015 /* TrafficIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrafficIntents.swift; sourceTree = "<group>"; };
+		200000000000000000000016 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		200000000000000000000017 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		200000000000000000000007 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		200000000000000000000002 = {
+			isa = PBXGroup;
+			children = (
+				200000000000000000000009 /* TrafficMeter */,
+				200000000000000000000003 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		200000000000000000000003 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				200000000000000000000005 /* TrafficMeter.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		200000000000000000000009 /* TrafficMeter */ = {
+			isa = PBXGroup;
+			children = (
+				200000000000000000000010 /* TrafficMeterApp.swift */,
+				200000000000000000000011 /* AppDelegate.swift */,
+				200000000000000000000012 /* InterfaceStats.swift */,
+				200000000000000000000013 /* TrafficStore.swift */,
+				200000000000000000000014 /* ContentView.swift */,
+				200000000000000000000015 /* TrafficIntents.swift */,
+				200000000000000000000016 /* Assets.xcassets */,
+				200000000000000000000017 /* Info.plist */,
+			);
+			path = TrafficMeter;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		200000000000000000000004 /* TrafficMeter */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 20000000000000000000001F /* Build configuration list for PBXNativeTarget "TrafficMeter" */;
+			buildPhases = (
+				200000000000000000000006 /* Sources */,
+				200000000000000000000007 /* Frameworks */,
+				200000000000000000000008 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = TrafficMeter;
+			productName = TrafficMeter;
+			productReference = 200000000000000000000005 /* TrafficMeter.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		200000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1500;
+				LastUpgradeCheck = 1500;
+				TargetAttributes = {
+					200000000000000000000004 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+				};
+			};
+			buildConfigurationList = 20000000000000000000001E /* Build configuration list for PBXProject "TrafficMeter" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+				"zh-Hans",
+			);
+			mainGroup = 200000000000000000000002;
+			productRefGroup = 200000000000000000000003 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				200000000000000000000004 /* TrafficMeter */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		200000000000000000000008 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				20000000000000000000001E /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		200000000000000000000006 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				200000000000000000000018 /* TrafficMeterApp.swift in Sources */,
+				200000000000000000000019 /* AppDelegate.swift in Sources */,
+				20000000000000000000001A /* InterfaceStats.swift in Sources */,
+				20000000000000000000001B /* TrafficStore.swift in Sources */,
+				20000000000000000000001C /* ContentView.swift in Sources */,
+				20000000000000000000001D /* TrafficIntents.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		200000000000000000000020 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		200000000000000000000021 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		200000000000000000000022 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = TrafficMeter/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.trafficmeter;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		200000000000000000000023 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = TrafficMeter/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.trafficmeter;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		20000000000000000000001E /* Build configuration list for PBXProject "TrafficMeter" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				200000000000000000000020 /* Debug */,
+				200000000000000000000021 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		20000000000000000000001F /* Build configuration list for PBXNativeTarget "TrafficMeter" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				200000000000000000000022 /* Debug */,
+				200000000000000000000023 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 200000000000000000000001 /* Project object */;
+}

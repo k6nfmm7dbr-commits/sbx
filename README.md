@@ -64,6 +64,7 @@ netfilter 后端是 **nftables-only**:流量统计、节点暂停、在线 IP �
 | **6 种协议** | VLESS Reality、Shadowsocks 2022、Trojan、AnyTLS、Snell v5/v6、SOCKS5,菜单化创建,自动生成分享链接 |
 | **客户端订阅** | `/sub/<token>` 输出 base64 链接列表或 sing-box 完整配置,一条地址导入手机客户端;订阅令牌与面板登录令牌相互独立,可单独轮换 |
 | **手机可用** | 面板自带 PWA manifest 与主屏图标,「添加到主屏幕」即全屏运行;仓库内附 WKWebView 壳的 Xcode 工程(`ios/`),可用免费 Apple ID 自签 |
+| **流量统计 App** | `ios/TrafficMeter.xcodeproj`:读本机网卡计数,区分蜂窝 / Wi-Fi、分上下行、近七日与本月;只读物理层,开代理不会重复计数;支持快捷指令与自动化播报 |
 | **内核级流量统计** | nftables named counter,非估算;单调差分累加,规则重建自动衔接,不丢计不重复 |
 | **节点暂停** | 单节点启用 / 暂停,只屏蔽该节点端口,不删配置、不重启 sing-box |
 | **在线 IP 上限(IP Limit)** | 按服务端可见的公网源 IP 统计,达限只挡新 IP;基于 conntrack 判活 |
