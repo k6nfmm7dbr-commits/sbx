@@ -1,0 +1,67 @@
+# 复制到「私有仓库」的 .github/workflows/sub-mirror.yml
+#
+# 作用：定时把面板上的订阅镜像到私有仓库，供 Cloudflare Worker 读取。
+# 需要两个 secret（仓库 Settings → Secrets → Actions）：
+#   PANEL_BASE  https://面板地址:端口
+#   SUB_TOKEN   面板「配置 → 客户端订阅」里的 32 位 hex
+#
+# 失败不覆盖旧文件，所以面板挂掉时订阅仍可读。
+
+name: mirror-sub
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mirror-sub
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch
+        env:
+          PANEL_BASE: ${{ secrets.PANEL_BASE }}
+          SUB_TOKEN: ${{ secrets.SUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          base="${PANEL_BASE%/}"
+
+          # 先写临时文件再 mv：curl 失败时旧文件原封不动。
+          curl -fsS --max-time 30 --retry 2 \
+            "$base/sub/$SUB_TOKEN" -o sub.txt.tmp
+          curl -fsS --max-time 30 --retry 2 \
+            "$base/sub/$SUB_TOKEN?target=singbox" -o sub-singbox.json.tmp
+
+          # 校验，避免把错误页当成订阅提交上去。
+          test -s sub.txt.tmp
+          test -s sub-singbox.json.tmp
+          python3 -c "import base64,sys; s=open('sub.txt.tmp').read().strip(); base64.b64decode(s + '='*(-len(s)%4))"
+          python3 -m json.tool sub-singbox.json.tmp > /dev/null
+
+          mv sub.txt.tmp sub.txt
+          mv sub-singbox.json.tmp sub-singbox.json
+
+      - name: Commit
+        run: |
+          set -euo pipefail
+          # 令牌在 URL 里，绝不能出现在日志中；这一行只输出大小。
+          wc -c sub.txt sub-singbox.json
+
+          git config user.name  "sub-mirror"
+          git config user.email "sub-mirror@users.noreply.github.com"
+          if git diff --quiet -- sub.txt sub-singbox.json; then
+            echo "no change"
+            exit 0
+          fi
+          git add sub.txt sub-singbox.json
+          git commit -m "chore: mirror $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push
