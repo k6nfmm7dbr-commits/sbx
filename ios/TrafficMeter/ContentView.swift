@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 /// 与面板同一套水墨配色，放在一起看不出是两个东西。
 enum Ink {
@@ -27,7 +28,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     HeaderBar(proxyActive: store.proxyActive)
 
-                    TodayBlock(today: store.today, proxyActive: store.proxyActive)
+                    TodayBlock(today: store.today)
 
                     HStack(spacing: 10) {
                         StatCard(
@@ -127,7 +128,6 @@ private struct HeaderBar: View {
 
 private struct TodayBlock: View {
     let today: DayUsage
-    let proxyActive: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -190,7 +190,7 @@ private struct SplitBar: View {
         GeometryReader { geo in
             let width = geo.size.width
             let total = Double(cell) + Double(wifi)
-            let cellWidth = total > 0 ? width * Double(cell) / total : 0
+            let cellWidth: CGFloat = total > 0 ? width * CGFloat(Double(cell) / total) : 0
 
             ZStack(alignment: .leading) {
                 Capsule().fill(Ink.line)
@@ -337,12 +337,12 @@ private struct DayBar: View {
                 if cellHeight > 0.5 {
                     UnevenRoundedRectangle(topLeadingRadius: 2.5, bottomLeadingRadius: 0, bottomTrailingRadius: 0, topTrailingRadius: 2.5)
                         .fill(Ink.seal.opacity(0.9))
-                        .frame(width: 14, height: cellHeight)
+                        .frame(width: 14, height: CGFloat(cellHeight))
                 }
                 if wifiHeight > 0.5 {
                     UnevenRoundedRectangle(topLeadingRadius: 0, bottomLeadingRadius: 2.5, bottomTrailingRadius: 2.5, topTrailingRadius: 0)
                         .fill(Ink.ink.opacity(0.72))
-                        .frame(width: 14, height: wifiHeight)
+                        .frame(width: 14, height: CGFloat(wifiHeight))
                 }
             }
             .frame(height: 84, alignment: .bottom)
