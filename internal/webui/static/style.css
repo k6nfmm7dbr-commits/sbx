@@ -75,13 +75,27 @@ button { -webkit-tap-highlight-color: transparent; }
 }
 .hero-label svg { width: 14px; height: 14px; color: var(--accent); }
 .hero-rate {
+  position: relative;
   margin-top: 8px;
+  padding-left: 17px;
   color: var(--text);
   font-size: clamp(38px, 9vw, 58px);
   font-weight: 760;
   font-variant-numeric: tabular-nums;
   letter-spacing: -.035em;
   line-height: 1.08;
+}
+/* 大数字左侧一道朱砂短柱：主题里唯一的彩色落在最重要的实时速率上，
+   与日历里的印章红圆点同属一套语言。高度随字号走，对齐字面高度而非行高。 */
+.hero-rate::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: .24em;
+  width: 5px;
+  height: .68em;
+  border-radius: 2.5px;
+  background: var(--seal);
 }
 .hero-pair {
   display: flex;
@@ -167,15 +181,13 @@ button { -webkit-tap-highlight-color: transparent; }
 .node-rate b { font-size: 12.5px; font-weight: 620; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .node-rate .up { color: var(--up); }
 .node-rate .down { color: var(--down); }
-.node-stats { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; margin-top: 15px; }
-.node-stat {
-  min-width: 0;
-  padding: 10px 11px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--surface-2);
-}
-.node-stat:last-child:nth-child(odd) { grid-column: 1 / -1; }
+/* 次级数据不再各自装盒：顶部一条细线与卡头分开，列间一条竖线即可。
+   盒子套盒子会让一张卡出现四层边界，视线全被框抢走。 */
+.node-stats { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px 0; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.node-stat { min-width: 0; }
+.node-stat:nth-child(even) { padding-left: 13px; border-left: 1px solid var(--line); }
+/* 奇数个时最后一项独占整行，改用横线与上方分开（特异性高于 :nth-child(even)，无需调顺序） */
+.node-stat:last-child:nth-child(odd) { grid-column: 1 / -1; padding-top: 10px; padding-left: 0; border-top: 1px solid var(--line); border-left: 0; }
 .node-stat > span { display: block; color: var(--text-3); font-size: 10.5px; }
 .node-stat b { display: block; overflow: hidden; margin-top: 3px; color: var(--text); font-size: 12.5px; font-weight: 630; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
 .node-stat b.muted { color: var(--text-3); font-weight: 560; }
@@ -517,9 +529,7 @@ body { background: var(--bg); }
 }
 .node-card:hover { border-color: #c3ba9f; box-shadow: 0 7px 20px rgba(42,37,28,.07); }
 .node-name { font-size: 17px; }
-.node-stats { gap: 8px; margin-top: 16px; }
-.node-stat { padding: 10px 11px; border-color: #ded7c4; border-radius: 10px; background: #f2eee2; }
-.node-stat:last-child:nth-child(odd) { grid-column: 1 / -1; }
+.node-stats { gap: 10px 0; margin-top: 16px; }
 .ip-strip { margin-top: 10px; padding: 12px 8px 9px; border-top: 1px solid var(--line); border-radius: 0 0 10px 10px; }
 .node-foot { margin-top: 2px; padding-top: 12px; border-top: 1px solid #e9e4d4; }
 .status-pill.paused { color: #776e59; }
@@ -592,8 +602,7 @@ select, input[type="number"], input[type="password"], input[type="text"] { backg
   .stat { min-height: 78px; padding: 12px; }
   .stat.wide { min-height: 58px; }
   .node-card { padding: 14px; }
-  .node-stats { gap: 7px; }
-  .node-stat { padding: 9px 10px; }
+  .node-stats { gap: 9px 0; }
   .panel { padding: 13px; }
 }
 
