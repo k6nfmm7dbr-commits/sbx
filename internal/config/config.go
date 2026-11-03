@@ -54,15 +54,17 @@ func defaultConf() map[string]any {
 	}
 }
 
-// legacyKeys 是已废弃的历史配置键（v3.0.9 nftables-only 收敛后移除）。
-// 语义：SBX 曾支持 nftables/iptables 双后端，用 backend 选择、ipt_script
-// 指向生成的 iptables 脚本。现在只有 nftables，这两个键不再有任何作用。
+// legacyKeys 是已废弃的历史配置键。
+//   - backend / ipt_script：v3.0.9 nftables-only 收敛后移除，SBX 曾支持
+//     nftables/iptables 双后端，用 backend 选择、ipt_script 指向生成的脚本；
+//   - sub_token：客户端订阅功能整体移除后不再有作用（订阅路由与服务端
+//     配置生成一并删除），遗留值不应继续留在 panel.json 里。
 //
 // 处理策略（不能因为存在旧键就拒绝读取，那会让老用户升级即炸）：
-//   - 读取：忽略其值，不参与任何决策（后端恒为 nftables）；
-//   - 写回（config-set / EnsureToken）：顺带删除这两个键，一次性完成迁移，
+//   - 读取：忽略其值，不参与任何决策；
+//   - 写回（config-set / EnsureToken）：顺带删除这些键，一次性完成迁移，
 //     其余用户配置（token/port/db/nodes_file/tz/未知自定义键）一律原样保留。
-var legacyKeys = []string{"backend", "ipt_script"}
+var legacyKeys = []string{"backend", "ipt_script", "sub_token"}
 
 // dropLegacyKeys 从 raw 配置里剔除废弃键，返回是否发生了删除。
 func dropLegacyKeys(raw map[string]any) bool {
@@ -91,12 +93,6 @@ type Config struct {
 	TZ           string
 	SecureCookie bool
 
-	// SubToken 是订阅地址专用令牌，与面板登录 Token 完全独立。
-	// 设计意图：订阅 URL 会被粘进第三方客户端（Shadowrocket / sing-box），
-	// 必然会离开本机、进入剪贴板与客户端配置。若复用面板 Token，等于把
-	// 面板控制权一起交出去。独立令牌泄漏时攻击者只能读到节点列表，
-	// 改不了配置、看不到流量、登不进面板。
-	SubToken string
 	// TrustedOrigin 是显式声明的"浏览器实际访问面板的公开地址"，已规范化为
 	// "scheme://host[:port]"。空值 = 关闭（默认按 host:port 严格比较 Origin）。
 	// 仅用于反向代理改写了 Host 的部署：浏览器看到 https://panel.example.com，
@@ -285,7 +281,6 @@ func (c *Config) normalize() {
 	}
 	c.TZ = c.Str("tz")
 	c.SecureCookie = c.Bool("secure_cookie")
-	c.SubToken = strings.TrimSpace(c.Str("sub_token"))
 	// trusted_origin：规范化成功就采用规范形式，失败则保留原值交给 Validate 报错，
 	// 绝不静默忽略非法配置（那会让用户以为已经生效）。
 	c.TrustedOrigin = strings.TrimSpace(c.Str("trusted_origin"))
@@ -500,36 +495,6 @@ func EnsureToken() (string, error) {
 	}
 	data = append(data, '\n')
 	if err := fsx.WriteFileAtomic(ConfPath(), data, 0o600); err != nil {
-		return "", err
-	}
-	return tok, nil
-}
-
-// EnsureSubToken 保证订阅令牌非空；为空则生成并写回。
-//
-// 与 EnsureToken 的关键差异：订阅令牌**不参与**面板登录校验，只用于
-// /sub/<token> 这条只读订阅路由。读取阶段同样走 LoadStrict，避免在
-// panel.json 损坏时用默认值覆盖原文件。
-func EnsureSubToken() (string, error) {
-	c, err := LoadStrict()
-	if err != nil {
-		return "", fmt.Errorf("拒绝生成订阅令牌: %w", err)
-	}
-	if c.SubToken != "" {
-		return c.SubToken, nil
-	}
-	return ResetSubToken()
-}
-
-// ResetSubToken 强制轮换订阅令牌（旧地址立即失效），返回新令牌。
-// 用于「订阅地址疑似外泄」时的止血操作。
-func ResetSubToken() (string, error) {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	tok := hex.EncodeToString(b)
-	if err := Set("sub_token", tok); err != nil {
 		return "", err
 	}
 	return tok, nil

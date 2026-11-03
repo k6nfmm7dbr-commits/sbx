@@ -62,7 +62,6 @@ netfilter 后端是 **nftables-only**:流量统计、节点暂停、在线 IP �
 | | |
 |---|---|
 | **6 种协议** | VLESS Reality、Shadowsocks 2022、Trojan、AnyTLS、Snell v5/v6、SOCKS5,菜单化创建,自动生成分享链接 |
-| **客户端订阅** | `/sub/<token>` 输出 base64 链接列表或 sing-box 完整配置,一条地址导入手机客户端;订阅令牌与面板登录令牌相互独立,可单独轮换 |
 | **手机可用** | 面板自带 PWA manifest 与主屏图标,「添加到主屏幕」即全屏运行;仓库内附 WKWebView 壳的 Xcode 工程(`ios/`),可用免费 Apple ID 自签 |
 | **流量统计 App** | `ios/TrafficMeter.xcodeproj`:读本机网卡计数,区分蜂窝 / Wi-Fi、分上下行、近七日与本月;只读物理层,开代理不会重复计数;支持快捷指令与自动化播报 |
 | **内核级流量统计** | nftables named counter,非估算;单调差分累加,规则重建自动衔接,不丢计不重复 |
@@ -216,7 +215,7 @@ sudo apt-get update
 | **首页** | 节点卡片 + 顶部 KPI 汇总。卡片展示累计/今日流量、限速、TCP/UDP；在线 IP 行和状态徽标；暂停节点明确显示“已暂停” |
 | **每日** | 全节点流量趋势(近 180 天)与单节点详情 |
 | **节点** | 单节点流量趋势与详情 |
-| **配置** | 节点列表、新增、分享链接查看、编辑与删除;页面末尾是**客户端订阅**地址 |
+| **配置** | 节点列表、新增、分享链接查看、编辑与删除 |
 
 删除节点会保留该节点的累计流量总额（`totals`），默认清理每日与采样历史（`daily`/`samples`）。唯一一次文字验证会明确说明累计流量保留、其他历史将清除；必须输入「我已确定」才会继续。API 默认相同；显式指定 `clear_history=0` 可同时保留每日与采样历史。
 
@@ -241,13 +240,6 @@ sudo apt-get update
 | `/api/nodes/<id>/links` | GET | 获取该节点分享链接（及 Snell Surge 配置） |
 | `/api/nodes/<id>/policy` | GET / PUT | 读取或设置暂停状态、IP 上限和限速 |
 | `/api/nodes/<id>/active-ips` | GET | 查看节点当前在线 IP |
-| `/api/sub` | GET | 读取订阅地址、可导入节点数与跳过原因(需登录) |
-| `/api/sub/reset` | POST | 轮换订阅令牌,旧地址立即失效(需登录) |
-| `/sub/<token>` | GET | 订阅下载,**不走 Cookie 鉴权**,令牌在路径里;默认返回 base64 链接列表,`?target=singbox` 返回 sing-box 完整配置 |
-
-> **不建议把订阅托管到 GitHub 上分发**:公开仓库等于公开密码;私有仓库的 raw 又必须带
-> `Authorization` 头,而 sing-box 远程配置与 Shadowrocket 订阅都不支持自定义请求头。
-> 两条路都堵,直接用面板的 `/sub/<token>`,需要时在前面套一层 Cloudflare 代理即可。
 
 ---
 

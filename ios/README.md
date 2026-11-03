@@ -113,7 +113,7 @@ TrafficMeter/
 
 一个 **WKWebView 壳**，把 sbx 面板包成 iPhone 上的 App。不是代理客户端——
 真正连节点用 [sing-box 官方 iOS 客户端](https://apps.apple.com/app/sing-box/id6451272673)，
-面板「配置 → 客户端订阅」里生成的地址可直接导入。
+面板「配置」里复制节点的分享链接，在 sing-box「从剪贴板导入」即可使用。
 
 ## 为什么是壳，不是原生重写
 
