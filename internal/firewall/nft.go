@@ -9,17 +9,6 @@ import (
 	"sync"
 )
 
-// nftDoc 是 `nft -j list counters` 的 JSON 结构（只取用到的字段）。
-type nftDoc struct {
-	Nftables []struct {
-		Counter *struct {
-			Name    string `json:"name"`
-			Bytes   int64  `json:"bytes"`
-			Packets int64  `json:"packets"`
-		} `json:"counter"`
-	} `json:"nftables"`
-}
-
 // Nft 通过 exec `nft -j list counters table inet sbx_traffic` 读取计数器。
 //
 // 关于 fork/exec 开销（审计项「nft 采集 fork/exec 开销」）：真机实测单次

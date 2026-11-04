@@ -650,8 +650,8 @@ func TestPanelNodeBatchCreateAndDelete(t *testing.T) {
 	if deleted, _ := body["deleted"].([]any); len(deleted) != 2 {
 		t.Fatalf("应删除 2 个: %#v", body)
 	}
-	if *restarts != restartsBefore+1 {
-		t.Fatalf("批量删除应只触发一次重启")
+	if *restarts != restartsBefore+1 || *applies != appliesBefore+1 {
+		t.Fatalf("批量删除应只触发一次变更: restart=%d apply=%d", *restarts-restartsBefore, *applies-appliesBefore)
 	}
 	b, _ = os.ReadFile(nodesFile)
 	_ = json.Unmarshal(b, &saved)

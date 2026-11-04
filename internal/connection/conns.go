@@ -205,28 +205,6 @@ func countProcByNode(files []string, keep Keep, readFile func(string) (string, e
 	return partial
 }
 
-// portFilterFor 把节点监听端口编译成 PortFilter。
-// 节点端口非法时返回错误（与既有"节点端口非法"错误路径保持一致）。
-func portFilterFor(list []nodes.Node) (PortFilter, error) {
-	ranges := make([][2]int64, 0, len(list))
-	for _, n := range list {
-		r := nodes.ParsePorts(n)
-		if len(r) == 0 {
-			return nil, fmt.Errorf("节点端口非法")
-		}
-		ranges = append(ranges, r...)
-	}
-	return func(p int) bool {
-		v := int64(p)
-		for _, r := range ranges {
-			if v >= r[0] && v <= r[1] {
-				return true
-			}
-		}
-		return false
-	}, nil
-}
-
 func readOSFile(path string) (string, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
