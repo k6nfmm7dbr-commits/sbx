@@ -117,14 +117,22 @@ func (s *Server) sendJSON(w http.ResponseWriter, r *http.Request, code int, v an
 func (s *Server) token() string { return s.cfg.Token }
 
 // authorized 复刻旧 _authorized：Bearer 头 > Cookie sbx_token。
-// 服务端未配置 token 时完全开放。
+// 服务端未配置 token 时**仅在本机直连形态**下完全开放。
 //
 // 安全要求（v3.0.5）：不再接受 query string `?token=` 形式——token 会泄漏进
 // 浏览器历史 / access log / reverse proxy log / referrer。仅保留
 // Authorization: Bearer 与 HttpOnly Cookie 两种渠道。
+//
+// 安全要求（渗透测试 F1）：secure_cookie / trusted_origin 是「前面挂了反向代理」
+// 的明确信号，此时即使 token 为空也绝不能 fail-open——否则任何绕过 Serve
+// 启动闸门直接构造 Server 的路径（测试、嵌入式复用）都会让全部管理 API
+// 无鉴权可达。启动闸门见 service.rejectEmptyToken，这里是 API 层第二道防线。
 func (s *Server) authorized(r *http.Request) bool {
 	token := s.token()
 	if token == "" {
+		if s.cfg != nil && (s.cfg.SecureCookie || s.cfg.TrustedOrigin != "") {
+			return false
+		}
 		return true
 	}
 	given := ""

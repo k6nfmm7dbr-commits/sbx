@@ -356,6 +356,11 @@ func keyPairFromSingBox(ctx context.Context) (string, string, error) {
 }
 
 func ensureNodeCerts(ctx context.Context, store *nodes.Store, sni string) error {
+	// 纵深防御：即使上游入口漏了校验，也绝不让未校验的值作为独立 argv 传给
+	// `sing-box generate tls-keypair <sni>`（安全测试 F2，参数注入）。
+	if err := validateSNI(sni); err != nil {
+		return err
+	}
 	certPath, keyPath := filepath.Join(store.CertDir(), "cert.pem"), filepath.Join(store.CertDir(), "key.pem")
 	if ci, ce := os.Stat(certPath); ce == nil && ci.Size() > 0 {
 		if ki, ke := os.Stat(keyPath); ke == nil && ki.Size() > 0 {
@@ -835,6 +840,11 @@ func (s *Server) newNodeArgs(ctx context.Context, store *nodes.Store, req nodeCr
 			sni = "www.bing.com"
 		}
 	}
+	// 统一在创建入口校验：SNI 既会拼进 --sni= 参数，也会作为独立 argv 传给
+	// sing-box 生成证书（安全测试 F2）。放在生成 UUID/密钥之前，非法输入即拒绝。
+	if err := validateSNI(sni); err != nil {
+		return nil, err
+	}
 	switch req.Type {
 	case "vless":
 		id, err := uuidForNode()
@@ -929,7 +939,12 @@ func (s *Server) editNode(w http.ResponseWriter, r *http.Request, id string) {
 		args = append(args, "--port="+strconv.Itoa(*req.Port))
 	}
 	if req.SNI != "" {
-		args = append(args, "--sni="+strings.TrimSpace(req.SNI))
+		trimmed := strings.TrimSpace(req.SNI)
+		if err := validateSNI(trimmed); err != nil {
+			s.sendJSON(w, r, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		args = append(args, "--sni="+trimmed)
 	}
 	if req.PSK != "" {
 		args = append(args, "--psk="+req.PSK)

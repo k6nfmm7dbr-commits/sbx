@@ -27,8 +27,13 @@ import (
 // 退出顺序：停止采集器（等待在途事务提交）→ 排空 HTTP → 关闭数据库。
 //
 // v3.0.3 fail-closed：panel.json 存在但损坏时拒绝启动（绝不带默认值上线）；
-// 非 loopback 监听 + 空 token 直接拒绝启动（原为仅告警后继续，存在
+// 「面板对外可达 + 空 token」直接拒绝启动（原为仅告警后继续，存在
 // 无认证公网暴露风险）。
+//
+// 对外可达的判定见 panelExposed：除了非 loopback 监听，secure_cookie 与
+// trusted_origin 也是明确信号——后端 listen=127.0.0.1 但实际挂在反向代理后面
+// 时，旧检查会误判为「仅本机」而放行空 token，导致全部管理 API 无鉴权
+// （安全测试 F1）。这类配置漂移必须 fail-closed。
 //
 // v3.0.9 nftables-only：nft 不可用只告警不拒绝启动——面板与节点管理仍应可用
 // （用户需要能登录面板排查、改配置），但流量统计与策略 enforcement 会失败并
@@ -40,14 +45,15 @@ func Serve() int {
 		return 1
 	}
 
-	if cfg.Token == "" && listenIsPublic(cfg.Listen) {
-		slog.Error("拒绝启动: 面板监听在非本机地址(" + cfg.Listen + ")且未设置 token, " +
-			"公网无认证暴露已被禁止。请先执行 sbx-core config-ensure-token 设置访问令牌, " +
-			"或将 listen 改为 127.0.0.1")
+	if rejectEmptyToken(cfg) {
+		slog.Error("拒绝启动: 面板对外可达(非本机监听, 或已配置 secure_cookie/trusted_origin " +
+			"表明前置了反向代理)且未设置 token, 无认证暴露已被禁止。" +
+			"请先执行 sbx-core config-ensure-token 设置访问令牌; " +
+			"如确需空令牌(例如由外部系统负责认证的封闭环境), 显式设置 SBX_ALLOW_EMPTY_TOKEN=1")
 		return 1
 	}
 	if cfg.Token == "" {
-		slog.Warn("警告: 面板监听在本机回环地址且未设置 token, 仅本机可访问")
+		slog.Warn("警告: 未设置 token, 面板将完全开放(无鉴权); 请确认访问确实受限")
 	}
 	if cfg.Token != "" && listenIsPublic(cfg.Listen) && !cfg.SecureCookie {
 		slog.Warn("面板正以明文 HTTP 对非本机地址提供服务，Cookie 将以明文传输；请置于 HTTPS 反代之后并设置 secure_cookie")
@@ -200,6 +206,26 @@ func listenIsPublic(listen string) bool {
 		return !ip.IsLoopback()
 	}
 	return true
+}
+
+// panelExposed 判断面板是否「对外可达」，用于空 token 的 fail-closed 检查。
+// 除了非回环监听，secure_cookie / trusted_origin 也是「前面挂了反向代理、
+// 浏览器从公网访问」的明确信号：此时后端 listen=127.0.0.1 **不代表**只有
+// 本机能访问，旧检查只看监听地址恰好漏掉了这种最常见的部署形态。
+func panelExposed(cfg *config.Config) bool {
+	return listenIsPublic(cfg.Listen) || cfg.SecureCookie || cfg.TrustedOrigin != ""
+}
+
+// allowEmptyToken 是显式逃生开关：仅限完全封闭、由外部系统负责认证的特殊环境
+// （或本地调试）。默认关闭；设置后面板将完全无鉴权，普通部署不应使用。
+func allowEmptyToken() bool {
+	return os.Getenv("SBX_ALLOW_EMPTY_TOKEN") == "1"
+}
+
+// rejectEmptyToken 是空 token 时的启动闸门：面板对外可达且未显式逃生就必须
+// 拒绝启动。抽成纯函数便于在不启动监听 / 数据库的前提下回归验证。
+func rejectEmptyToken(cfg *config.Config) bool {
+	return cfg.Token == "" && panelExposed(cfg) && !allowEmptyToken()
 }
 
 // restartSingBoxForNodeMutation reloads the changed inbounds via the installed service

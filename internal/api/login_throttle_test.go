@@ -141,3 +141,77 @@ func itoa(v int) string {
 	}
 	return string(b[i:])
 }
+
+// F5：达到失败阈值后直接 429，不再 sleep 占住连接；正确 token 仍不受影响。
+func TestLoginBlockedReturns429WithoutSleep(t *testing.T) {
+	resetLoginFails()
+	t.Cleanup(resetLoginFails)
+
+	dir := t.TempDir()
+	nodesFile := filepath.Join(dir, "nodes.json")
+	if err := os.WriteFile(nodesFile, []byte(`[]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const token = "0123456789abcdef0123456789abcdef"
+	ts, _ := newPolicyTestServer(t, token, nodesFile)
+	client := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	post := func(tok string) *http.Response {
+		resp, err := client.Post(ts.URL+"/login", "application/x-www-form-urlencoded",
+			strings.NewReader("token="+tok))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	// 与既有节流语义一致：第 loginFailBurst 次失败即进入封禁窗口
+	// （旧实现在此开始 sleep 2s 后仍回 302，现在直接 429）。
+	for i := 0; i < loginFailBurst-1; i++ {
+		resp := post("wrong")
+		if resp.StatusCode != http.StatusFound {
+			t.Fatalf("阈值内的失败应仍 302, got %d", resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+	start := time.Now()
+	resp := post("wrong")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("达到阈值后应 429, got %d", resp.StatusCode)
+	}
+	if elapsed := time.Since(start); elapsed >= loginFailDelay {
+		t.Errorf("429 不应再 sleep 占连接: %v", elapsed)
+	}
+	if resp.Header.Get("Retry-After") == "" {
+		t.Error("429 应带 Retry-After")
+	}
+	assertSecurityHeaders(t, resp.Header, false)
+
+	// 正确 token 必须仍然立刻成功（节流只惩罚失败尝试）。
+	ok := post(token)
+	defer ok.Body.Close()
+	if ok.StatusCode != http.StatusFound {
+		t.Fatalf("正确 token 应 302, got %d", ok.StatusCode)
+	}
+}
+
+// F5：/login 不在 /api/ 前缀下，旧实现漏掉了总限速；这里耗尽令牌桶后
+// 验证登录 POST 会被 429 挡住（而不是落到 handler 里 panic）。
+func TestLoginRouteCoveredByAPILimiter(t *testing.T) {
+	srv := &Server{}
+	const ip = "192.0.2.1"
+	// 连续调用不产生 elapsed，token 只减不增，直到桶耗尽。
+	for i := 0; i < int(apiRateBurst)+1; i++ {
+		srv.apiLimiter.allowIP(ip, time.Now())
+	}
+	req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("token=wrong"))
+	req.RemoteAddr = ip + ":12345"
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("/login 超出总限速应 429, got %d", rec.Code)
+	}
+}

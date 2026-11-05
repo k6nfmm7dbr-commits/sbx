@@ -101,3 +101,17 @@ func TestAPILogoutClearsCookieAndRequiresAuthentication(t *testing.T) {
 	}
 	resp.Body.Close()
 }
+
+// F4：panic 恢复路径绕过 s.send，必须单独补齐统一安全头。
+func TestPanicResponseKeepsSecurityHeaders(t *testing.T) {
+	srv := &Server{}
+	h := srv.recoverMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("pentest")
+	}))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("panic 应返回 500, got %d", rec.Code)
+	}
+	assertSecurityHeaders(t, rec.Result().Header, false)
+}

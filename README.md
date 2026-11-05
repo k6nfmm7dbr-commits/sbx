@@ -494,6 +494,8 @@ sbx-core node list|links|add|edit|remove|sync   # 节点管理
 - **供应链**: `sbx-core` 大文件可经 `SBX_GH_PROXY` / `SBX_RAW_BASE` 加速下载，但**信任决策依据一律不经镜像**：`SHA256SUMS` 与 `sbx.sh.sha256` 固定从官方 RAW 源直连获取，防止自定义镜像同时投毒二进制和清单形成自证式校验。在线升级固定直连官方脚本 URL 并用官方 `sbx.sh.sha256` 校验，校验失败或取不到可信哈希时 fail-closed，不覆盖现有安装。用 `curl | bash` / `bash <(curl ...)` 一键安装时，需要重新落盘的那份安装器副本同样直连官方源并在校验通过后才写入（它随后会成为常驻的 `sbx` 命令）；校验不通过或官方源不可达时只告警并跳过落盘，不会装入未经验证的脚本。显式 `SBX_SCRIPT_SHA256` 可作为独立哈希锚。此校验仍信任 GitHub 官方仓库/账号，官方源被攻破不在哈希清单本身的防护范围内；后续可增加独立签名密钥。CI 用 `govulncheck` 扫描依赖漏洞，GitHub Actions 全部 pin 到完整 commit SHA。
 
 > ⚠️ 面板默认监听 `0.0.0.0`,自带随机强令牌认证。公网部署请确认令牌强度,并强烈建议置于 HTTPS 反代之后、启用 `secure_cookie=true`;需要仅本机访问时把 `listen` 改为 `127.0.0.1`。
+>
+> ⚠️ **空 token 的启动约束**：`token` 为空时，只要 `listen` 是非本机地址、或已配置 `secure_cookie` / `trusted_origin`（说明前面挂了反向代理），服务会**拒绝启动**——这些形态都可能被外部访问，不能把「后端监听 127.0.0.1」当成防护。正常安装由安装器生成强令牌，不受影响；确需空令牌的封闭环境可显式设置 `SBX_ALLOW_EMPTY_TOKEN=1`。
 
 ---
 

@@ -330,9 +330,9 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 				return 0, false
 			}
 			line = line[:0]
-			line = append(line, e.day...)
+			line = appendCSVField(line, e.day)
 			line = append(line, ',')
-			line = append(line, e.scope...)
+			line = appendCSVField(line, e.scope)
 			line = append(line, ',')
 			line = strconv.AppendInt(line, e.rx, 10)
 			line = append(line, ',')

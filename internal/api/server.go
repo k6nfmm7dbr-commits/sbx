@@ -101,6 +101,9 @@ func (s *Server) recoverMiddleware(next http.Handler) http.Handler {
 				// "superfluous response.WriteHeader" 噪声，客户端也已经拿到部分
 				// 内容。这里只记录日志并结束本次连接，不重复写响应。
 				if !tw.wrote {
+					// panic 路径也必须带统一安全头：直接 http.Error 会让 no-store /
+					// CSP / X-Frame-Options 等全部缺失，与其余响应不一致（安全测试 F4）。
+					s.securityHeaders(tw.Header())
 					http.Error(tw, errInternalText, http.StatusInternalServerError)
 				}
 			}
@@ -161,8 +164,12 @@ func (s *Server) serveRoutes(w http.ResponseWriter, r *http.Request) {
 		route = "/"
 	}
 
-	// API 总限速只覆盖 /api/*；探活与静态资源刻意不经此闸，避免破坏 systemd 与首屏。
-	if strings.HasPrefix(route, "/api/") && !s.apiLimiter.allowRequest(r, time.Now()) {
+	// 总限速覆盖 /api/* 与 /login 表单：登录接口不在 /api/ 前缀下，旧实现漏掉了
+	// 它，导致并发失败登录不受令牌桶约束（安全测试 F5）。探活与静态资源仍刻意
+	// 免限速，避免破坏 systemd 探针与首屏加载。
+	limited := strings.HasPrefix(route, "/api/") ||
+		(r.Method == http.MethodPost && route == "/login")
+	if limited && !s.apiLimiter.allowRequest(r, time.Now()) {
 		auditEvent(r, "api_rate_limited", "rejected", "error_code", codeRateLimited)
 		rid := requestID(r)
 		s.sendJSON(w, r, http.StatusTooManyRequests, map[string]any{

@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"sync"
 	"time"
 
@@ -14,14 +15,15 @@ import (
 // maxLoginBody 限制登录表单体大小，防止异常请求占用内存。
 const maxLoginBody = 64 << 10
 
-// 登录失败节流参数：同一来源 IP 连续失败达 loginFailBurst 次后，
-// 每次尝试强制等待 loginFailDelay，并在 loginFailWindow 内累计。
-// 32 hex token 暴破本不现实，但节流能挡住日志刷屏与凭据喷洒。
+// 登录失败节流参数：同一来源 IP 在 loginFailWindow 内累计失败达
+// loginFailBurst 次后进入封禁窗口（loginThrottle 返回值 > 0），后续失败
+// 请求直接以 429 拒绝，不再 sleep 占住连接。32 hex token 暴破本不现实，
+// 节流主要挡日志刷屏、凭据喷洒与并发连接占用（安全测试 F5）。
 const (
 	loginFailBurst  = 5
 	loginFailWindow = 5 * time.Minute
-	loginFailDelay  = 2 * time.Second
-	loginFailMaxLen = 4096 // 追踪表上限，防内存被大量伪造源 IP 撑大
+	loginFailDelay  = 2 * time.Second // 保留作封禁判据，不再用于 sleep
+	loginFailMaxLen = 4096            // 追踪表上限，防内存被大量伪造源 IP 撑大
 	loginGCInterval = 30 * time.Second
 )
 
@@ -46,7 +48,8 @@ func loginClientKey(r *http.Request) string {
 	return host
 }
 
-// loginThrottle 返回本次请求应额外等待的时长。
+// loginThrottle 返回该来源是否处于失败封禁窗口。返回值 > 0 表示后续失败请求
+// 应直接以 429 拒绝；旧实现把它当作 sleep 时长（占住连接），现已改为立即拒绝。
 func loginThrottle(key string, now time.Time) time.Duration {
 	loginFailMu.Lock()
 	defer loginFailMu.Unlock()
@@ -181,15 +184,16 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, route string
 		w.WriteHeader(http.StatusFound)
 		return
 	}
-	// 失败：先记账，再按累计失败次数施加延迟（挡凭据喷洒与日志刷屏）。
+	// 失败：先记账。达到阈值后**直接拒绝**，不再 sleep 占住连接——旧实现每个
+	// 失败请求各占一个 goroutine + 连接 2s，并发喷洒可撑满连接表（安全测试 F5）。
+	// 成功路径不受影响（见上面的注释），正常用户手滑几次仍回登录页。
 	loginRecordFail(key, now)
 	auditEvent(r, "login_failure", "failure")
-	if d := loginThrottle(key, now); d > 0 {
-		select {
-		case <-time.After(d):
-		case <-r.Context().Done():
-			return
-		}
+	if loginThrottle(key, now) > 0 {
+		auditEvent(r, "login_throttled", "rejected", "error_code", codeRateLimited)
+		w.Header().Set("Retry-After", strconv.Itoa(int(loginFailWindow/time.Second)))
+		s.sendText(w, r, http.StatusTooManyRequests, "too many login attempts")
+		return
 	}
 	s.redirect(w, "/login?error=1")
 }
