@@ -662,7 +662,7 @@ sbx --update --force    # 强制重装当前/最新版本
 
 ```bash
 # 查看某次发布到底发了什么
-curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/dist/archive/v3.0.11/<commit7>/MANIFEST
+curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/dist/archive/v3.0.20/352ccb6/MANIFEST
 ```
 
 归档刻意**不含二进制**(8 架构约 80MB/次,会撑爆分支)。要回退到某个历史版本,请以归档里的 `SHA256SUMS` 为准核对当前分发内容,或在发布记录中找到对应版本后重装。
