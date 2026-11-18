@@ -89,9 +89,8 @@ sbx-core daily 30            # 最近 30 天
 sbx-core selftest            # 计数器自检
 sbx-core reset node:2        # 清空某个节点的统计
 sbx-core node list           # 节点列表
-sbx-core node add            # 新增节点
-sbx-core node edit <id> --provinces=广东,广西
-sbx-core node edit <id> --allow=Google,TikTok
+sbx-core node edit 2 --provinces=广东,广西
+sbx-core node edit 2 --allow=Google,TikTok
 sbx-core node links          # 分享链接
 ```
 
