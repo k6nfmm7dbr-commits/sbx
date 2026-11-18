@@ -8,7 +8,7 @@ sing-box 节点管理面板。一条命令装到服务器，节点、流量、�
 bash <(curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh)
 ```
 
-需要 root 和 nftables。Debian 11+ / Ubuntu 20.04+ / RHEL 8+ / Fedora 38+ / Alpine 3.18+，x86_64、arm64 等 7 种架构。
+需要 root 和 nftables（nftables-only，不会退回 iptables）。Debian 11+ / Ubuntu 20.04+ / RHEL 8+ / Fedora 38+ / Alpine 3.18+，x86_64、arm64 等 7 种架构。
 
 装完敲 `sbx` 进菜单，`sbx --panel-url` 看面板地址。登录令牌在 `/etc/sbx/panel.json`。
 
@@ -40,6 +40,14 @@ sbx-core daily 30    # 最近 30 天
 ```
 
 卸载时 `/etc/sing-box` 非空会先打包到 `/var/backups/`，`/etc/sbx` 直接删。
+
+面板默认监听 `0.0.0.0:8080`。`panel.json` 里 `listen`(默认 `0.0.0.0`) 改成 `127.0.0.1` 就只给本机用；放公网请套 HTTPS 反代并设 `secure_cookie=true`。
+
+## 当前版本
+
+```text
+v3.0.30
+```
 
 ## 许可
 
