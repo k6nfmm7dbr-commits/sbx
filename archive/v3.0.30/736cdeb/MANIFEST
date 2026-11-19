@@ -1,0 +1,11 @@
+version: v3.0.30
+commit: 736cdeb911f187f6a52c9da6a2c4aba56be2fb8a
+date: 2026-11-04T13:31:36Z
+artifacts:
+  - sbx-core-linux-386  d26a35857e40f10d2530073afd334134319777e73646e506e2fea9ee66f38625
+  - sbx-core-linux-amd64  10ac324927d252782a2d605f30c177ca2a95f4351dfa7c74a48bfa77ee8af5e6
+  - sbx-core-linux-arm64  a656abc0cab78fb04526108f0a52e4348029d8563d9e247a676f59dcb90ff3fe
+  - sbx-core-linux-armv6  160b0e5274b14b88bd3babddcde9956d8ce94d792c4afdddb009952895b1f306
+  - sbx-core-linux-armv7  4b41473789b0545472df39b3f037b1f6e79c65f6ff8cb78fe9f4314d462efaf3
+  - sbx-core-linux-riscv64  642296b261e45d6a44ac745f66d1ddbe56b9bc9c751622bd7b7511e0fec6845d
+  - sbx-core-linux-s390x  813191588575fafe4a876a2ada2b881bb5f1b3fdfc5a38bd873f6b2c63acc0cc
