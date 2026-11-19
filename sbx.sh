@@ -936,6 +936,7 @@ fw_clear() {
   if command -v nft >/dev/null 2>&1; then
     nft delete table inet sbx_traffic >/dev/null 2>&1 || true
     nft delete table inet sbx_policy  >/dev/null 2>&1 || true
+    nft delete table inet sbx_access_guard >/dev/null 2>&1 || true
   fi
 }
 
@@ -1311,6 +1312,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+Environment=SBX_DIR=$APP_DIR
+Environment=SBX_CONF=$PANEL_CONF
+Environment=SBX_SB_CONF=$SB_CONF
+ExecStartPre=$CORE_BIN enforce-access
 ExecStart=$SB_BIN run -C $SB_DIR
 Restart=on-failure
 RestartSec=3
@@ -1464,6 +1469,8 @@ command_background=true
 pidfile="/run/\${RC_SVCNAME}.pid"
 output_log="/var/log/sing-box.log"
 error_log="/var/log/sing-box.log"
+export SBX_DIR="$APP_DIR" SBX_CONF="$PANEL_CONF" SBX_SB_CONF="$SB_CONF"
+start_pre() { "$CORE_BIN" enforce-access; }
 depend() { need net; after sbx-firewall; }
 EOF
       cat > /etc/init.d/sbx-firewall <<EOF
