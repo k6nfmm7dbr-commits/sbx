@@ -8,7 +8,7 @@ set -Eeuo pipefail
 
 APP_NAME="SBX"
 APP_VERSION="3.0.30"
-RAW_URL="${SBX_RAW_URL:-https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh}"
+RAW_URL="${SBX_RAW_URL:-https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/dist/sbx.sh}"
 
 # SBX_ROOT 仅用于测试/沙箱安装（把整套目录挪到前缀下），正常安装留空
 ROOT="${SBX_ROOT:-}"
@@ -32,13 +32,14 @@ export SBX_CONF="$PANEL_CONF"
 
 SB_VERSION_PIN="${SBX_SB_VERSION:-}"     # 留空=取最新稳定版
 GH_PROXY="${SBX_GH_PROXY:-}"             # 例: https://ghfast.top/
-# 二进制分发走仓库 dist 分支（rolling latest，与 Git Tag 无关）：
-# raw.githubusercontent 对同一路径始终返回最新提交的产物，安装器无需感知版本号。
-# 项目不使用 Git Tag / 版本 Release，因此不存在会失效的版本化下载链接。
-# 官方 RAW 地址是唯一信任锚。SBX_RAW_BASE 只可改大文件字节流地址，不可改校验清单来源。
-OFFICIAL_RAW_BASE="https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/dist"
-OFFICIAL_SCRIPT_URL="https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh"
-RAW_BASE="${SBX_RAW_BASE:-$OFFICIAL_RAW_BASE}"
+# The official artifact repository is public; the source repository is private.
+DIST_PROTOCOL="sbx-dist-v1"
+DIST_REPO="k6nfmm7dbr-commits/sbx"
+OFFICIAL_RAW_REPO="https://raw.githubusercontent.com/$DIST_REPO"
+DIST_SHA=""
+DIST_BASE=""
+UNIT_DIR="$ROOT/etc/systemd/system"
+INIT_DIR="$ROOT/etc/init.d"
 
 OS_FAMILY="unknown"
 INIT_SYS="unknown"
@@ -107,6 +108,15 @@ validate_env() {
     bad=1
   fi
 
+  if [[ -n "${SBX_UPDATE_SHA256:-}" && ! "$SBX_UPDATE_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    err "SBX_UPDATE_SHA256 必须是 64 位十六进制 sha256"
+    bad=1
+  fi
+  if [[ -n "${SBX_DIST_SHA:-}" && ! "$SBX_DIST_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    err "SBX_DIST_SHA 必须是 40 位小写 Git SHA"
+    bad=1
+  fi
+
   # SBX_SB_VERSION：设置时必须是纯版本号（会拼进下载 URL）。
   if [[ -n "${SBX_SB_VERSION:-}" && ! "${SBX_SB_VERSION}" =~ ^[0-9]+(\.[0-9]+)*(-[A-Za-z0-9.]+)?$ ]]; then
     err "SBX_SB_VERSION 格式非法（应形如 1.14.0 或 1.14.3）: $SBX_SB_VERSION"
@@ -127,8 +137,8 @@ validate_env() {
 #        curl -fsSLO <RAW_BASE>/sbx.sh.sha256
 #   2) 本地校验并执行：
 #        sha256sum -c sbx.sh.sha256 && bash sbx.sh
-#   3) 或者直接让脚本自校验（也适用于一键安装）：
-#        SBX_SCRIPT_SHA256=<官方公布值> bash <(curl -fsSL <RAW_URL>)
+#   3) 或者在运行本地文件时自校验：
+#        SBX_SCRIPT_SHA256=<官方公布值> bash sbx.sh
 #
 # 未提供 SBX_SCRIPT_SHA256 时保持原有的一键安装便捷性（不校验），
 # 但 README 明确标注该方式的风险，不再作为唯一推荐。
@@ -137,11 +147,10 @@ verify_script_integrity() {
   local want self actual
   want="$(printf '%s' "$SBX_SCRIPT_SHA256" | tr 'A-F' 'a-f')"
 
-  # 进程替换（bash <(curl ...)）下 BASH_SOURCE[0] 是 /dev/fd/NN，仍可读；
-  # 管道（curl | bash）下 stdin 已被占用，无法回读自身——这时明确报错而不是
-  # 静默跳过校验，避免用户以为"校验过了"。
+  # Streams cannot be replayed safely for self-verification. Download a file
+  # before invoking Bash if an independent SHA is required.
   self="${BASH_SOURCE[0]:-$0}"
-  if [[ ! -r "$self" ]]; then
+  if [[ ! -f "$self" || ! -r "$self" ]]; then
     err "无法读取自身脚本（$self）用于完整性校验"
     err "请改用：curl -fsSLO <URL> && SBX_SCRIPT_SHA256=<哈希> bash sbx.sh"
     return 1
@@ -607,7 +616,9 @@ install_sing_box() {
   # 部分构建附带 libcronet.so（NaiveProxy 用），一并放到同目录
   local lib
   lib=$(find "$tmp" -type f -name 'libcronet.so' | head -1)
-  [[ -n "$lib" ]] && install -m 0644 "$lib" "$BIN_DIR/libcronet.so" 2>/dev/null || true
+  if [[ -n "$lib" ]]; then
+    install -m 0644 "$lib" "$BIN_DIR/libcronet.so" || { rm -rf "$tmp"; die "无法安装 libcronet.so"; }
+  fi
   rm -rf "$tmp"
 
   if ! "$SB_BIN" version >/dev/null 2>&1; then
@@ -628,13 +639,11 @@ sb_supports_snell() {
 # ---------------------------------------------------------------- sbx-core 安装
 install_sbx_core() {
   install -d -m 0755 "$BIN_DIR"
-  CORE_REPLACED=0   # 全局信号：本次是否真正替换了二进制（供 do_update 判断是否需重启）
   # 开发/测试：直接使用本地构建的二进制
   if [[ -n "${SBX_CORE_BIN:-}" && -x "${SBX_CORE_BIN}" ]]; then
     cat "$SBX_CORE_BIN" > "$CORE_BIN.tmp.$$" && chmod 0755 "$CORE_BIN.tmp.$$" \
       && mv -f "$CORE_BIN.tmp.$$" "$CORE_BIN" \
       || die "本地 sbx-core 拷贝失败；现有安装未被改动"
-    CORE_REPLACED=1
     ok "使用本地 sbx-core: $("$CORE_BIN" version 2>/dev/null | head -1)"
     return 0
   fi
@@ -651,40 +660,20 @@ install_sbx_core() {
   dl="$BIN_DIR/.sbx-core.dl.$$"
   cleanup() { rm -rf "$tmp" "$dl" 2>/dev/null || true; }
 
-  # 解析 dist 分支当前 commit sha，用不可变官方 revision 下载 binary 与 SHA256SUMS，
-  # 避免两次下载之间 dist force-push 导致版本错位。解析失败时大文件可回退 RAW_BASE，
-  # 但 SHA256SUMS 仍只从 OFFICIAL_RAW_BASE 获取，镜像投毒会导致校验失败而不是装入。
-  local base trust_base dist_sha
-  dist_sha=""
-  if command -v git >/dev/null 2>&1; then
-    dist_sha=$(git ls-remote "https://github.com/k6nfmm7dbr-commits/sbx.git" refs/heads/dist 2>/dev/null | awk '{print $1}')
-  else
-    # 用轻量 /git/ref API（仅返回 sha，不带 diff），curl 完整下载到变量，
-    # 再用 here-string 提取——避免 grep -m1 提前退出使上游进程 SIGPIPE
-    # （`set -o pipefail` 下被误判失败）。
-    local refs_json
-    refs_json=$(curl -fsSL -m 15 "https://api.github.com/repos/k6nfmm7dbr-commits/sbx/git/ref/heads/dist" 2>/dev/null) || refs_json=""
-    dist_sha=$(grep -m1 '"sha"' <<< "$refs_json" | sed -E 's/.*"sha"[[:space:]]*:[[:space:]]*"([0-9a-f]+)".*/\1/')
-  fi
-  if [[ -n "$dist_sha" ]]; then
-    # commit sha 来自官方 GitHub API/git ls-remote；不可变 revision 保证 binary 与清单同代。
-    base="${OFFICIAL_RAW_BASE%/dist}/$dist_sha"
-    trust_base="$base"
-  else
-    # git/API 不可用时，大文件仍可走用户指定的镜像；信任清单永远只取官方 rolling dist。
-    base="$RAW_BASE"
-    trust_base="$OFFICIAL_RAW_BASE"
-  fi
-
-  # 校验清单是信任决策依据，必须直连 trust_base，不能经过 SBX_GH_PROXY 或自定义 RAW 镜像：
-  # 若镜像同时替换二进制与 SHA256SUMS，自证式校验仍会通过，无法防止镜像投毒。
-  curl -fsSL -m 60 -o "$tmp/SHA256SUMS" "$trust_base/SHA256SUMS" \
-    || { cleanup; die "从官方源下载 SHA256SUMS 失败；现有安装未被改动"; }
+  # Only binary bytes can be mirrored. The official immutable manifest
+  # authenticates those bytes, even if a custom mirror serves a rolling URL.
+  local base="${SBX_RAW_BASE:-$DIST_BASE}"
+  [[ "$DIST_SHA" =~ ^[0-9a-f]{40}$ && -n "$DIST_BASE" ]] \
+    || { cleanup; die "缺少固定分发提交，拒绝下载 sbx-core"; }
+  curl -fsSL -m 60 -o "$tmp/SHA256SUMS" "$DIST_BASE/SHA256SUMS" \
+    || { cleanup; die "从固定官方提交下载 SHA256SUMS 失败"; }
   if [[ -x "$CORE_BIN" ]]; then
-    local local_sum expect_sum
+    local local_sum expect_sum expect_count
     local_sum=$(sha256_of "$CORE_BIN" 2>/dev/null || true)
     expect_sum=$(awk -v x="$name" '$2==x{print $1}' "$tmp/SHA256SUMS")
-    if [[ -n "$local_sum" && -n "$expect_sum" && "$local_sum" == "$expect_sum" ]]; then
+    expect_count=$(awk -v x="$name" '$2==x{c++} END{print c+0}' "$tmp/SHA256SUMS")
+    if [[ "$expect_count" == 1 && -n "$local_sum" && "$local_sum" == "$expect_sum" ]] \
+       && [[ "$(core_version_of "$CORE_BIN")" == "$APP_VERSION" ]]; then
       cleanup
       ok "sbx-core 已是最新: $("$CORE_BIN" version 2>/dev/null | head -1)"
       return 0
@@ -693,7 +682,7 @@ install_sbx_core() {
 
   # 内容不一致或本地缺失 → 下载完整二进制并校验替换
   info "下载 sbx-core (${arch})..."
-  curl -fsSL -m 300 -o "$dl" "$(gh_url "$base/${name}")" \
+  curl -fsSL -m 300 -o "$dl" "$(gh_url "${base%/}/${name}")" \
     || { cleanup; die "下载 sbx-core 失败（可设置 SBX_GH_PROXY 使用镜像）；现有安装未被改动"; }
   verify_core_checksum "$dl" "$tmp/SHA256SUMS" "$name" \
     || { cleanup; die "sbx-core 校验失败；现有安装未被改动"; }
@@ -718,14 +707,13 @@ install_sbx_core() {
   if [[ -x "$CORE_BIN" ]]; then
     cp -f "$CORE_BIN" "$CORE_BIN.bak" || { cleanup; die "旧 sbx-core 备份创建失败，已中止安装（现有安装未被改动）"; }
   fi
-  mv -f "$dl" "$CORE_BIN"
+  mv -f "$dl" "$CORE_BIN" || { cleanup; die "无法替换 sbx-core"; }
   rm -rf "$tmp"
   if ! "$CORE_BIN" version >/dev/null 2>&1; then
     [[ -f "$CORE_BIN.bak" ]] && { mv -f "$CORE_BIN.bak" "$CORE_BIN"; warn "新二进制异常，已回滚"; }
     die "sbx-core 安装后自检失败"
   fi
   rm -f "$CORE_BIN.bak"
-  CORE_REPLACED=1
   ok "sbx-core 安装完成: $("$CORE_BIN" version | head -1)"
 }
 
@@ -925,19 +913,8 @@ fw_apply() {
   return 1
 }
 fw_clear() {
-  # 先停面板（停掉采集线程，避免其 repair() 自愈机制把刚删的表重建回来）
-  svc_do stop sbx-panel >/dev/null 2>&1 || true
-  "$CORE_BIN" clear >/dev/null 2>&1 || true
-  # 兜底：直删计数表 + 策略 enforcement 表（sbx_policy），
-  # 保证卸载后内核里不残留暂停 / IP 限制 / 限速规则（残留到重启会误拦其它服务）。
-  #
-  # 安全边界（不可放宽）：逐表 `nft delete table` 只作用于 SBX 自己创建的两张表。
-  # 绝不 `nft flush ruleset`、绝不动用户已有的其它表/链/默认 policy。
-  if command -v nft >/dev/null 2>&1; then
-    nft delete table inet sbx_traffic >/dev/null 2>&1 || true
-    nft delete table inet sbx_policy  >/dev/null 2>&1 || true
-    nft delete table inet sbx_access_guard >/dev/null 2>&1 || true
-  fi
+  # Full uninstall only; callers must stop both listeners successfully first.
+  "$CORE_BIN" clear --uninstall
 }
 
 # ---------------------------------------------------------------- 添加节点
@@ -1005,20 +982,14 @@ SBX_LOCK="${SBX_LOCK:-/run/lock/sbx.lock}"
 sbx_lock() {
   mkdir -p "$(dirname "$SBX_LOCK")" 2>/dev/null || true
   (
+    command -v flock >/dev/null || die "缺少 flock；请先安装提供 flock 的软件包"
     flock 9 || { err "检测到另一个 sbx 节点操作正在进行，请稍后重试"; exit 75; }
     # 告知 sbx-core 本进程已持锁，Go 侧跳过自锁（否则会对自己死锁等待）
-    export SBX_LOCK_HELD=1
+    export SBX_LOCK SBX_LOCK_HELD=1
     "$@"
-  ) 9>"$SBX_LOCK"
+  ) 9>>"$SBX_LOCK"
 }
 
-# 通用提交流程：校验 → 备份 → 提交 config → 提交 nodes → 重启确认 → 才删备份
-# v3.0.3 修复（P0）：
-#   1) 备份在整个操作真正成功之前绝不删除——旧实现先删 .bak 再 restart，
-#      restart 失败后的“回滚”实际上无备份可用，rollback 名存实亡；
-#   2) 备份创建失败立即中止 mutation——绝不允许在无备份的情况下改动正式文件；
-#   3) 原文件不存在属合法状态（全新安装），按 original_exists=false 记录，
-#      回滚时恢复为“不存在”；但“存在却备份失败”必须中止。
 # >>> commit-node-flow（tests/commit_flow_test.sh 提取本段做回滚一致性测试）
 # sanitize_candidate_route <candidate_file>
 # P0 修复：候选配置 route.final 引用完整性自检。
@@ -1080,77 +1051,12 @@ sanitize_candidate_route() {
 }
 
 commit_node() {
-  local cand="$SB_CONF.candidate"
-  [[ -f "$cand" ]] || { warn "未生成候选配置"; return 1; }
-  # check 之前先校正 route.final：check 不校验该引用，放过去就会在 restart 阶段炸
-  sanitize_candidate_route "$cand"
-  if ! "$SB_BIN" check -c "$cand" >/dev/null 2>&1; then
-    warn "sing-box 配置校验失败，已回滚"
-    "$SB_BIN" check -c "$cand" 2>&1 | head -5 >&2
-    core_node rollback >/dev/null 2>&1 || true
-    return 1
+  # Preparation and commit share FD 9. The backend owns validation, access
+  # isolation, transactional backups, sing-box restart and recovery.
+  if [[ -f "$SB_CONF.candidate" ]]; then
+    sanitize_candidate_route "$SB_CONF.candidate"
   fi
-  # ---- 备份阶段：任一备份创建失败都必须立即中止，正式文件一个都不动 ----
-  local conf_existed=0 nodes_existed=0
-  if [[ -f "$SB_CONF" ]]; then
-    conf_existed=1
-    cp -f "$SB_CONF" "$SB_CONF.bak" || { warn "config 备份创建失败，已中止本次修改（正式文件未被改动）"; return 1; }
-  fi
-  if [[ -f "$NODES_JSON" ]]; then
-    nodes_existed=1
-    cp -f "$NODES_JSON" "$NODES_JSON.bak" || { warn "nodes 备份创建失败，已中止本次修改（正式文件未被改动）"; return 1; }
-  fi
-
-  restore_old() {
-    core_node rollback >/dev/null 2>&1 || true
-    # 逐项尽力恢复：单项失败不中断其余恢复动作，最后统一以非 0 返回
-    if [[ "$conf_existed" == 1 ]]; then
-      cp -f "$SB_CONF.bak" "$SB_CONF" || warn "config 回滚失败! 请手工从 $SB_CONF.bak 恢复"
-    else
-      rm -f "$SB_CONF"
-    fi
-    if [[ "$nodes_existed" == 1 ]]; then
-      cp -f "$NODES_JSON.bak" "$NODES_JSON" || warn "nodes 回滚失败! 请手工从 $NODES_JSON.bak 恢复"
-    else
-      rm -f "$NODES_JSON"
-    fi
-    rm -f "$NODES_JSON.candidate"
-  }
-
-  # 提交 config + nodes 统一交给 sbx-core node commit：
-  # 它用 rename + fsync 父目录 提交两个候选文件（v3.0.7 之前 config 由 shell
-  # `mv -f` 提交，无目录 fsync，与 nodes.json 的耐久性不一致）。
-  # config 先提交、nodes 后提交；nodes 提交失败绝不允许静默继续（否则两者状态分叉）。
-  local cerr
-  if ! cerr=$("$CORE_BIN" node commit 2>&1); then
-    warn "配置/节点数据提交失败，正在回滚: $cerr"
-    restore_old
-    sb_restart || true   # 让 sing-box 回到原有效配置
-    warn "已回滚到操作前状态（config 与 nodes 保持一致）"
-    return 1
-  fi
-  # restart 失败时 .bak 必须仍在——这是 rollback 能真正完成的唯一保证
-  if ! sb_restart; then
-    warn "sing-box 启动失败，回滚配置与节点数据"
-    restore_old
-    if sb_restart; then
-      warn "已回滚到操作前状态，旧配置已恢复运行（config 与 nodes 保持一致）"
-    else
-      warn "严重: 已恢复旧配置文件，但 sing-box 仍未运行！请检查 $SB_CONF 与服务日志后手动处理"
-      warn "已回滚到操作前状态（config 与 nodes 保持一致）"
-    fi
-    return 1
-  fi
-  # 整个操作真正成功以后才允许删除备份
-  rm -f "$SB_CONF.bak" "$NODES_JSON.bak" 2>/dev/null || true
-  # 节点本身已创建成功；防火墙规则失败不能伪装成功，也不能回滚节点。
-  # 返回码三态：0=完全成功，2=节点成功但流量规则失败（partial），1=失败。
-  if fw_apply; then
-    panel_running && svc_do restart sbx-panel || true
-    return 0
-  fi
-  warn "节点已创建并可用，但流量统计规则应用失败，该节点流量统计暂不可用；可稍后在菜单重试"
-  return 2
+  core_node commit
 }
 # <<< commit-node-flow
 
@@ -1298,52 +1204,6 @@ show_links_for_last() {
 }
 
 # ---------------------------------------------------------------- 服务单元
-setup_services() {
-  [[ -n "${SBX_NO_SERVICE:-}" ]] && { warn "已跳过服务注册（SBX_NO_SERVICE）"; return 0; }
-
-  case "$INIT_SYS" in
-    systemd)
-      cat > /etc/systemd/system/sing-box.service <<EOF
-[Unit]
-Description=sing-box service
-Documentation=https://sing-box.sagernet.org
-After=network-online.target nss-lookup.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-Environment=SBX_DIR=$APP_DIR
-Environment=SBX_CONF=$PANEL_CONF
-Environment=SBX_SB_CONF=$SB_CONF
-ExecStartPre=$CORE_BIN enforce-access
-ExecStart=$SB_BIN run -C $SB_DIR
-Restart=on-failure
-RestartSec=3
-LimitNOFILE=infinity
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-      cat > /etc/systemd/system/sbx-firewall.service <<EOF
-[Unit]
-Description=SBX traffic counters (netfilter)
-After=network-pre.target
-Before=sing-box.service sbx-panel.service
-DefaultDependencies=no
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=$CORE_BIN apply
-ExecStop=$CORE_BIN clear
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
 # >>> dns-guard（tests/installer_flow_test.sh 提取本区块做隔离测试）
 # fix_resolv_conf_misdetection —— 修掉让 Go 程序 DNS 全废的 resolv.conf 误判。
 #
@@ -1404,9 +1264,57 @@ fix_resolv_conf_misdetection() {
 }
 # <<< dns-guard
 
+setup_services() {
+  local mode="${1:-install}"
+  [[ -n "${SBX_NO_SERVICE:-}" ]] && { warn "已跳过服务注册（SBX_NO_SERVICE）"; return 0; }
+
+  case "$INIT_SYS" in
+    systemd)
+      cat > "$UNIT_DIR"/sing-box.service <<EOF
+[Unit]
+Description=sing-box service
+Documentation=https://sing-box.sagernet.org
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=SBX_DIR=$APP_DIR
+Environment=SBX_CONF=$PANEL_CONF
+Environment=SBX_SB_CONF=$SB_CONF
+ExecStartPre=$CORE_BIN enforce-access
+ExecStart=$SB_BIN run -C $SB_DIR
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=infinity
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+      cat > "$UNIT_DIR"/sbx-firewall.service <<EOF
+[Unit]
+Description=SBX traffic counters (netfilter)
+After=network-pre.target
+Before=sing-box.service sbx-panel.service
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$CORE_BIN apply
+ExecStop=$CORE_BIN clear
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+
 # >>> panel-unit（tests/installer_flow_test.sh 提取本区块做沙箱路径校验；
 # 标记必须在行首——测试用 sed '/^# >>> panel-unit/' 提取，缩进会匹配不到）
-      cat > /etc/systemd/system/sbx-panel.service <<EOF
+      cat > "$UNIT_DIR"/sbx-panel.service <<EOF
 [Unit]
 Description=SBX traffic panel
 After=network-online.target sbx-firewall.service
@@ -1455,11 +1363,11 @@ WantedBy=multi-user.target
 EOF
 # <<< panel-unit
       systemctl daemon-reload
-      systemctl enable sing-box sbx-firewall sbx-panel >/dev/null 2>&1
+      if [[ "$mode" != update ]]; then systemctl enable sing-box sbx-firewall sbx-panel >/dev/null 2>&1; fi
       ;;
 
     openrc)
-      cat > /etc/init.d/sing-box <<EOF
+      cat > "$INIT_DIR"/sing-box <<EOF
 #!/sbin/openrc-run
 name="sing-box"
 description="sing-box service"
@@ -1473,7 +1381,7 @@ export SBX_DIR="$APP_DIR" SBX_CONF="$PANEL_CONF" SBX_SB_CONF="$SB_CONF"
 start_pre() { "$CORE_BIN" enforce-access; }
 depend() { need net; after sbx-firewall; }
 EOF
-      cat > /etc/init.d/sbx-firewall <<EOF
+      cat > "$INIT_DIR"/sbx-firewall <<EOF
 #!/sbin/openrc-run
 name="sbx-firewall"
 description="SBX traffic counters"
@@ -1481,7 +1389,7 @@ depend() { before sing-box sbx-panel; }
 start() { $CORE_BIN apply; }
 stop()  { $CORE_BIN clear; }
 EOF
-      cat > /etc/init.d/sbx-panel <<EOF
+      cat > "$INIT_DIR"/sbx-panel <<EOF
 #!/sbin/openrc-run
 name="sbx-panel"
 description="SBX traffic panel"
@@ -1494,13 +1402,16 @@ output_log="/var/log/sbx-panel.log"
 error_log="/var/log/sbx-panel.log"
 depend() { need net; after sbx-firewall; }
 EOF
-      chmod +x /etc/init.d/sing-box /etc/init.d/sbx-firewall /etc/init.d/sbx-panel
-      rc-update add sbx-firewall default >/dev/null 2>&1
-      rc-update add sing-box default >/dev/null 2>&1
-      rc-update add sbx-panel default >/dev/null 2>&1
+      chmod +x "$INIT_DIR/sing-box" "$INIT_DIR/sbx-firewall" "$INIT_DIR/sbx-panel"
+      if [[ "$mode" != update ]]; then
+        rc-update add sbx-firewall default >/dev/null 2>&1
+        rc-update add sing-box default >/dev/null 2>&1
+        rc-update add sbx-panel default >/dev/null 2>&1
+      fi
       ;;
   esac
-  ok "服务已注册（开机自启）"
+  if [[ "$mode" == update ]]; then ok "服务定义已刷新（保留开机自启设置）";
+  else ok "服务已注册（开机自启）"; fi
 }
 
 # wait_service_active 轮询等待服务真正进入 active。
@@ -1883,23 +1794,21 @@ uninstall_all() {
   read -r yn || true
   [[ "${yn,,}" == "y" ]] || { echo "已取消"; pause; return 0; }
 
-  svc_do stop sbx-panel || true
-  svc_do stop sing-box || true
-  svc_do stop sbx-firewall || true
-  sleep 0.5   # 等 oneshot ExecStop 完全落地，避免与清理产生竞态
-  fw_clear
+  upgrade_stop_consumers || die "无法停止 sing-box 或面板，拒绝清除访问规则"
+  svc_do stop sbx-firewall || die "无法停止计数服务，已中止卸载"
+  fw_clear || die "无法清除 SBX 防火墙规则，已中止卸载"
   # 若这台机器曾装过旧版（≤ v3.0.8），把它当年创建的 iptables 链一并清掉，
   # 否则卸载后 SBX_IN/SBX_OUT 会残留在内核里直到重启。
   cleanup_legacy_backend
   case "$INIT_SYS" in
     systemd)
       systemctl disable sing-box sbx-panel sbx-firewall >/dev/null 2>&1 || true
-      rm -f /etc/systemd/system/{sing-box,sbx-panel,sbx-firewall}.service
+      rm -f "$UNIT_DIR"/{sing-box,sbx-panel,sbx-firewall}.service
       systemctl daemon-reload ;;
     openrc)
       for s in sbx-panel sing-box sbx-firewall; do
         rc-update del "$s" default >/dev/null 2>&1 || true
-        rm -f "/etc/init.d/$s"
+        rm -f "$INIT_DIR/$s"
       done ;;
   esac
   rm -rf "$APP_DIR" "$SB_BIN" "$CMD_PATH" "$CORE_BIN" "$BIN_DIR/libcronet.so"
@@ -2090,69 +1999,67 @@ menu_settings() {
 
 # ---------------------------------------------------------------- 安装
 install_self() {
+  local source="${BASH_SOURCE[0]}" wrapper
   install -d -m 0755 "$BIN_DIR"
-  if [[ -f "${BASH_SOURCE[0]}" ]]; then
-    install -m 0755 "${BASH_SOURCE[0]}" "$SELF_PATH" 2>/dev/null || true
+  # Fresh install and update execute from a verified regular staging file.
+  [[ -f "$source" ]] || die "无法持久化已验证安装器"
+  if [[ ! "$source" -ef "$SELF_PATH" ]]; then
+    upgrade_replace "$source" "$SELF_PATH" 0755
   fi
-  # 管道 / 进程替换方式下（`curl | bash`、`bash <(curl ...)`，后者是 README 推荐的一键
-  # 安装方式）BASH_SOURCE[0] 是 /dev/fd/NN 而不是普通文件，无法回读自身，需要重新下载
-  # 一份持久化到 $SELF_PATH——它随后会成为常驻的 `sbx` 命令，被菜单与 systemd 反复执行。
-  #
-  # 因此这里必须与 do_update 遵守同一原则：脚本本体直连官方 URL（不经 SBX_GH_PROXY），
-  # 且在落盘前用官方 sbx.sh.sha256 校验。旧实现是 `gh_url "$RAW_URL"` 且完全不校验，
-  # 等于把"本机今后执行的 sbx 命令内容"交给第三方镜像决定。
-  if [[ ! -f "$SELF_PATH" ]]; then
-    local tself tsum want cnt
-    tself=$(mktemp); tsum=$(mktemp)
-    if curl -fsSL -m 60 -o "$tself" "$OFFICIAL_SCRIPT_URL" \
-       && curl -fsSL -m 60 -o "$tsum" "$OFFICIAL_RAW_BASE/sbx.sh.sha256"; then
-      cnt=$(awk '$2=="sbx.sh"{c++} END{print c+0}' "$tsum")
-      want=$(awk '$2=="sbx.sh"{print $1}' "$tsum")
-      if [[ "$cnt" == "1" ]] && verify_remote_script "$tself" "$want" "官方 sbx.sh.sha256"; then
-        install -m 0755 "$tself" "$SELF_PATH"
-      else
-        warn "安装器脚本未通过官方校验，已跳过落盘；本次安装本身已完成，但 sbx 管理命令不可用"
-        warn "  如需 sbx 命令，请改用「先下载 sbx.sh 与 sbx.sh.sha256、校验通过后再执行」的安装方式"
-      fi
-    else
-      warn "无法从官方源获取安装器脚本或其校验和，已跳过落盘；sbx 管理命令不可用"
-    fi
-    rm -f "$tself" "$tsum"
-  fi
-  # 只有脚本确实存在时才写包裹命令，避免留下一个指向不存在文件的 sbx 命令
-  # （旧实现在下载失败时也会写 $CMD_PATH，用户敲 sbx 才报错，且报错信息无从下手）。
-  if [[ -f "$SELF_PATH" ]]; then
-    cat > "$CMD_PATH" <<EOF
-#!/usr/bin/env bash
-exec bash "$SELF_PATH" "\$@"
-EOF
-    chmod +x "$CMD_PATH"
-  fi
+  wrapper=$(mktemp "$BIN_DIR/.sbx-wrapper.XXXXXXXX")
+  printf '#!/usr/bin/env bash\nexec bash %q "$@"\n' "$SELF_PATH" > "$wrapper"
+  chmod 0755 "$wrapper"
+  mv -fT -- "$wrapper" "$CMD_PATH"
 }
 
-# ---------------------------------------------------------------- 在线升级
-# 从 RAW_URL 拉取最新脚本 → 校验 → 替换本体 → 用新脚本重写内置资源并重启服务。
-# 全程保留 nodes.json / panel.json / traffic.db，不动节点与历史流量。
+# ---------------------------------------------------------------- 在线安装/升级
+# Official release discovery happens exactly once per operation. Never fall back
+# to a rolling download, even when the ref lookup is unavailable.
+resolve_dist_sha() {
+  local rev="${SBX_DIST_SHA:-}" refs
+  if [[ -z "$rev" ]] && command -v git >/dev/null 2>&1; then
+    refs=$(git ls-remote "https://github.com/$DIST_REPO.git" refs/heads/dist 2>/dev/null) || refs=""
+    rev=$(awk '$2=="refs/heads/dist" {print $1}' <<< "$refs")
+  fi
+  if [[ -z "$rev" ]]; then
+    refs=$(curl -fsSL -m 15 "https://api.github.com/repos/$DIST_REPO/git/ref/heads/dist") || return 1
+    rev=$(sed -nE 's/.*"sha"[[:space:]]*:[[:space:]]*"([0-9a-f]{40})".*/\1/p' <<< "$refs")
+  fi
+  [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || return 1
+  printf '%s\n' "$rev"
+}
+
+set_dist_pin() {
+  [[ "$1" =~ ^[0-9a-f]{40}$ ]] || die "分发提交必须为 40 位小写 Git SHA"
+  DIST_SHA="$1"
+  DIST_BASE="$OFFICIAL_RAW_REPO/$DIST_SHA"
+}
+
+fetch_dist_script() { # <private staging directory> [independent candidate anchor]
+  local dir="$1" anchor="${2:-}" want count
+  info "从官方 GitHub 分发提交 $DIST_SHA 拉取安装器..."
+  curl -fsSL -m 60 -o "$dir/sbx.sh" "$DIST_BASE/sbx.sh" || die "无法下载固定提交的安装器"
+  curl -fsSL -m 60 -o "$dir/sbx.sh.sha256" "$DIST_BASE/sbx.sh.sha256" || die "无法下载固定提交的脚本校验和"
+  count=$(awk '$2=="sbx.sh" {c++} END {print c+0}' "$dir/sbx.sh.sha256")
+  want=$(awk '$2=="sbx.sh" {print $1}' "$dir/sbx.sh.sha256")
+  [[ "$count" == 1 ]] && verify_remote_script "$dir/sbx.sh" "$want" "官方 sbx.sh.sha256" \
+    || die "分发脚本校验失败，未改动现有安装"
+  if [[ -n "$anchor" ]]; then
+    verify_remote_script "$dir/sbx.sh" "$anchor" "候选脚本显式哈希" || die "候选脚本不匹配显式哈希，未改动现有安装"
+  fi
+  bash -n "$dir/sbx.sh" && [[ "$(remote_version "$dir/sbx.sh")" =~ ^[0-9]+(\.[0-9]+)+$ ]] \
+    || die "分发脚本语法或版本标记无效，未改动现有安装"
+  grep -Fxq "DIST_PROTOCOL=\"$DIST_PROTOCOL\"" "$dir/sbx.sh" \
+    || die "分发脚本不支持事务升级协议；请选择新发布提交"
+  DIST_SCRIPT_SHA="${want,,}"
+}
+
 remote_version() {  # 从下载的脚本里提取 APP_VERSION
   grep -m1 '^APP_VERSION=' "$1" 2>/dev/null | sed -E 's/^APP_VERSION="?([^"]+)"?.*/\1/'
 }
 
-ver_ge() {  # ver_ge A B  → A >= B ?（点分版本比较）
-  [[ "$1" == "$2" ]] && return 0
-  local a b i
-  IFS=. read -ra a <<< "$1"
-  IFS=. read -ra b <<< "$2"
-  for ((i=0; i<${#a[@]} || i<${#b[@]}; i++)); do
-    local x=${a[i]:-0} y=${b[i]:-0}
-    ((10#$x > 10#$y)) && return 0
-    ((10#$x < 10#$y)) && return 1
-  done
-  return 0
-}
-
-# sb_version_ge 处理带预发布后缀的版本（1.14.0-rc.1）：ver_ge 会把
-# "0-rc.1" 交给算术运算直接报错。规则：按「主.次.补丁 + 预发布序」四段
-# 数值比较，同主干下正式版(1) > 预发布(0)——即 1.14.3 > 1.14.0-rc.1 > 1.14.0-rc.0。
+# Compare upstream sing-box versions using their numeric release base and
+# final-vs-prerelease ordering (the published baseline is a final release).
 sb_version_key() {  # <ver> → 输出四段数字
   local base="$1" rel=0
   if [[ "$base" == *-* ]]; then base="${base%%-*}"; else rel=1; fi
@@ -2172,230 +2079,259 @@ sb_version_ge() {
   return 0
 }
 
-do_update() {
-  local force="${1:-}"
+# The candidate coordinates the entire transaction. The caller never replaces the
+# installed script before the candidate has verified all managed services.
+do_update() (
+  local force="${1:-}" rev staging
   banner
-  printf '%s在线升级%s\n\n' "$C_B" "$C_RESET"
   require_root
-  detect_platform
+  [[ -z "$force" || "$force" == --force ]] || die "用法: sbx --update [--force]"
+  rev=$(resolve_dist_sha) || die "无法解析官方 dist 提交，未改动现有安装"
+  set_dist_pin "$rev"
+  staging=$(mktemp -d)
+  trap 'rm -rf -- "$staging"' EXIT
+  fetch_dist_script "$staging" "${SBX_UPDATE_SHA256:-}"
+  SBX_SCRIPT_SHA256="$DIST_SCRIPT_SHA" bash "$staging/sbx.sh" --apply-update "$rev" "$force"
+)
 
-  local tmp new_ver current_sha remote_sha sum_tmp official_count official_sha
-  tmp=$(mktemp)
-  sum_tmp=$(mktemp)
-  # 在线升级的脚本本体是可执行信任对象：必须从官方 URL 直连，不能经 GH_PROXY/RAW 镜像。
-  # 即使后续哈希验证会拦截投毒，也不应让自定义镜像承载 root 将执行的脚本字节流。
-  info "从官方 GitHub 源拉取升级脚本..."
-  if ! curl -fsSL -m 60 -o "$tmp" "$OFFICIAL_SCRIPT_URL"; then
-    rm -f "$tmp" "$sum_tmp"; die "从官方源下载升级脚本失败；可稍后重试或使用 SBX_SCRIPT_SHA256 显式校验的本地副本"
-  fi
-  # 语法和版本标记只能检查可执行性，不能证明脚本来自可信发布源。
-  if ! bash -n "$tmp" 2>/dev/null; then
-    rm -f "$tmp" "$sum_tmp"; die "下载的脚本语法校验失败，已放弃升级（未改动现有安装）"
-  fi
-  if ! grep -q '^APP_VERSION=' "$tmp"; then
-    rm -f "$tmp" "$sum_tmp"; die "下载的脚本缺少版本标记，可能不是发布版，已放弃升级"
-  fi
+bootstrap_install() (
+  local rev staging
+  require_root
+  rev=$(resolve_dist_sha) || die "无法解析官方 dist 提交，未开始安装"
+  set_dist_pin "$rev"
+  staging=$(mktemp -d)
+  trap 'rm -rf -- "$staging"' EXIT
+  fetch_dist_script "$staging" "${SBX_SCRIPT_SHA256:-}"
+  SBX_SCRIPT_SHA256="$DIST_SCRIPT_SHA" bash "$staging/sbx.sh" --install-dist "$rev"
+)
 
-  # RAW_BASE 可被配置成大文件镜像；脚本校验哈希必须固定直连官方 dist RAW 源。
-  if curl -fsSL -m 60 -o "$sum_tmp" "$OFFICIAL_RAW_BASE/sbx.sh.sha256"; then
-    official_count=$(awk '$2=="sbx.sh"{c++} END{print c+0}' "$sum_tmp")
-    official_sha=$(awk '$2=="sbx.sh"{print $1}' "$sum_tmp")
-    if [[ "$official_count" != "1" ]] || ! verify_remote_script "$tmp" "$official_sha" "官方 sbx.sh.sha256"; then
-      rm -f "$tmp" "$sum_tmp"
-      die "在线升级脚本校验失败：脚本可能被篡改、镜像投毒或 dist 分支尚未同步，请稍后重试或改用先校验再执行"
-    fi
-    # 用户显式提供的官方哈希是第二个独立锚；两者都必须匹配。
-    if [[ -n "${SBX_SCRIPT_SHA256:-}" ]] && ! verify_remote_script "$tmp" "$SBX_SCRIPT_SHA256" "SBX_SCRIPT_SHA256 显式锚"; then
-      rm -f "$tmp" "$sum_tmp"
-      die "在线升级脚本与显式 SBX_SCRIPT_SHA256 不匹配，已中止且未覆盖当前脚本"
-    fi
-  elif [[ -n "${SBX_SCRIPT_SHA256:-}" ]]; then
-    # 官方端点暂不可达时，仅允许用户显式提供并核验官方哈希后重试；绝不改走镜像取信任锚。
-    warn "无法获取官方 sbx.sh.sha256；本次改用你显式提供的 SBX_SCRIPT_SHA256 校验"
-    if ! verify_remote_script "$tmp" "$SBX_SCRIPT_SHA256" "SBX_SCRIPT_SHA256 显式锚"; then
-      rm -f "$tmp" "$sum_tmp"
-      die "在线升级脚本完整性校验失败，已中止且未覆盖当前脚本"
-    fi
-  else
-    rm -f "$tmp" "$sum_tmp"
-    die "无法从官方源获取 sbx.sh.sha256，已中止升级；也可用 SBX_SCRIPT_SHA256=<官方哈希> 显式指定后重试"
+# Both services must remain up across consecutive samples. For the panel also
+# probe the actual HTTP listener (not an external reverse proxy).
+upgrade_health() {
+  local want_sb="$1" want_panel="$2" addr="" listen port sample good=0 valid
+  [[ -n "${SBX_NO_SERVICE:-}" ]] && return 0
+  if [[ "$want_panel" == 1 ]]; then
+    listen=$(panel_get listen) || return 1
+    port=$(panel_get port) || return 1
+    [[ "$port" =~ ^[0-9]{1,5}$ ]] && valid_port "$port" || return 1
+    case "$listen" in
+      ''|0.0.0.0) listen=127.0.0.1 ;;
+      ::) listen=::1 ;;
+    esac
+    [[ "$listen" =~ ^[a-zA-Z0-9_.:%-]+$ ]] || return 1
+    addr="http://$(host_for_uri "$listen"):$port/healthz"
   fi
-  rm -f "$sum_tmp"
-
-  new_ver=$(remote_version "$tmp")
-  [[ -z "$new_ver" ]] && new_ver="unknown"
-  # 版本号相同时，再用 sha256 比较脚本内容，避免开发者忘记升版本导致更新被误跳过。
-  current_sha=$(sha256sum "$SELF_PATH" 2>/dev/null | awk '{print $1}')
-  remote_sha=$(sha256_of "$tmp" 2>/dev/null || true)
-  local same_content="no"
-  [[ -n "$current_sha" && "$current_sha" == "$remote_sha" ]] && same_content="yes"
-  info "当前版本: $APP_VERSION    最新版本: $new_ver"
-
-  if [[ "$same_content" == "yes" && "$force" != "--force" ]]; then
-    rm -f "$tmp"
-    # 脚本内容相同，但 dist 分支的 Go 二进制可能单独更新（rolling latest，
-    # 版本号不随功能递增）。不能只看脚本/版本号——仍需按内容检查后端二进制。
-    info "脚本已是最新，检查后端 sbx-core 是否同步..."
-    CORE_REPLACED=0
-    if ! install_sbx_core; then
-      die "后端 sbx-core 检查/更新失败，已保留现有安装"
+  for ((sample=0; sample<20; sample++)); do
+    valid=1
+    if [[ "$want_sb" == 1 ]]; then
+      svc_do status sing-box || valid=0
+    elif svc_do status sing-box; then
+      valid=0
     fi
-    if [[ "${CORE_REPLACED:-0}" == "1" ]]; then
-      # 二进制内容有变化 → 刷新使用该二进制的面板与防火墙规则
-      svc_do restart sbx-panel || svc_do start sbx-panel || true
-      fw_apply || warn "计数规则应用失败，流量统计可能不准"
-      ok "后端 sbx-core 已更新"
+    if [[ "$want_panel" == 1 ]]; then
+      if ! svc_do status sbx-panel || ! curl --noproxy '*' -fsS --max-time 2 -o /dev/null "$addr" 2>/dev/null; then
+        valid=0
+      fi
+    elif svc_do status sbx-panel; then
+      valid=0
+    fi
+    if [[ "$valid" == 1 ]]; then
+      good=$((good + 1))
+      [[ "$good" == 3 ]] && return 0
     else
-      ok "已是最新版本，无需升级"
+      good=0
     fi
-    printf '%s如需强制重装当前版本，运行: sbx --update --force%s\n' "$C_DIM" "$C_RESET"
-    return 0
-  fi
-  if [[ "$new_ver" != "unknown" ]] && ver_ge "$APP_VERSION" "$new_ver" && [[ "$same_content" != "yes" ]]; then
-    warn "版本号未递增但脚本内容不同，仍将更新（检测到远端代码变化）"
-  fi
-
-  # 备份当前本体（存在即必须备份成功，否则中止升级——旧脚本绝不能被无备份覆盖）
-  if [[ -f "$SELF_PATH" ]]; then
-    cp -f "$SELF_PATH" "$SELF_PATH.bak" || { rm -f "$tmp"; die "升级前备份创建失败，已中止（当前脚本未被改动）"; }
-  fi
-  cat "$tmp" > "$SELF_PATH"
-  chmod +x "$SELF_PATH"
-  rm -f "$tmp"
-  ok "脚本已更新到 $new_ver，正在应用..."
-
-  # 交给新脚本重写内置资源并重启（用内部标记，避免重复整套安装流程）
-  if bash "$SELF_PATH" --apply-update; then
-    ok "升级完成 → v$new_ver"
-    [[ -t 0 ]] && { pause; exec bash "$SELF_PATH"; }
-  else
-    # 回滚到升级前版本；恢复本身失败绝不能吞掉（否则脚本停在半更新状态还报"已恢复"）
-    warn "应用失败，回滚到升级前版本"
-    if [[ -f "$SELF_PATH.bak" ]] && cat "$SELF_PATH.bak" > "$SELF_PATH" 2>/dev/null && chmod +x "$SELF_PATH" 2>/dev/null; then
-      bash "$SELF_PATH" --apply-update >/dev/null 2>&1 || true
-      die "升级未成功，已恢复原版本"
-    else
-      die "严重: 升级失败且回滚失败! 当前脚本可能处于半更新状态，请重新运行安装命令修复"
-    fi
-  fi
+    sleep 0.5
+  done
+  return 1
 }
 
-# 更新 sbx-core 二进制 + 重启服务（升级时由新脚本调用；保留所有用户数据）
-apply_update() {
-  require_root
-  detect_platform
-  [[ -f "$PANEL_CONF" ]] || die "未检测到已安装的 SBX，无法应用升级"
-  install -d -m 0755 "$APP_DIR"
-  info "更新 sbx-core 后端..."
+upgrade_access_pending() {
+  # Access-control recovery files belong to sbx-core, never to installer rollback.
+  [[ -e "$APP_DIR/access-transition.nft" || -L "$APP_DIR/access-transition.nft" \
+     || -e "$APP_DIR/node-transition.json" || -L "$APP_DIR/node-transition.json" ]]
+}
 
-  install_sbx_core                    # 原子替换 + SHA256 校验 + 失败回滚
-  "$CORE_BIN" version >/dev/null 2>&1 || die "升级后 sbx-core 不可用，已中止（原二进制保留）"
-
-  # 内核基线随升级：老机器 sing-box 低于新版发布基线（如 1.14.0-rc.1 → 1.14.3）
-  # 时顺带升级。install_sing_box 失败会 die，所以放子 shell 里跑：下载/校验失败
-  # 只降级为警告——旧内核仍能跑，不该让面板升级整体失败；结尾统一按服务状态判定。
-  local cur_sb
-  cur_sb=$("$SB_BIN" version 2>/dev/null | awk 'NR==1{print $3}')
-  if [[ -n "$cur_sb" && -z "${SB_VERSION_PIN:-}" ]] && ! sb_version_ge "$cur_sb" "$SB_VERSION_DEFAULT"; then
-    info "sing-box 内核 $cur_sb 低于发布基线 $SB_VERSION_DEFAULT，随升级更新内核..."
-    if ( install_sing_box force ) && "$SB_BIN" version >/dev/null 2>&1; then
-      ok "sing-box 内核已升级: $("$SB_BIN" version | head -1)"
-    else
-      warn "sing-box 内核升级未完成，继续使用现有内核 $cur_sb；网络恢复后可重跑 sbx --update"
-    fi
-  fi
-
-  # nftables-only 升级路径（v3.0.9）：nftables 从「优先」变成硬依赖。
-  # 老机器可能只有 iptables，因此这里必须确认/安装 nftables，装不上即中止——
-  # 继续升级只会得到一个统计与策略全废的面板。用户数据（nodes.json /
-  # traffic.db / panel.json）此刻未被改动，中止是安全的。
-  if ! command -v nft >/dev/null 2>&1; then
-    info "本机缺少 nftables（新版唯一后端），正在安装..."
-    pkg_install nftables || true
-  fi
-  command -v nft >/dev/null 2>&1 \
-    || die "未找到 nft 命令：v3.0.9 起 SBX 仅支持 nftables，请先安装 nftables 后重新升级（节点与流量数据未被改动）"
-  nft list tables >/dev/null 2>&1 \
-    || die "nft 命令存在但不可用（权限不足或内核不支持），已中止升级（节点与流量数据未被改动）"
-
-  # 摘掉 panel.json 里的废弃键（backend / ipt_script）；只删这两个键，
-  # token / port / nodes_file / db / tz 与用户自定义键原样保留。
-  "$CORE_BIN" config-migrate >/dev/null 2>&1 \
-    || warn "清理废弃配置键失败（不影响运行，可手工执行 sbx-core config-migrate）"
-  # 清理旧版自己创建的 iptables 残留（iptables.sh / SBX_IN / SBX_OUT），
-  # best-effort，不触碰用户其它防火墙规则。
-  cleanup_legacy_backend
-
-  install_self                        # 刷新 /usr/local/bin/sbx 封装
-  setup_services                      # 服务单元可能有更新
-  # 节点 schema 或计数规则若有变化，重建一次（幂等，配置校验失败会保留旧配置）
-  local sync_err=""
-  if [[ -s "$NODES_JSON" ]]; then
-    # sync 真实失败（nodes.json 损坏/不可写/candidate 生成失败）绝不能吞掉：
-    # 继续执行会造成 config/nodes 不一致，必须报告并跳过本次配置迁移
-    # 规则集必须在生成候选配置**之前**就位：候选配置引用的是本地规则集文件。
-    # 换上游后文件格式变了(.srs → .json)，老机器上的缓存对不上号，
-    # 缺文件会让随后的 sing-box check 失败并中止升级。
-    if ! core_node rulesets >/dev/null; then
-      err "规则集准备失败: 无法下载或转换白名单需要的规则集"
-      info "已跳过本次升级的配置迁移；请检查网络后重新运行升级"
-      sync_err="规则集准备失败"
-    elif ! core_node sync >/dev/null; then
-      err "node sync 失败: nodes.json 可能损坏或 candidate 无法生成"
-      info "已跳过本次升级的配置迁移；请修复 $NODES_JSON 后重新运行升级"
-      sync_err="node sync 失败"
-    elif [[ -f "$SB_CONF.candidate" ]]; then
-      # 与 commit_node 同源：check 不校验 route.final 引用，先校正再校验
-      sanitize_candidate_route "$SB_CONF.candidate"
-      if "$SB_BIN" check -c "$SB_CONF.candidate" >/dev/null 2>&1; then
-        # SB_CONF 含节点凭据：存在即必须备份成功，失败则中止迁移（正式配置不动）
-        if [[ -f "$SB_CONF" ]] && ! cp -f "$SB_CONF" "$SB_CONF.upd-bak"; then
-          warn "升级前配置备份创建失败，已中止本次配置迁移"
-          rm -f "$SB_CONF.candidate"; core_node rollback >/dev/null 2>&1 || true
-        elif "$CORE_BIN" node commit >/dev/null 2>&1; then
-          # commit 现在一并提交 config 候选 + nodes 候选（rename + fsync）
-          rm -f "$SB_CONF.upd-bak" 2>/dev/null || true
-        else
-          # 升级路径的提交失败同样必须回滚，避免 config/nodes 分叉。
-          # 回滚恢复本身失败绝不能吞掉：那会留下 config/nodes 分叉还谎报"已恢复"。
-          local rb_err=""
-          cp -f "$SB_CONF.upd-bak" "$SB_CONF" 2>/dev/null || rb_err="config 恢复失败"
-          rm -f "$SB_CONF.candidate" "$NODES_JSON.candidate"
-          "$CORE_BIN" node rollback >/dev/null 2>&1 || [[ -n "$rb_err" ]] || rb_err="nodes 回滚失败"
-          rm -f "$SB_CONF.upd-bak" 2>/dev/null || true
-          if [[ -n "$rb_err" ]]; then
-            err "升级回滚失败($rb_err)! config 与 nodes 可能不一致，请手工检查 $SB_CONF 与 $NODES_JSON"
-            return 1
-          fi
-          warn "升级期节点提交失败，已恢复原配置"
-        fi
-      else
-        rm -f "$SB_CONF.candidate"; core_node rollback >/dev/null 2>&1 || true
-      fi
-    fi
-  fi
-  fix_resolv_conf_misdetection   # 升级路径同样修 DNS 误判（见函数注释）
-  svc_do restart sing-box || svc_do start sing-box || true
-  local sb_ok=1 panel_ok=1
-  svc_do status sing-box || sb_ok=0
-  # 面板 restart 失败允许 start 兜底；两者都失败才算失败
-  if ! svc_do restart sbx-panel; then
-    svc_do start sbx-panel || true
-  fi
-  svc_do status sbx-panel || panel_ok=0
-  if [[ "$sb_ok" == 1 && "$panel_ok" == 1 ]]; then
-    if fw_apply; then
-      ok "已重启 sing-box 与面板"
-    else
-      warn "已重启 sing-box 与面板，但计数规则应用失败（流量统计可能不准）"
-    fi
-  else
-    [[ "$sb_ok" != 1 ]] && err "sing-box 重启失败，节点服务当前不可用！请查看日志: sbx 菜单 → 系统设置 → 查看日志"
-    [[ "$panel_ok" != 1 ]] && err "面板服务重启失败，流量面板暂不可用！请查看日志: journalctl -u sbx-panel -n 60"
-    [[ -n "$sync_err" ]] && err "$sync_err"
+upgrade_stop_consumers() {
+  # Do not stop sbx-firewall: a previously installed stop hook may be destructive.
+  svc_do stop sbx-panel && svc_do stop sing-box || return 1
+  if [[ -z "${SBX_NO_SERVICE:-}" ]] && { svc_do status sbx-panel || svc_do status sing-box; }; then
     return 1
   fi
   return 0
+}
+
+upgrade_snapshot() {
+  local item i
+  for i in "${!UPGRADE_PATHS[@]}"; do
+    item="${UPGRADE_PATHS[i]}"
+    # NUL-separated paths, in backup slot order; absent files have no slot.
+    printf '%s\0' "$item" >> "$UPGRADE_DIR/paths"
+    if [[ -e "$item" || -L "$item" ]]; then
+      cp -a -- "$item" "$UPGRADE_DIR/snapshot/$i"
+    fi
+  done
+  printf 'sing-box=%s\nsbx-panel=%s\n' "$UPGRADE_SB_ACTIVE" "$UPGRADE_PANEL_ACTIVE" > "$UPGRADE_DIR/services"
+}
+
+upgrade_restore_files() {
+  local item backup i tmp
+  for i in "${!UPGRADE_PATHS[@]}"; do
+    item="${UPGRADE_PATHS[i]}"
+    backup="$UPGRADE_DIR/snapshot/$i"
+    if [[ -e "$backup" || -L "$backup" ]]; then
+      # Stage the replacement on the destination filesystem. Rule caches can
+      # be directories; unlike binaries they need a remove before rename.
+      tmp=$(mktemp -d "${item%/*}/.sbx-restore.XXXXXXXX") || return 1
+      if ! cp -a -- "$backup" "$tmp/item" \
+         || { [[ -d "$item" && ! -L "$item" ]] && ! rm -rf -- "$item"; } \
+         || ! mv -fT -- "$tmp/item" "$item"; then
+        rm -rf -- "$tmp" || true
+        err "未能恢复: $item"
+        return 1
+      fi
+      rmdir -- "$tmp" || return 1
+    else
+      rm -rf -- "$item" || return 1
+    fi
+  done
+}
+
+upgrade_restore() {
+  # A failed Go commit may have left its own recovery journal/guard. Preserve
+  # those exact files and the current binaries needed for explicit recovery.
+  if upgrade_access_pending; then
+    err "访问控制恢复未完成，保留隔离及升级备份；请先处理访问控制恢复"
+    return 1
+  fi
+  upgrade_stop_consumers || return 1
+  upgrade_restore_files || return 1
+  if [[ "$INIT_SYS" == systemd && -z "${SBX_NO_SERVICE:-}" ]]; then
+    systemctl daemon-reload || return 1
+  fi
+  "$CORE_BIN" version >/dev/null && "$SB_BIN" version >/dev/null || return 1
+  # Rebuild old runtime rules from restored configuration; never clear guard tables.
+  fw_apply || return 1
+  if [[ "$UPGRADE_SB_ACTIVE" == 1 ]]; then svc_do start sing-box || return 1; fi
+  if [[ "$UPGRADE_PANEL_ACTIVE" == 1 ]]; then svc_do start sbx-panel || return 1; fi
+  upgrade_health "$UPGRADE_SB_ACTIVE" "$UPGRADE_PANEL_ACTIVE"
+}
+
+upgrade_exit() {
+  local rc="$1"
+  trap - EXIT
+  trap '' HUP INT TERM
+  if [[ "$rc" == 0 || "$UPGRADE_DIRTY" == 0 ]]; then
+    if ! rm -rf -- "$UPGRADE_DIR"; then warn "无法清除升级工作目录：$UPGRADE_DIR"; fi
+    if [[ "$UPGRADE_COMMITTED" == 1 ]]; then ok "升级完成 → v$APP_VERSION ($DIST_SHA)"; fi
+  elif upgrade_restore; then
+    err "升级失败；已恢复原文件并验证升级前的服务状态"
+    rm -rf -- "$UPGRADE_DIR" || warn "无法清除升级备份：$UPGRADE_DIR"
+  else
+    err "升级失败，且无法确认回滚完成；保留备份：$UPGRADE_DIR"
+    rc=1
+  fi
+  exit "$rc"
+}
+
+stage_upgrade_binaries() (
+  local old_core="$CORE_BIN" old_sb="$SB_BIN" cur_sb
+  BIN_DIR="$UPGRADE_DIR/stage"
+  CORE_BIN="$BIN_DIR/sbx-core"
+  SB_BIN="$BIN_DIR/sing-box"
+  if [[ -f "$old_core" ]]; then cp -p -- "$old_core" "$CORE_BIN"; fi
+  install_sbx_core
+  cur_sb=$("$old_sb" version | awk 'NR==1 {sub(/^v/, "", $3); print $3}')
+  [[ "$cur_sb" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]] || die "无法识别已安装 sing-box 的版本"
+  if [[ -z "$SB_VERSION_PIN" ]] && ! sb_version_ge "$cur_sb" "$SB_VERSION_DEFAULT"; then
+    info "sing-box 内核 $cur_sb 低于发布基线 $SB_VERSION_DEFAULT，随升级更新内核..."
+    install_sing_box force
+  fi
+)
+
+upgrade_replace() { # same-filesystem rename without truncating the running file
+  local src="$1" dest="$2" mode="$3" tmp
+  tmp=$(mktemp "${dest%/*}/.sbx-upgrade.XXXXXXXX") || return 1
+  if ! install -m "$mode" -- "$src" "$tmp" || ! mv -fT -- "$tmp" "$dest"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+apply_update() {
+  local force="$1" nodes nft_conf
+  [[ -f "$PANEL_CONF" && -x "$CORE_BIN" && -x "$SB_BIN" ]] || die "未检测到完整 SBX 安装，无法升级"
+  upgrade_access_pending && die "存在未完成的访问控制事务，拒绝升级"
+  UPGRADE_DIR="$APP_DIR/.upgrade-transaction"
+  mkdir -m 0700 -- "$UPGRADE_DIR" || die "无法创建升级目录（如有上次保留的备份，请先检查 $UPGRADE_DIR）"
+  UPGRADE_DIRTY=0 UPGRADE_COMMITTED=0
+  trap 'upgrade_exit "$?"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  mkdir -- "$UPGRADE_DIR/stage" "$UPGRADE_DIR/snapshot"
+  stage_upgrade_binaries
+  if [[ "$force" != --force && ! -f "$UPGRADE_DIR/stage/sing-box" ]] \
+     && cmp -s -- "${BASH_SOURCE[0]}" "$SELF_PATH" && cmp -s -- "$UPGRADE_DIR/stage/sbx-core" "$CORE_BIN"; then
+    ok "安装器和后端已是固定分发提交 $DIST_SHA 的版本，无需升级"
+    return 0
+  fi
+  command -v nft >/dev/null 2>&1 || die "升级需要 nftables；请先安装 nftables"
+  nft list tables >/dev/null 2>&1 || die "nftables 不可用；未改动现有安装"
+  nodes=$(panel_get nodes_file)
+  nft_conf=$(panel_get nft_conf)
+  [[ "$nodes" == /* && "$nft_conf" == /* ]] || die "无法确定节点或计数配置路径，拒绝升级"
+  # The rules cache lives next to sing-box config; do not include SQLite or Go's
+  # access recovery journals/backups in the installer snapshot.
+  UPGRADE_PATHS=("$SELF_PATH" "$CMD_PATH" "$CORE_BIN" "$SB_BIN" "$BIN_DIR/libcronet.so"
+    "$PANEL_CONF" "$nodes" "$nodes.candidate" "$SB_CONF" "$SB_CONF.candidate"
+    "$nft_conf" "$APP_DIR/policy.nft" "$SB_DIR/rulesets")
+  if [[ -z "${SBX_NO_SERVICE:-}" ]]; then
+    case "$INIT_SYS" in
+      systemd) UPGRADE_PATHS+=("$UNIT_DIR/sing-box.service" "$UNIT_DIR/sbx-panel.service" "$UNIT_DIR/sbx-firewall.service") ;;
+      openrc) UPGRADE_PATHS+=("$INIT_DIR/sing-box" "$INIT_DIR/sbx-panel" "$INIT_DIR/sbx-firewall") ;;
+      *) die "不支持的服务管理器，无法验证升级" ;;
+    esac
+  fi
+  # Existing candidates can be evidence of an unfinished operation. Do not
+  # stage over them or try to guess which generation of files is authoritative.
+  [[ ! -e "$nodes.candidate" && ! -L "$nodes.candidate" && ! -e "$SB_CONF.candidate" && ! -L "$SB_CONF.candidate" ]] \
+    || die "存在未提交的节点候选文件，拒绝升级"
+  UPGRADE_SB_ACTIVE=0 UPGRADE_PANEL_ACTIVE=0
+  if svc_do status sing-box; then UPGRADE_SB_ACTIVE=1; fi
+  if svc_do status sbx-panel; then UPGRADE_PANEL_ACTIVE=1; fi
+  # Replacing an aliased config or unit could change an unsnapshotted target.
+  local item
+  for item in "${UPGRADE_PATHS[@]}"; do
+    [[ ! -L "$item" ]] || die "不支持以符号链接保存升级文件：$item"
+  done
+  upgrade_snapshot
+  printf '%s\n' "$DIST_SHA" > "$UPGRADE_DIR/generation"
+  UPGRADE_DIRTY=1
+  upgrade_stop_consumers || die "无法停止现有服务，取消升级"
+  upgrade_replace "$UPGRADE_DIR/stage/sbx-core" "$CORE_BIN" 0755
+  if [[ -f "$UPGRADE_DIR/stage/sing-box" ]]; then
+    upgrade_replace "$UPGRADE_DIR/stage/sing-box" "$SB_BIN" 0755
+  fi
+  if [[ -f "$UPGRADE_DIR/stage/libcronet.so" ]]; then
+    upgrade_replace "$UPGRADE_DIR/stage/libcronet.so" "$BIN_DIR/libcronet.so" 0644
+  fi
+  "$CORE_BIN" config-migrate >/dev/null
+  setup_services update
+  core_node rulesets >/dev/null
+  core_node sync >/dev/null
+  # Commit is the managed node transaction (includes checking/access/restart).
+  # Explicit start is only needed if a no-op commit didn't start sing-box.
+  commit_node >/dev/null
+  if [[ -z "${SBX_NO_SERVICE:-}" ]] && ! svc_do status sing-box; then
+    svc_do start sing-box || die "无法启动 sing-box"
+  fi
+  fw_apply || die "无法应用计数规则"
+  svc_do start sbx-panel || die "无法启动面板"
+  upgrade_health 1 1 || die "升级后服务健康检查失败"
+  install_self
+  # The EXIT handler owns backup cleanup and emits the success message.
+  UPGRADE_COMMITTED=1
 }
 
 do_install() {
@@ -2484,7 +2420,7 @@ do_install() {
 # ---------------------------------------------------------------- 入口
 main() {
   init_colors
-  # 任何状态改动之前：环境变量格式校验 + 脚本完整性自校验（若提供了哈希）。
+  # Verify the invoking script independently from its downloaded candidate.
   validate_env || exit 1
   verify_script_integrity || exit 1
   case "${1:-}" in
@@ -2493,7 +2429,18 @@ main() {
     --panel-url) panel_url; exit 0 ;;
     --show) "$CORE_BIN" show; exit 0 ;;
     --update|update|upgrade) do_update "${2:-}"; exit $? ;;
-    --apply-update) apply_update; exit $? ;;   # 内部使用：升级时由新脚本调用
+    --apply-update|--install-dist)
+      [[ -n "${SBX_SCRIPT_SHA256:-}" && -n "${2:-}" ]] || die "内部命令需要已验证的固定分发提交；请使用 --update"
+      require_root
+      detect_platform
+      set_dist_pin "$2"
+      if [[ "$1" == --apply-update ]]; then
+        sbx_lock apply_update "${3:-}"
+      else
+        [[ ! -f "$PANEL_CONF" || ! -x "$SB_BIN" ]] || die "已安装 SBX，请使用 --update"
+        do_install
+      fi
+      exit $? ;;
     --uninstall) require_root; detect_platform; uninstall_all ;;
     --version) echo "$APP_NAME v$APP_VERSION"; exit 0 ;;
     -h|--help)
@@ -2506,7 +2453,7 @@ $APP_NAME v$APP_VERSION — sing-box 节点 + 流量面板（Go 后端，单二�
 
 选项:
   --update           在线升级到最新版本（保留节点与流量历史）
-  --update --force   强制重装当前/最新版本
+  --update --force   强制重装固定分发版本
   --show             命令行查看流量统计
   --panel-url        输出面板访问地址
   --apply-firewall   重建流量计数规则
@@ -2523,7 +2470,11 @@ EOF
   if [[ -f "$PANEL_CONF" && -x "$SB_BIN" ]]; then
     main_menu
   else
-    do_install
+    if [[ -n "${SBX_CORE_BIN:-}" && -x "$SBX_CORE_BIN" && -f "${BASH_SOURCE[0]}" ]]; then
+      do_install  # local development/test installation
+    else
+      bootstrap_install
+    fi
   fi
 }
 
