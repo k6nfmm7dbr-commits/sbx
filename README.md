@@ -1,58 +1,44 @@
 # SBX
 
-sing-box 节点管理面板。节点、流量、在线 IP、限速都在网页里管。
+SBX 是 [sing-box](https://github.com/SagerNet/sing-box) 的节点管理和流量统计面板。
 
 ## 安装
 
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/main/sbx.sh)
-```
+需要 Linux、nftables（nftables-only，不回退到 iptables）和 root 权限。支持 systemd 与 OpenRC。下载命令使用 Bash、Git、curl 和 `sha256sum`；已是 root 时可省略 `sudo`。
 
-想先核对脚本再跑：
+在空目录中执行。脚本和校验和取自[公开分发仓](https://github.com/k6nfmm7dbr-commits/sbx/tree/dist)的同一个提交，校验通过才执行：
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/dist/sbx.sh
-curl -fsSLO https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/dist/sbx.sh.sha256
-sha256sum -c sbx.sh.sha256 && sudo bash sbx.sh
+repo=k6nfmm7dbr-commits/sbx
+rev=$(git ls-remote "https://github.com/$repo.git" refs/heads/dist | cut -f1)
+[[ "$rev" =~ ^[0-9a-f]{40}$ ]] &&
+  base="https://raw.githubusercontent.com/$repo/$rev" &&
+  curl -fsSLO "$base/sbx.sh" &&
+  curl -fsSLO "$base/sbx.sh.sha256" &&
+  sha256sum -c sbx.sh.sha256 &&
+  sudo env SBX_DIST_SHA="$rev" bash sbx.sh
 ```
 
-需要 root 和 nftables（nftables-only，不退回 iptables）。Debian 11+ / Ubuntu 20.04+ / RHEL 8+ / Fedora 38+ / Alpine 3.18+，x86_64、arm64 等 7 种架构。
+校验和来自同一分发仓，不是独立签名。
 
-装完敲 `sbx` 进菜单，`sbx --panel-url` 看地址。令牌在 `/etc/sbx/panel.json`。
+## 面板
 
-## 节点
+`sudo sbx` 打开管理菜单，`sudo sbx --panel-url` 查看面板地址。登录令牌在 `/etc/sbx/panel.json`，请勿分享。
 
-VLESS Reality、Shadowsocks 2022、Trojan、AnyTLS、Snell v5/v6、SOCKS5。
+新装默认监听 `0.0.0.0`，安装器自动选端口。不要直接把 HTTP 面板暴露到公网；需要远程访问时，建议将面板的 `listen` 改为 `127.0.0.1`，用 HTTPS 反向代理，并在 `panel.json` 中设 `"secure_cookie": true`。修改后重启面板服务。
 
-每个节点可单独设：暂停、在线 IP 上限、限速和访问控制。在「配置 → 访问控制」中，分别设置能访问哪些服务、允许哪些来源省份连入；支持搜索、已选项和快捷组合。普通节点编辑不再覆盖访问名单，仅改来源省份不重启节点。
+## 升级
 
-省份限制只支持 IPv4；开启后未知地区、未选地区和全部 IPv6 来源均拒绝。VPN、NAT 或中转依据服务器看到的出口 IP 判断，不代表设备所在地。服务规则的 DNS/探测兼容例外可单独开关。
+使用新版升级器时，运行 `sudo sbx --update`。升级从同一个分发提交下载并校验脚本和后端，保留节点与流量历史，期间面板和 sing-box 会短暂中断。
 
-## 命令
+**旧版一次性迁移：** 如果 `/etc/sbx/sbx.sh` 中没有 `DIST_PROTOCOL="sbx-dist-v1"`，不要用旧版 `sbx --update`。先备份 `/etc/sbx` 和 `/etc/sing-box`，再按安装步骤下载和校验，把最后的 `bash sbx.sh` 改为 `bash sbx.sh --update`，保留 `SBX_DIST_SHA`。不要手工覆盖已安装脚本。迁移成功后，后续升级使用 `sudo sbx --update`。
 
-```bash
-sbx                  # 菜单
-sbx --update         # 升级
-sbx --show           # 今日和累计流量
-sbx --uninstall      # 卸载
-sbx-core daily 30    # 最近 30 天
-```
+如果升级中断或提示无法确认回滚，保留 `/etc/sbx/.upgrade-transaction`。先核对其中的 `generation`、`paths`、`services` 和 `snapshot`，再决定恢复或继续；不要删除备份后直接重试。备份含凭据，不要公开。排查版本时看升级输出中的分发提交，不能只看 `v3.x`。
 
-## 文件
+## 卸载
 
-```text
-/etc/sbx/panel.json          面板配置
-/etc/sbx/nodes.json          节点数据
-/etc/sbx/traffic.db          流量库
-/etc/sing-box/config.json    sing-box 配置
-```
+运行 `sudo sbx --uninstall` 并确认。`/etc/sbx` 会被删除，包括节点配置和流量历史；如需保留，请先自行备份。非空的 `/etc/sing-box` 会先打包到 `/var/backups/`，备份失败则保留原目录。
 
-卸载时 `/etc/sing-box` 非空先打包到 `/var/backups/`，`/etc/sbx` 直接删。面板默认 `0.0.0.0:8080`，把 `listen`(默认 `0.0.0.0`) 改成 `127.0.0.1` 只给本机用；放公网请套 HTTPS 反代并设 `secure_cookie=true`。
+## 文档与许可
 
-## 当前版本
-
-```text
-v3.0.30
-```
-
-专有软件，保留所有权利。见 [LICENSE](LICENSE)。
+变更见 [更新日志](CHANGELOG.md)。SBX 为专有软件，见 [LICENSE](LICENSE)。省级 IPv4 数据来自 [ip2region](https://github.com/lionsoul2014/ip2region)，归属及许可见 [第三方资料说明](https://github.com/k6nfmm7dbr-commits/sbx/blob/main/THIRD_PARTY_NOTICES.md)。
