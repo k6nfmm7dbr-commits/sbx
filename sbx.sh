@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  SBX — sing-box 节点搭建 + 流量统计面板
-#  一键安装:  bash <(curl -fsSL <RAW_URL>)
+#  安装:  按项目 README 下载并校验安装器
 #  管理菜单:  sbx
 # =============================================================================
 set -Eeuo pipefail
 
 APP_NAME="SBX"
 APP_VERSION="3.0.30"
-RAW_URL="${SBX_RAW_URL:-https://raw.githubusercontent.com/k6nfmm7dbr-commits/sbx/dist/sbx.sh}"
 
 # SBX_ROOT 仅用于测试/沙箱安装（把整套目录挪到前缀下），正常安装留空
 ROOT="${SBX_ROOT:-}"
@@ -40,119 +39,170 @@ DIST_SHA=""
 DIST_BASE=""
 UNIT_DIR="$ROOT/etc/systemd/system"
 INIT_DIR="$ROOT/etc/init.d"
+CONNTRACK_SYSCTL_CONF="$ROOT/etc/sysctl.d/99-sbx-conntrack.conf"
 
 OS_FAMILY="unknown"
 INIT_SYS="unknown"
 PKG=""
 
-# >>> env-validation（CI/tests/env_validation_test.sh 提取本区块做一致性测试）
-# 环境变量格式校验（审计项「Shell 注入」）。
-#
-# 背景：安装器**全文件无 eval**，所有变量展开都带引号，用户数据不进 shell 解析
-# （外部命令一律以参数列表传入）。但 SBX_* 环境变量仍会影响行为，因此做格式
-# 白名单校验——目的不是"防 shell 注入"（没有那个入口），而是：
-#   - 让配置错误立刻失败并说清原因，而不是中途以奇怪方式出错；
-#   - 阻止控制字符/引号/反引号/换行这类会让日志与下游命令困惑的取值；
-#   - SBX_GH_PROXY 仅加速大文件下载，不承载信任锚；SHA256SUMS 与升级脚本哈希
-#     均直连官方 RAW 源，避免镜像同时替换文件与清单形成自证式校验。
-#   - 这仍依赖 GitHub 官方仓库与账号安全；若官方源被攻破，哈希校验本身无法识别，
-#     后续可通过独立签名密钥增加第二层信任锚。
+# >>> env-validation
+# 校验安装器输入，不解析 DNS，也不把镜像当作哈希信任源。
+env_valid_ipv4() {
+  local ip="$1" octet re='(0|[1-9][0-9]{0,2})'
+  [[ "$ip" =~ ^$re(\.$re){3}$ ]] || return 1
+  while :; do
+    octet="${ip%%.*}"
+    (( octet <= 255 )) || return 1
+    [[ "$ip" == *.* ]] || return 0
+    ip="${ip#*.}"
+  done
+}
+
+env_valid_ipv6() {
+  local ip="$1" left right colons group='[0-9A-Fa-f]{1,4}'
+  if [[ "$ip" == *.* ]]; then
+    [[ "$ip" == *:* ]] && env_valid_ipv4 "${ip##*:}" || return 1
+    ip="${ip%:*}:0:0"  # 末尾 IPv4 占两个 hextet
+  fi
+  if [[ "$ip" != *::* ]]; then
+    [[ "$ip" =~ ^$group(:$group){7}$ ]]
+    return
+  fi
+  left="${ip%%::*}" right="${ip#*::}"
+  [[ -z "$left" || "$left" =~ ^$group(:$group)*$ ]] || return 1
+  [[ -z "$right" || "$right" =~ ^$group(:$group)*$ ]] || return 1
+  ip="${left:+$left:}$right"
+  ip="${ip%:}"
+  colons="${ip//[^:]/}"
+  # :: 至少替代一组，最多只能显式写出七组。
+  [[ ${#colons} -lt 7 ]]
+}
+
+env_valid_https_url() {
+  local rest authority host port path
+  local authority_re='^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(:([0-9]{1,5}))?$'
+  local label='[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
+  local path_re='^([A-Za-z0-9._~/:@+,=-]|%[0-9A-Fa-f]{2})*$'
+  local unsafe_escape='%([01][0-9A-Fa-f]|7[fF]|2[5fF]|5[cC])'
+
+  [[ "$1" == [Hh][Tt][Tt][Pp][Ss]://* ]] || return 1
+  rest="${1:8}"
+  authority="${rest%%/*}" path="${rest#"$authority"}"
+  [[ "$authority" =~ $authority_re ]] || return 1
+  host="${BASH_REMATCH[1]}" port="${BASH_REMATCH[3]}"
+  [[ -z "$port" ]] || (( 10#$port >= 1 && 10#$port <= 65535 )) || return 1
+  if [[ "$host" == \[* ]]; then
+    env_valid_ipv6 "${host:1:${#host}-2}" || return 1
+  else
+    host="${host%.}"  # 支持末尾带点的全限定域名
+    [[ ${#host} -le 253 && "$host" =~ ^$label(\.$label)*$ ]] || return 1
+    if [[ "$host" =~ ^[0-9.]+$ ]]; then
+      env_valid_ipv4 "$host" || return 1
+    fi
+  fi
+
+  # 镜像需拼接路径，不接受查询/片段；拒绝编码的控制符、分隔符和 %。
+  [[ "$path" =~ $path_re && ! "$path" =~ $unsafe_escape ]] || return 1
+  path="${path//%2[eE]/.}"
+  [[ "$path/" != */../* && "$path/" != */./* ]]
+}
+
+env_valid_absolute_path() {
+  # 允许空格、普通文件名中的两个点，以及指向正常文件的系统符号链接。
+  [[ "$1" == /* && "$1" != *[[:cntrl:]]* && "$1/" != */../* ]]
+}
+
+env_valid_executable() {
+  local mode
+  env_valid_absolute_path "$1" && [[ -f "$1" && -x "$1" ]] || return 1
+  # 同时检查执行位，不能仅依赖特权进程的访问检查。
+  mode=$(stat -Lc %a -- "$1" 2>/dev/null) || return 1
+  [[ "$mode" =~ ^[0-7]{1,4}$ ]] && (( (8#$mode & 0111) != 0 ))
+}
+
 validate_env() {
-  local bad=0
+  local LC_ALL=C bad=0 var value
 
-  # SBX_GH_PROXY：必须是 http(s):// 前缀的 URL，且不含空白/控制字符/引号类字符。
-  if [[ -n "${SBX_GH_PROXY:-}" ]]; then
-    case "$SBX_GH_PROXY" in
-      *[[:space:]]*|*[\`\$\"\'\\]*|*\;*|*\|*|*\<*\>*)
-        err "SBX_GH_PROXY 含非法字符（空白/引号/反引号/美元符/分号/竖线/尖括号）"
-        bad=1 ;;
-    esac
-    if [[ "$bad" == 0 && ! "${SBX_GH_PROXY}" =~ ^https?://[^[:space:]]+$ ]]; then
-      err "SBX_GH_PROXY 必须以 http:// 或 https:// 开头，例如 https://ghfast.top/"
+  for var in SBX_GH_PROXY SBX_RAW_BASE SBX_RAW_URL; do
+    value="${!var:-}"
+    if [[ -n "$value" ]] && ! env_valid_https_url "$value"; then
+      err "$var 必须是合法 HTTPS URL，不得包含凭据、查询、片段或不安全的路径"
       bad=1
     fi
-  fi
+  done
 
-  # SBX_RAW_BASE 仅用于大文件字节流（binary），绝不作为 SHA256SUMS / sbx.sh.sha256 信任源。
-  if [[ -n "${SBX_RAW_BASE:-}" ]]; then
-    case "$SBX_RAW_BASE" in
-      *[[:space:]]*|*[\`\$\"\'\\]*|*\;*|*\|*|*\<*\>*)
-        err "SBX_RAW_BASE 含非法字符"
-        bad=1 ;;
-    esac
-    if [[ "$bad" == 0 && ! "$SBX_RAW_BASE" =~ ^https?://[^[:space:]]+$ ]]; then
-      err "SBX_RAW_BASE 必须是 http(s) URL"
-      bad=1
-    fi
-  fi
-
-  # SBX_ROOT：仅用于测试/沙箱安装的目录前缀，必须是干净的绝对路径。
-  if [[ -n "${SBX_ROOT:-}" ]]; then
-    case "$SBX_ROOT" in
-      /*) ;;
-      *) err "SBX_ROOT 必须是绝对路径（以 / 开头）: $SBX_ROOT"; bad=1 ;;
-    esac
-    if [[ "$bad" == 0 && "$SBX_ROOT" == *".."* ]]; then
-      err "SBX_ROOT 不得包含 .. : $SBX_ROOT"
-      bad=1
-    fi
-    if [[ "$bad" == 0 && ! "${SBX_ROOT}" =~ ^/[A-Za-z0-9._/-]*$ ]]; then
-      err "SBX_ROOT 含非法字符: $SBX_ROOT"
-      bad=1
-    fi
-  fi
-
-  # SBX_SCRIPT_SHA256：设置时必须是 64 位十六进制。
-  if [[ -n "${SBX_SCRIPT_SHA256:-}" && ! "${SBX_SCRIPT_SHA256}" =~ ^[0-9a-fA-F]{64}$ ]]; then
-    err "SBX_SCRIPT_SHA256 必须是 64 位十六进制 sha256"
+  # SBX_ROOT 会写入服务配置，保留更窄的字符白名单。
+  if [[ -n "${SBX_ROOT:-}" && ( ! "$SBX_ROOT" =~ ^/[A-Za-z0-9._/-]*$ || "$SBX_ROOT" == *..* || "$(readlink -f -- "$SBX_ROOT" 2>/dev/null)" == / ) ]]; then
+    err "SBX_ROOT 必须是绝对路径，只能包含字母、数字、点、下划线、连字符和斜杠，不得包含 .. 或指向 /"
     bad=1
   fi
 
-  if [[ -n "${SBX_UPDATE_SHA256:-}" && ! "$SBX_UPDATE_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]; then
-    err "SBX_UPDATE_SHA256 必须是 64 位十六进制 sha256"
-    bad=1
-  fi
-  if [[ -n "${SBX_DIST_SHA:-}" && ! "$SBX_DIST_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+  for var in SBX_SB_BIN SBX_CORE_BIN; do
+    value="${!var:-}"
+    if [[ -n "$value" ]] && ! env_valid_executable "$value"; then
+      err "$var 必须是无路径穿越的绝对路径，并指向可执行的普通文件"
+      bad=1
+    fi
+  done
+  for var in SBX_RESOLVCONF_HEAD SBX_RESOLV_CONF; do
+    value="${!var:-}"
+    # resolver 文件可能还未生成；若已存在，允许普通文件或其符号链接。
+    if [[ -n "$value" ]] && ! { env_valid_absolute_path "$value" && [[ ! -e "$value" || -f "$value" ]]; }; then
+      err "$var 必须是无路径穿越的绝对路径，且若存在须指向普通文件"
+      bad=1
+    fi
+  done
+
+  # 未设置与显式空值不同：不能因空哈希或空提交意外降级。
+  for var in SBX_SCRIPT_SHA256 SBX_UPDATE_SHA256; do
+    if [[ ${!var+x} && ! "${!var}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+      err "$var 必须是 64 位十六进制 sha256"
+      bad=1
+    fi
+  done
+  if [[ ${SBX_DIST_SHA+x} && ! "$SBX_DIST_SHA" =~ ^[0-9a-f]{40}$ ]]; then
     err "SBX_DIST_SHA 必须是 40 位小写 Git SHA"
     bad=1
   fi
 
-  # SBX_SB_VERSION：设置时必须是纯版本号（会拼进下载 URL）。
-  if [[ -n "${SBX_SB_VERSION:-}" && ! "${SBX_SB_VERSION}" =~ ^[0-9]+(\.[0-9]+)*(-[A-Za-z0-9.]+)?$ ]]; then
-    err "SBX_SB_VERSION 格式非法（应形如 1.14.0 或 1.14.3）: $SBX_SB_VERSION"
+  # SBX_SB_VERSION 的显式空值仍表示使用默认稳定版本。
+  if [[ -n "${SBX_SB_VERSION:-}" && ! "$SBX_SB_VERSION" =~ ^[0-9]+(\.[0-9]+)*(-[A-Za-z0-9.]+)?$ ]]; then
+    err "SBX_SB_VERSION 格式非法（应形如 1.14.0 或 1.14.0-rc.1）"
     bad=1
   fi
 
-  [[ "$bad" == 0 ]] || return 1
-  return 0
+  [[ "$bad" == 0 ]]
 }
 # <<< env-validation
 
 # >>> script-integrity（CI/tests/script_integrity_test.sh 提取本区块做一致性测试）
 # 脚本自校验（审计项「sbx.sh 远程脚本执行风险」）。
 #
-# 用法（README「安全安装方式」）：
-#   1) 下载脚本与官方哈希：
-#        curl -fsSLO <RAW_BASE>/sbx.sh
-#        curl -fsSLO <RAW_BASE>/sbx.sh.sha256
-#   2) 本地校验并执行：
-#        sha256sum -c sbx.sh.sha256 && bash sbx.sh
-#   3) 或者在运行本地文件时自校验：
-#        SBX_SCRIPT_SHA256=<官方公布值> bash sbx.sh
-#
-# 未提供 SBX_SCRIPT_SHA256 时保持原有的一键安装便捷性（不校验），
-# 但 README 明确标注该方式的风险，不再作为唯一推荐。
+# SBX_DIST_SHA fixes the release revision; SBX_SCRIPT_SHA256 verifies the
+# actual file being executed. Streams can bootstrap but cannot self-verify.
+# Capture the top-level source: inside a function Bash may synthesize a source
+# name for stdin, and that name differs across builds.
+sbx_script_source=${BASH_SOURCE[0]:-}
 verify_script_integrity() {
-  [[ -n "${SBX_SCRIPT_SHA256:-}" ]] || return 0
-  local want self actual
-  want="$(printf '%s' "$SBX_SCRIPT_SHA256" | tr 'A-F' 'a-f')"
-
-  # Streams cannot be replayed safely for self-verification. Download a file
-  # before invoking Bash if an independent SHA is required.
-  self="${BASH_SOURCE[0]:-$0}"
+  [[ -v SBX_SCRIPT_SHA256 ]] || return 0
+  local want self actual path
+  [[ "$SBX_SCRIPT_SHA256" =~ ^[0-9a-fA-F]{64}$ ]] || { err "SBX_SCRIPT_SHA256 必须是 64 位十六进制"; return 1; }
+  want=${SBX_SCRIPT_SHA256,,}
+  self=$sbx_script_source
+  # Reject FD/stdin even when the FD happens to reference a regular file.
+  # Checking a pipe by reopening it may consume input or block indefinitely.
+  if [[ -z "$self" || "$self" == - ]]; then
+    err "无法从 fd 或 stdin 回读脚本；请先下载到普通文件，再设置 SBX_SCRIPT_SHA256 执行"
+    return 1
+  fi
+  path=$(readlink -f -- "$self" 2>/dev/null) || path=$self
+  case "$self:$path" in
+    /dev/fd/*|/dev/stdin:*|/proc/*/fd/*|*:/dev/fd/*|*:/dev/stdin|*:/proc/*/fd/*)
+      err "无法从 fd 或 stdin 回读脚本；请先下载到普通文件，再设置 SBX_SCRIPT_SHA256 执行"
+      return 1 ;;
+  esac
   if [[ ! -f "$self" || ! -r "$self" ]]; then
-    err "无法读取自身脚本（$self）用于完整性校验"
-    err "请改用：curl -fsSLO <URL> && SBX_SCRIPT_SHA256=<哈希> bash sbx.sh"
+    err "无法回读脚本（包括 fd 或 stdin）；请先下载到可读的普通文件，再设置 SBX_SCRIPT_SHA256 执行"
     return 1
   fi
   actual="$(sha256_of "$self")" || { err "计算脚本 sha256 失败"; return 1; }
@@ -186,7 +236,7 @@ die()  { printf '%s[x]%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
 hr()   { printf '%s%s%s\n' "$C_DIM" "────────────────────────────────────────────────" "$C_RESET"; }
 
 banner() {
-  [[ -t 1 ]] && clear 2>/dev/null || true
+  if [[ -t 1 ]]; then clear 2>/dev/null || true; fi
   printf '%s%s' "$C_CYAN" "$C_B"
   cat <<'EOF'
    ___ ___  __  __
@@ -217,7 +267,7 @@ detect_platform() {
     INIT_SYS="systemd"
   elif command -v rc-update >/dev/null 2>&1; then
     INIT_SYS="openrc"
-  elif [[ -n "${SBX_NO_SERVICE:-}" ]]; then
+  elif [[ -n "$ROOT" || -n "${SBX_NO_SERVICE:-}" ]]; then
     INIT_SYS="none"
   else
     die "未找到 systemd 或 OpenRC，无法安装服务"
@@ -225,87 +275,93 @@ detect_platform() {
 }
 
 pkg_install() {
+  # 不要为了显示诊断而重跑失败的安装；直接保留包管理器的输出。
   case "$PKG" in
-    apk) apk add --no-cache "$@" >/dev/null 2>&1 || apk add --no-cache "$@" ;;
-    apt) DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" >/dev/null 2>&1 \
-         || DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" ;;
-    dnf) dnf install -y "$@" >/dev/null 2>&1 || dnf install -y "$@" ;;
-    yum) yum install -y "$@" >/dev/null 2>&1 || yum install -y "$@" ;;
+    apk) apk add --no-cache "$@" ;;
+    apt) DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" ;;
+    dnf) dnf install -y "$@" ;;
+    yum) yum install -y "$@" ;;
+    *) return 1 ;;
   esac
+}
+
+pkg_install_hint() {
+  local cmd
+  case "$PKG" in
+    apt) cmd="apt-get install -y" ;;
+    dnf) cmd="dnf install -y" ;;
+    yum) cmd="yum install -y" ;;
+    apk) cmd="apk add" ;;
+    *)   cmd="请用本发行版的包管理器安装" ;;
+  esac
+  printf '%s %s\n' "$cmd" "$*"
 }
 
 install_deps() {
   info "检查依赖..."
-  [[ "$PKG" == "apt" ]] && { apt-get update -qq >/dev/null 2>&1 || true; }
-
-  # 依赖分「必需 / 可选」两类，各自独立处理。
-  #
-  # 为什么必须分开（真实故障）：早期实现把 curl/tar/openssl/jq 混在一次
-  # `pkg_install` 调用里，任一失败就被 `set -e` 整体中断——与代码里
-  # 「jq 缺失不阻断安装」的承诺自相矛盾。真机上出现过：Debian 11（已 EOL）
-  # 的 security 源被移除，apt 装 jq 报 404，整个安装器当场退出，
-  # 用户看到的是"装个 jq 失败就装不下去了"。
-  #
-  # 包管理器安装命令（按发行版给出可照抄的下一步；内联在函数内以便
-  # tests/installer_flow_test.sh 整体提取本函数后仍可独立运行）。
-  local pm_hint
-  case "$PKG" in
-    apt) pm_hint="apt-get install -y" ;;
-    dnf) pm_hint="dnf install -y" ;;
-    yum) pm_hint="yum install -y" ;;
-    apk) pm_hint="apk add" ;;
-    *)   pm_hint="请用本发行版的包管理器安装" ;;
-  esac
+  if ! sbx_host_runtime; then
+    # A filesystem prefix is not a package or kernel namespace.
+    command -v tar >/dev/null || die "沙箱安装需要 tar（不会修改宿主机软件包）"
+    if [[ -z "${SBX_CORE_BIN:-}" || -z "${SBX_SB_BIN:-}" ]]; then
+      command -v curl >/dev/null || die "沙箱在线安装需要 curl"
+      if ! command -v sha256sum >/dev/null && ! command -v openssl >/dev/null; then
+        die "沙箱在线安装需要 sha256sum 或 openssl"
+      fi
+    fi
+    ensure_conntrack_acct
+    return 0
+  fi
+  local -a required=() missing_req=()
+  local c need_sha=0
+  for c in curl tar; do
+    command -v "$c" >/dev/null 2>&1 || required+=("$c")
+  done
+  if ! command -v sha256sum >/dev/null 2>&1 && ! command -v openssl >/dev/null 2>&1; then
+    need_sha=1
+  fi
+  # 已具备所有依赖时不刷新索引；需要安装时至多刷新一次。
+  if [[ "$PKG" == apt ]] && { ((${#required[@]} || need_sha)) ||
+      ! command -v jq >/dev/null 2>&1 || ! command -v nft >/dev/null 2>&1; }; then
+    apt-get update -qq >/dev/null 2>&1 || true  # 已有索引可能仍可用，由实际安装和复检决定
+  fi
 
   # ---- 必需依赖：缺失则无法下载/解包，装不上必须中止 ----
-  local required=()
-  command -v curl >/dev/null 2>&1 || required+=(curl)
-  command -v tar  >/dev/null 2>&1 || required+=(tar)
   if ((${#required[@]})); then
     info "安装必需依赖: ${required[*]}"
     pkg_install "${required[@]}" || true   # 失败留给下面的复检统一报错
+    for c in curl tar; do
+      command -v "$c" >/dev/null 2>&1 || missing_req+=("$c")
+    done
   fi
-  local missing_req=()
-  for c in curl tar; do
-    command -v "$c" >/dev/null 2>&1 || missing_req+=("$c")
-  done
   if ((${#missing_req[@]})); then
     err "必需依赖安装失败: ${missing_req[*]}"
-    err "请先手动安装后重试：  $pm_hint ${missing_req[*]}"
+    err "请先手动安装后重试：  $(pkg_install_hint "${missing_req[@]}")"
     err "若 apt 报 404 Not Found：该发行版很可能已 EOL、软件源被移除"
     err "（例如 Debian 11 bullseye 需把源指向 archive.debian.org 后再 update）"
     die "依赖缺失，已中止安装（未做任何改动）"
   fi
 
-  # ---- 可选依赖：缺失只降级，绝不阻断安装 ----
-  #   · jq      ：候选配置提交前的 route.final 引用完整性自检（见
-  #               sanitize_candidate_route）；缺失时自检降级为告警
-  #   · openssl ：sha256sum 不可用时的 sha256 兜底实现
-  local optional=()
-  command -v jq      >/dev/null 2>&1 || optional+=(jq)
-  command -v openssl >/dev/null 2>&1 || optional+=(openssl)
-  if ((${#optional[@]})); then
-    info "安装可选依赖: ${optional[*]}"
-    if ! pkg_install "${optional[@]}"; then
-      local still=()
-      for c in "${optional[@]}"; do
-        command -v "$c" >/dev/null 2>&1 || still+=("$c")
-      done
-      if ((${#still[@]})); then
-        warn "可选依赖未能安装: ${still[*]}（不影响安装，相关功能自动降级）"
-        warn "  常见原因：发行版已 EOL，软件源被移除（apt 报 404 Not Found）"
-        warn "  如需补装：  $pm_hint ${still[*]}"
-        warn "  已 EOL 的 Debian（如 11 bullseye）需先把源指向 archive.debian.org"
-      fi
+  # 已有 SHA-256 工具时不额外装 openssl；否则单独补齐，避免受 jq 失败影响。
+  if ! command -v sha256sum >/dev/null 2>&1 && ! command -v openssl >/dev/null 2>&1; then
+    info "安装校验工具: openssl"
+    pkg_install openssl || true
+    if ! command -v sha256sum >/dev/null 2>&1 && ! command -v openssl >/dev/null 2>&1; then
+      err "既没有 sha256sum 也没有 openssl，无法校验下载产物的完整性"
+      err "请安装 coreutils 或 openssl 后重试：  $(pkg_install_hint coreutils)"
+      die "缺少校验工具，已中止安装（未做任何改动）"
     fi
   fi
 
-  # 供应链校验能力：sha256sum 或 openssl 至少要有一个，否则无法校验下载产物。
-  # 这是 fail-closed 的硬要求——没有校验能力就绝不继续安装。
-  if ! command -v sha256sum >/dev/null 2>&1 && ! command -v openssl >/dev/null 2>&1; then
-    err "既没有 sha256sum 也没有 openssl，无法校验下载产物的完整性"
-    err "请安装 coreutils 或 openssl 后重试：  $pm_hint coreutils"
-    die "缺少校验工具，已中止安装（未做任何改动）"
+  # 正式候选配置的 route.final 引用自检需要 jq；安装失败只降级为告警。
+  if ! command -v jq >/dev/null 2>&1; then
+    info "安装可选依赖: jq"
+    pkg_install jq || true
+    if ! command -v jq >/dev/null 2>&1; then
+      warn "可选依赖未能安装: jq（不影响安装，相关功能自动降级）"
+      warn "  常见原因：发行版已 EOL，软件源被移除（apt 报 404 Not Found）"
+      warn "  如需补装：  $(pkg_install_hint jq)"
+      warn "  已 EOL 的 Debian（如 11 bullseye）需先把源指向 archive.debian.org"
+    fi
   fi
 
   # 计数/策略后端：nftables 是唯一后端（v3.0.9 起 nftables-only）。
@@ -315,20 +371,9 @@ install_deps() {
     pkg_install nftables || true
   fi
   if ! command -v nft >/dev/null 2>&1; then
-    # 安装命令按发行版给出，让用户能直接照抄（而不是只说"没找到 nft"）。
-    # 刻意内联在 install_deps 内：本函数会被 tests/installer_flow_test.sh
-    # 整体提取做隔离测试，依赖外部 helper 会导致提取后的代码不可运行。
-    local nft_hint
-    case "$PKG" in
-      apt) nft_hint="apt-get install -y nftables" ;;
-      dnf) nft_hint="dnf install -y nftables" ;;
-      yum) nft_hint="yum install -y nftables" ;;
-      apk) nft_hint="apk add nftables" ;;
-      *)   nft_hint="请用本发行版的包管理器安装 nftables" ;;
-    esac
     err "未找到 nft 命令：SBX 依赖 nftables（流量统计 / 节点暂停 / IP 限制 / 限速均由其实现）"
     err "SBX 只支持 nftables 这一种防火墙后端，不存在其它后端降级。请先安装后重试："
-    err "  $nft_hint"
+    err "  $(pkg_install_hint nftables)"
     err "  安装后确认可用：nft list tables"
     die "依赖缺失，已中止安装（未做任何改动）"
   fi
@@ -358,24 +403,28 @@ install_deps() {
 # 后端已内置降级（检测到全零则退回「ESTABLISHED 即在线」），因此这里
 # 失败只告警不阻断安装。
 ensure_conntrack_acct() {
-  local cur=""
-  cur=$(sysctl -n net.netfilter.nf_conntrack_acct 2>/dev/null || true)
-  if [[ "$cur" == "1" ]]; then
-    return 0
-  fi
-  # 模块可能尚未加载：加载失败不算错误（内核可能已内建或稍后由 nft 触发）
-  modprobe nf_conntrack 2>/dev/null || true
-  if sysctl -w net.netfilter.nf_conntrack_acct=1 >/dev/null 2>&1; then
-    info "已开启 conntrack 字节计费（nf_conntrack_acct=1）"
+  local cur="" conf="$CONNTRACK_SYSCTL_CONF"
+  if [[ -n "$ROOT" ]]; then
+    # 只生成目标目录的配置，不查询或修改当前内核。
+    mkdir -p -- "${conf%/*}" || { warn "无法创建 ${conf%/*}"; return 0; }
   else
-    warn "无法开启 nf_conntrack_acct，在线 IP 判活将降级为「ESTABLISHED 即在线」"
-    return 0
+    [[ -z "${SBX_NO_SERVICE:-}" ]] || return 0
+    cur=$(sysctl -n net.netfilter.nf_conntrack_acct 2>/dev/null || true)
+    [[ "$cur" != 1 ]] || return 0
+    # 模块可能尚未加载；内建或稍后由 nft 触发也没关系。
+    modprobe nf_conntrack 2>/dev/null || true
+    if sysctl -w net.netfilter.nf_conntrack_acct=1 >/dev/null 2>&1; then
+      info "已开启 conntrack 字节计费（nf_conntrack_acct=1）"
+    else
+      warn "无法开启 nf_conntrack_acct，在线 IP 判活将降级为「ESTABLISHED 即在线」"
+      return 0
+    fi
   fi
-  # 持久化，重启后仍生效
-  if [[ -d /etc/sysctl.d ]]; then
+  # 正常安装仍仅在发行版提供 sysctl.d 时持久化。
+  if [[ -d "${conf%/*}" ]]; then
     printf '# 由 sbx 写入：面板在线 IP/连接判活依赖 conntrack 字节计费\nnet.netfilter.nf_conntrack_acct = 1\n' \
-      > /etc/sysctl.d/99-sbx-conntrack.conf 2>/dev/null \
-      || warn "写入 /etc/sysctl.d/99-sbx-conntrack.conf 失败（重启后需手工设置）"
+      2>/dev/null > "$conf" \
+      || warn "写入 $conf 失败（重启后需手工设置）"
   fi
 }
 # <<< conntrack-acct
@@ -409,9 +458,11 @@ verify_core_checksum() {  # <binary_file> <SHA256SUMS_file> <binary_name>
     warn "SHA256SUMS 中 $name 出现 ${n} 次（应为 1 次）"
     return 1
   fi
-  expect=$(awk -v x="$name" '$2==x{print $1}' "$sums")
-  got=$(sha256_of "$f")
-  if [[ -z "$expect" || "$expect" != "$got" ]]; then
+  expect=$(awk -v x="$name" '$2==x && NF==2{print $1}' "$sums") || return 1
+  [[ "$expect" =~ ^[0-9a-fA-F]{64}$ ]] || { warn "SHA256SUMS 中 $name 的哈希格式无效"; return 1; }
+  expect=${expect,,}
+  got=$(sha256_of "$f") || { warn "计算二进制 SHA-256 失败: $f"; return 1; }
+  if [[ "$expect" != "$got" ]]; then
     warn "校验和不匹配: 期望 ${expect:-空} 实得 $got"
     return 1
   fi
@@ -446,6 +497,14 @@ core_version_of() {
 
 valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535)); }
 
+# 0 = occupied, 1 = free, 2 = unknown. Never treat failed execution as free.
+node_port_busy() {
+  local rc=0
+  [[ -x "$CORE_BIN" ]] || return 2
+  core_node port-used "$1" >/dev/null 2>&1 || rc=$?
+  case "$rc" in 0|1) return "$rc" ;; *) return 2 ;; esac
+}
+
 port_busy() {
   local p="$1"
   if command -v ss >/dev/null 2>&1; then
@@ -455,42 +514,55 @@ port_busy() {
     netstat -lnt 2>/dev/null | grep -qE "[:.]${p}[[:space:]]" && return 0
     netstat -lnu 2>/dev/null | grep -qE "[:.]${p}[[:space:]]" && return 0
   fi
-  core_node port-used "$p" >/dev/null 2>&1
+  node_port_busy "$p"
 }
 
 pick_port() {
-  local p
+  local p rc
   for _ in $(seq 1 60); do
     p=$(( (RANDOM % 40000) + 20000 ))
-    port_busy "$p" || { echo "$p"; return 0; }
+    rc=0
+    port_busy "$p" || rc=$?
+    case "$rc" in
+      1) echo "$p"; return 0 ;;
+      2) warn "无法检查端口：sbx-core 不存在或执行失败"; return 1 ;;
+    esac
   done
-  echo 34567
+  warn "未找到可用端口"
+  return 1
 }
 
 public_ip() {
-  local ip=""
+  if [[ -n "$ROOT" ]]; then printf '127.0.0.1\n'; return 0; fi
+  local ip="" u
   # 强制 IPv4：用 -4 + 纯 IPv4 探测端点，避免返回 IPv6 地址
   for u in "https://api.ipify.org" "https://ipv4.icanhazip.com" "https://ifconfig.me/ip" "https://4.ipw.cn"; do
-    ip=$(curl -4 -fsSL -m 8 "$u" 2>/dev/null | tr -d '[:space:]') || true
+    ip=$(curl -q -4 -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 2 -m 3 "$u" 2>/dev/null) || continue
+    # Remove trailing CR, not internal whitespace that would join tokens.
+    ip=${ip%$'\r'}
     # 只接受合法 IPv4
-    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && { echo "$ip"; return 0; }
+    env_valid_ipv4 "$ip" && { printf '%s\n' "$ip"; return 0; }
     ip=""
   done
   # 兜底：本机默认路由的 IPv4 源地址
   ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}') || true
-  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && { echo "$ip"; return 0; }
+  env_valid_ipv4 "$ip" && { printf '%s\n' "$ip"; return 0; }
   # 最后再试本机第一个非回环 IPv4
   ip=$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1) || true
-  echo "${ip:-127.0.0.1}"
+  env_valid_ipv4 "$ip" || ip=127.0.0.1
+  printf '%s\n' "$ip"
 }
 
 # 探测公网 IPv6：能通过 IPv6 访问外网才算"可用"，否则视为无
 public_ip6() {
-  local ip=""
+  if [[ -n "$ROOT" ]]; then echo ""; return 0; fi
+  local ip="" u
   for u in "https://api6.ipify.org" "https://ipv6.icanhazip.com" "https://6.ipw.cn"; do
-    ip=$(curl -6 -fsSL -m 8 "$u" 2>/dev/null | tr -d '[:space:]') || true
-    # 合法 IPv6：含冒号且只有十六进制/冒号，排除链路本地 fe80::
-    if [[ "$ip" == *:* && "$ip" =~ ^[0-9A-Fa-f:]+$ && "${ip,,}" != fe80:* ]]; then
+    ip=$(curl -q -6 -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 2 -m 3 "$u" 2>/dev/null) || continue
+    # Remove trailing CR, not internal whitespace that would join tokens.
+    ip=${ip%$'\r'}
+    # 必须是 IPv6 地址，并排除整个 fe80::/10 链路本地范围。
+    if env_valid_ipv6 "$ip" && [[ "${ip,,}" != fe[89ab][0-9a-f]:* ]]; then
       echo "$ip"; return 0
     fi
     ip=""
@@ -542,180 +614,230 @@ fe3620f67cac8e8d69f911116e255cb4e301fe2883cecd4b478cbe5dd97e2ba8  sing-box-1.14.
 SBHASH
 }
 
-install_sing_box() {
-  local force="${1:-}"
-  # 已安装：正常跳过。但若版本低于发布基线 SB_VERSION_DEFAULT（如老机器
-  # 停在 1.14.0-rc.1），随面板安装/升级一并把内核带上去——用户显式设置了
-  # SB_VERSION_PIN 时尊重其选择，不自动动内核。
-  if [[ -x "$SB_BIN" ]] && "$SB_BIN" version >/dev/null 2>&1; then
-    local cur_sb
-    cur_sb=$("$SB_BIN" version 2>/dev/null | awk 'NR==1{print $3}')
-    if [[ -n "$cur_sb" && -z "$force" && -z "${SB_VERSION_PIN:-}" ]] \
+# A kernel transaction owns only this attempt's backup, never a legacy .bak.
+sing_box_install_exit() {
+  local rc="$1" item rollback_ok=1
+  trap - EXIT
+  trap '' HUP INT TERM
+  if [[ "$rc" != 0 && "$replacing" == 1 ]]; then
+    for item in "${targets[@]}"; do
+      # A staged file still present was never renamed over the live pathname.
+      [[ ! -e "$txn/new/${item##*/}" ]] || continue
+      upgrade_restore_path "$txn/old/${item##*/}" "$item" || rollback_ok=0
+    done
+    if [[ "$restarting" == 1 && "$rollback_ok" == 1 ]]; then
+      if [[ "$was_active" == 1 ]]; then
+        sb_restart || rollback_ok=0
+      elif ! svc_do stop sing-box || svc_do status sing-box; then
+        rollback_ok=0
+      fi
+    fi
+    if [[ "$rollback_ok" != 1 ]]; then
+      err "无法确认 sing-box 回滚完成；保留备份：$txn/old"
+      exit "$rc"
+    fi
+    warn "已恢复 sing-box 替换前的文件及服务状态"
+  fi
+  rm -rf -- "$txn" || warn "无法清除 sing-box 工作目录：$txn"
+  exit "$rc"
+}
+
+# Mode snell also verifies Snell support and restarts the live service;
+# mode stage leaves live config/service validation to the upgrade transaction.
+install_sing_box() (
+  local force="${1:-}" mode="${2:-}" cur_sb version local_bin=""
+  # Respect an explicit pin; otherwise bring old kernels to the release baseline.
+  if [[ -x "$SB_BIN" ]] && version=$("$SB_BIN" version 2>/dev/null); then
+    version=${version%%$'\n'*}
+    read -r _ _ cur_sb _ <<< "$version"
+    if [[ -z "$force" && -z "${SB_VERSION_PIN:-}" ]] && sb_version_key "$cur_sb" >/dev/null \
        && ! sb_version_ge "$cur_sb" "$SB_VERSION_DEFAULT"; then
       info "sing-box 内核 $cur_sb 低于发布基线 $SB_VERSION_DEFAULT，自动升级..."
       force=1
     fi
     if [[ -z "$force" ]]; then
-      ok "sing-box 已安装: $("$SB_BIN" version | head -1)"
+      ok "sing-box 已安装: $version"
       return 0
     fi
-  elif [[ -z "$force" ]] && [[ -n "${SBX_SB_BIN:-}" && -x "${SBX_SB_BIN}" ]]; then
-    install -d -m 0755 "$BIN_DIR"
-    cat "$SBX_SB_BIN" > "$SB_BIN"; chmod 0755 "$SB_BIN"
-    ok "使用本地 sing-box: $("$SB_BIN" version | head -1)"
-    return 0
+  elif [[ -z "$force" && -n "${SBX_SB_BIN:-}" ]]; then
+    env_valid_executable "$SBX_SB_BIN" || die "SBX_SB_BIN 不再指向有效本地二进制"
+    local_bin="$SBX_SB_BIN"
   fi
-  local ver arch suffix tmp url name expected
-  ver="${SB_VERSION_PIN:-$SB_VERSION_DEFAULT}"
-  arch="$(sb_arch)"
-  # Alpine 用 musl 构建，其余用默认（静态）构建
-  suffix=""
-  [[ "$OS_FAMILY" == "alpine" ]] && { case "$arch" in amd64|arm64|armv7|386|riscv64) suffix="-musl";; esac; }
-  name="sing-box-${ver}-linux-${arch}${suffix}.tar.gz"
 
-  tmp=$(mktemp -d)
-  url="https://github.com/SagerNet/sing-box/releases/download/v${ver}/${name}"
-  info "下载 sing-box v${ver} (${arch}${suffix})"
-  if ! curl -fsSL -m 300 -o "$tmp/sb.tar.gz" "$(gh_url "$url")"; then
-    # musl 包不存在时退回默认包
-    if [[ -n "$suffix" ]]; then
+  local ver arch suffix tmp url name expected actual txn found lib="" item
+  if [[ -z "$local_bin" ]]; then
+    ver="${SB_VERSION_PIN:-$SB_VERSION_DEFAULT}"
+    arch=$(sb_arch) || die "无法确定 sing-box CPU 架构"
+    # Alpine 用 musl 构建，其余用默认（静态）构建。
+    suffix=""
+    [[ "$OS_FAMILY" == "alpine" ]] && { case "$arch" in amd64|arm64|armv7|386|riscv64) suffix="-musl";; esac; }
+    name="sing-box-${ver}-linux-${arch}${suffix}.tar.gz"
+    # 官方无逐文件 checksum。先查项目 pin，绝不请求未纳入校验的包。
+    expected=$(sb_expected_sha "$name") || die "无法读取 sing-box 期望哈希"
+    if [[ -n "$suffix" && -z "$expected" ]]; then
+      suffix=""
       name="sing-box-${ver}-linux-${arch}.tar.gz"
+      expected=$(sb_expected_sha "$name") || die "无法读取 sing-box 期望哈希"
+    fi
+    [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || die "sing-box ${ver} 无有效校验哈希，拒绝安装（供应链保护）；请使用默认版本或反馈维护者补充"
+  fi
+  local replacing=0 restarting=0 was_active=0
+  local -a targets=("$SB_BIN")
+  install -d -m 0755 "$BIN_DIR" || die "无法创建 sing-box 安装目录"
+  txn="$BIN_DIR/.sing-box-transaction"
+  mkdir -m 0700 -- "$txn" || die "无法创建内核升级目录（如有保留的备份，请先检查 $txn）"
+  trap 'sing_box_install_exit "$?"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  tmp="$txn/download"
+  mkdir -- "$tmp" "$txn/new" "$txn/old" || die "无法准备内核升级目录"
+
+  if [[ -n "$local_bin" ]]; then
+    warn "正在使用 SBX_SB_BIN 指定的本地 sing-box（不使用官方发行包校验）"
+    found="$local_bin"
+  else
+    url="https://github.com/SagerNet/sing-box/releases/download/v${ver}/${name}"
+    info "下载 sing-box v${ver} (${arch}${suffix})"
+    if ! curl -q --globoff -fsSL --proto =https --proto-redir =https -m 300 -o "$tmp/sb.tar.gz" "$(gh_url "$url")"; then
+      [[ -n "$suffix" ]] || die "下载 sing-box 失败，可设置 SBX_GH_PROXY 使用镜像"
+      name="sing-box-${ver}-linux-${arch}.tar.gz"
+      expected=$(sb_expected_sha "$name") || die "无法读取 sing-box 期望哈希"
+      [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || die "sing-box ${ver} 默认构建无有效校验哈希，拒绝下载"
       url="https://github.com/SagerNet/sing-box/releases/download/v${ver}/${name}"
       warn "musl 包不可用，改用默认构建"
-      curl -fsSL -m 300 -o "$tmp/sb.tar.gz" "$(gh_url "$url")" \
-        || { rm -rf "$tmp"; die "下载 sing-box 失败，可设置 SBX_GH_PROXY 使用镜像"; }
-    else
-      rm -rf "$tmp"; die "下载 sing-box 失败，可设置 SBX_GH_PROXY 使用镜像"
+      curl -q --globoff -fsSL --proto =https --proto-redir =https -m 300 -o "$tmp/sb.tar.gz" "$(gh_url "$url")" \
+        || die "下载 sing-box 失败，可设置 SBX_GH_PROXY 使用镜像"
     fi
+    if ! actual=$(sha256_of "$tmp/sb.tar.gz") || [[ "$actual" != "$expected" ]]; then
+      die "sing-box 校验失败，已中止安装"
+    fi
+    tar xzf "$tmp/sb.tar.gz" -C "$tmp" || die "解压失败"
+    found=$(find "$tmp" -type f -name sing-box -print -quit) || die "无法查找 sing-box"
+    [[ -n "$found" ]] || die "压缩包中未找到 sing-box"
+    lib=$(find "$tmp" -type f -name 'libcronet.so' -print -quit) || die "无法查找 libcronet.so"
   fi
-  # 供应链校验：sha256 必须与项目 pin 的期望一致（官方无逐文件 checksum）。
-  expected=$(sb_expected_sha "$name")
-  if [[ -z "$expected" ]]; then
-    rm -rf "$tmp"
-    die "sing-box ${ver} 无校验哈希，拒绝安装（供应链保护）；请使用默认版本或反馈维护者补充"
-  fi
-  [[ "$(sha256_of "$tmp/sb.tar.gz")" == "$expected" ]] \
-    || { rm -rf "$tmp"; die "sing-box 校验失败，已中止安装"; }
-
-  tar xzf "$tmp/sb.tar.gz" -C "$tmp" || { rm -rf "$tmp"; die "解压失败"; }
-  local found
-  found=$(find "$tmp" -type f -name sing-box | head -1)
-  [[ -n "$found" ]] || { rm -rf "$tmp"; die "压缩包中未找到 sing-box"; }
-
-  # 升级前备份旧二进制（存在时），供失败回滚
-  if [[ -x "$SB_BIN" ]]; then
-    cp -f "$SB_BIN" "$SB_BIN.bak" || { rm -rf "$tmp"; die "旧 sing-box 备份失败，已中止升级"; }
-  fi
-  install -d -m 0755 "$BIN_DIR"
-  # 原子替换（与 install_sbx_core 的 tmp+mv 同一口径）：install 原地截断写入，
-  # 中断/掉电会留下损坏的 sing-box 且 .bak 无人恢复；同目录临时文件 + rename
-  # 保证任意时刻 $SB_BIN 都是完整可执行体。失败时旧文件分毫未动。
-  local sb_tmp="$BIN_DIR/.sing-box.tmp.$$"
-  cp -f "$found" "$sb_tmp" && chmod 0755 "$sb_tmp" && mv -f "$sb_tmp" "$SB_BIN" \
-    || { rm -f "$sb_tmp"; rm -rf "$tmp"; die "sing-box 安装失败；现有安装未被改动"; }
-  # 部分构建附带 libcronet.so（NaiveProxy 用），一并放到同目录
-  local lib
-  lib=$(find "$tmp" -type f -name 'libcronet.so' | head -1)
+  install -m 0755 -- "$found" "$txn/new/${SB_BIN##*/}" || die "无法暂存新 sing-box"
   if [[ -n "$lib" ]]; then
-    install -m 0644 "$lib" "$BIN_DIR/libcronet.so" || { rm -rf "$tmp"; die "无法安装 libcronet.so"; }
+    install -m 0644 -- "$lib" "$txn/new/libcronet.so" || die "无法暂存 libcronet.so"
+    targets+=("$BIN_DIR/libcronet.so")
   fi
-  rm -rf "$tmp"
+  for item in "${targets[@]}"; do
+    if [[ -e "$item" || -L "$item" ]]; then
+      [[ -f "$item" && ! -L "$item" ]] || die "不支持以符号链接或非普通文件保存内核文件：$item"
+      cp -a -- "$item" "$txn/old/${item##*/}" || die "无法备份：$item"
+    fi
+  done
+  if [[ "$mode" == snell && -z "${SBX_NO_SERVICE:-}" ]] && svc_do status sing-box; then
+    was_active=1
+  fi
 
-  if ! "$SB_BIN" version >/dev/null 2>&1; then
-    [[ -f "$SB_BIN.bak" ]] && { mv -f "$SB_BIN.bak" "$SB_BIN"; warn "新 sing-box 异常，已回滚旧版本"; }
-    die "sing-box 无法运行（架构或 libc 不匹配）"
+  # Each file is replaced by same-filesystem rename, not truncated in place.
+  replacing=1
+  for item in "${targets[@]}"; do
+    mv -fT -- "$txn/new/${item##*/}" "$item" || die "无法替换：$item"
+  done
+  version=$("$SB_BIN" version 2>/dev/null) || die "新 sing-box 无法运行（架构或 libc 不匹配）"
+  if [[ "$mode" == snell ]] && ! sb_supports_snell "$version"; then
+    die "升级后 sing-box 仍不支持 Snell，已中止创建"
   fi
-  rm -f "$SB_BIN.bak"
-  ok "sing-box 安装完成: $("$SB_BIN" version | head -1)"
-}
+  if [[ "$mode" == snell || ( "$mode" != stage && -f "$SB_CONF" ) ]]; then
+    "$SB_BIN" check -c "$SB_CONF" >/dev/null 2>&1 || die "新 sing-box 配置校验失败（原配置未动）"
+  fi
+  if [[ "$mode" == snell && -z "${SBX_NO_SERVICE:-}" ]]; then
+    restarting=1
+    sb_restart || die "新 sing-box 服务重启失败"
+  fi
+  ok "sing-box 安装完成: ${version%%$'\n'*}"
+)
 
 # sb_supports_snell 判断当前 sing-box 是否支持 Snell（>= 1.14.0）。
 sb_supports_snell() {
-  local v
-  v=$("$SB_BIN" version 2>/dev/null | head -1 | sed -nE 's/.*version v?([0-9][0-9.]*).*/\1/p')
-  [[ -n "$v" ]] && ver_ge "$v" "1.14.0"
+  local output="${1:-}" label marker v key a b c
+  if (($# == 0)); then output=$("$SB_BIN" version 2>/dev/null) || return 1; fi
+  read -r label marker v _ <<< "$output"
+  [[ "$marker" == version ]] || return 1
+  key=$(sb_version_key "$v") || return 1
+  # Snell's existing policy compares release components, including prereleases.
+  read -r a b c _ <<< "$key"
+  (( a > 1 || (a == 1 && b >= 14) ))
 }
 
 # ---------------------------------------------------------------- sbx-core 安装
-install_sbx_core() {
-  install -d -m 0755 "$BIN_DIR"
+install_sbx_core() (
+  local arch name tmp dl cand_ver output
+  if [[ -n "${SBX_CORE_BIN:-}" ]]; then
+    env_valid_executable "$SBX_CORE_BIN" || die "SBX_CORE_BIN 不再指向有效本地二进制"
+  else
+    [[ "$DIST_SHA" =~ ^[0-9a-f]{40}$ && -n "$DIST_BASE" ]] \
+      || die "缺少固定分发提交，拒绝下载 sbx-core"
+    arch=$(sb_arch) || die "无法确定 sbx-core CPU 架构"
+    name="sbx-core-linux-${arch}"
+  fi
+  install -d -m 0755 "$BIN_DIR" || die "无法创建 sbx-core 安装目录"
+  # 私有工作目录与目标同文件系统，发布时用 rename 原子替换。
+  tmp=$(mktemp -d "$BIN_DIR/.sbx-core.XXXXXXXX") || die "无法创建 sbx-core 工作目录"
+  trap 'rm -rf -- "$tmp" || warn "无法清除 sbx-core 工作目录：$tmp"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
   # 开发/测试：直接使用本地构建的二进制
-  if [[ -n "${SBX_CORE_BIN:-}" && -x "${SBX_CORE_BIN}" ]]; then
-    cat "$SBX_CORE_BIN" > "$CORE_BIN.tmp.$$" && chmod 0755 "$CORE_BIN.tmp.$$" \
-      && mv -f "$CORE_BIN.tmp.$$" "$CORE_BIN" \
-      || die "本地 sbx-core 拷贝失败；现有安装未被改动"
+  if [[ -n "${SBX_CORE_BIN:-}" ]]; then
+    warn "正在使用 SBX_CORE_BIN 指定的本地 sbx-core（不使用官方发行包校验）"
+    if ! install -m 0755 -- "$SBX_CORE_BIN" "$tmp/sbx-core" ||
+       ! mv -fT -- "$tmp/sbx-core" "$CORE_BIN"; then
+      die "本地 sbx-core 拷贝失败；现有安装未被改动"
+    fi
     ok "使用本地 sbx-core: $("$CORE_BIN" version 2>/dev/null | head -1)"
     return 0
   fi
-  # 更新判断基于「代码内容」而非版本号：dist 是 rolling latest，版本号不随
-  # 功能递增，二进制内容会变而版本号不变。因此先取 SHA256SUMS 与本地二进制做
-  # 内容比较——一致则跳过，不一致才下载替换。绝不能用「版本号相等」判断跳过
-  # （那会导致旧二进制永远无法刷新）。
-
-  local arch name tmp dl rc=0
-  arch="$(sb_arch)"
-  name="sbx-core-linux-${arch}"
-  tmp=$(mktemp -d)
-  # 临时文件放在目标目录内：最后的 mv 是同文件系统 rename，保证原子性
-  dl="$BIN_DIR/.sbx-core.dl.$$"
-  cleanup() { rm -rf "$tmp" "$dl" 2>/dev/null || true; }
-
+  dl="$tmp/$name"
+  # dist 是 rolling latest：先取固定提交的 SHA256SUMS；内容及版本一致才跳过下载。
   # Only binary bytes can be mirrored. The official immutable manifest
   # authenticates those bytes, even if a custom mirror serves a rolling URL.
   local base="${SBX_RAW_BASE:-$DIST_BASE}"
-  [[ "$DIST_SHA" =~ ^[0-9a-f]{40}$ && -n "$DIST_BASE" ]] \
-    || { cleanup; die "缺少固定分发提交，拒绝下载 sbx-core"; }
-  curl -fsSL -m 60 -o "$tmp/SHA256SUMS" "$DIST_BASE/SHA256SUMS" \
-    || { cleanup; die "从固定官方提交下载 SHA256SUMS 失败"; }
-  if [[ -x "$CORE_BIN" ]]; then
-    local local_sum expect_sum expect_count
-    local_sum=$(sha256_of "$CORE_BIN" 2>/dev/null || true)
-    expect_sum=$(awk -v x="$name" '$2==x{print $1}' "$tmp/SHA256SUMS")
-    expect_count=$(awk -v x="$name" '$2==x{c++} END{print c+0}' "$tmp/SHA256SUMS")
-    if [[ "$expect_count" == 1 && -n "$local_sum" && "$local_sum" == "$expect_sum" ]] \
-       && [[ "$(core_version_of "$CORE_BIN")" == "$APP_VERSION" ]]; then
-      cleanup
-      ok "sbx-core 已是最新: $("$CORE_BIN" version 2>/dev/null | head -1)"
-      return 0
-    fi
+  curl -q --globoff -fsS --proto =https -m 60 -o "$tmp/SHA256SUMS" "$DIST_BASE/SHA256SUMS" \
+    || die "从固定官方提交下载 SHA256SUMS 失败"
+  if [[ -x "$CORE_BIN" ]] && verify_core_checksum "$CORE_BIN" "$tmp/SHA256SUMS" "$name" 2>/dev/null \
+     && [[ "$(core_version_of "$CORE_BIN")" == "$APP_VERSION" ]]; then
+    ok "sbx-core 已是最新: $("$CORE_BIN" version 2>/dev/null | head -1)"
+    return 0
   fi
 
-  # 内容不一致或本地缺失 → 下载完整二进制并校验替换
   info "下载 sbx-core (${arch})..."
-  curl -fsSL -m 300 -o "$dl" "$(gh_url "${base%/}/${name}")" \
-    || { cleanup; die "下载 sbx-core 失败（可设置 SBX_GH_PROXY 使用镜像）；现有安装未被改动"; }
+  curl -q --globoff -fsSL --proto =https --proto-redir =https -m 300 -o "$dl" "$(gh_url "${base%/}/${name}")" \
+    || die "下载 sbx-core 失败（可设置 SBX_GH_PROXY 使用镜像）；现有安装未被改动"
   verify_core_checksum "$dl" "$tmp/SHA256SUMS" "$name" \
-    || { cleanup; die "sbx-core 校验失败；现有安装未被改动"; }
-
-  chmod 0755 "$dl"
-  # 替换前自检 1：新二进制必须能在本机执行
-  "$dl" version >/dev/null 2>&1 \
-    || { cleanup; die "sbx-core 自检失败（架构或 libc 不匹配）；现有安装未被改动"; }
-  # 替换前自检 2：candidate 版本必须与安装器 APP_VERSION 严格一致（fail-closed）。
-  # dist 分支是 rolling latest，若 CDN 尚未刷新或发布链异常，candidate 可能是旧版本——
-  # 即使 SHA256 与 checksums 自洽也必须拒绝，防止脚本与后端版本错位。
-  local cand_ver
-  cand_ver=$(core_version_of "$dl")
+    || die "sbx-core 校验失败；现有安装未被改动"
+  chmod 0755 "$dl" || die "无法设置 sbx-core 执行权限；现有安装未被改动"
+  # 必须能执行，且 candidate 版本与安装器 APP_VERSION 严格一致。
+  cand_ver=$(core_version_of "$dl") \
+    || die "sbx-core 自检失败（架构或 libc 不匹配）；现有安装未被改动"
   if [[ "$cand_ver" != "$APP_VERSION" ]]; then
-    cleanup
     die "sbx-core 版本不匹配，已拒绝安装（现有安装未被改动）
   期望: $APP_VERSION    实际: ${cand_ver:-无法解析}
   提示: dist 分支产物可能尚未同步，请稍后重试或反馈维护者"
   fi
 
-  # 原子替换；保留旧版备份以备极端回滚（备份失败则中止，旧二进制绝不能被无备份覆盖）
+  # 备份只属于本次安装，禁止回滚至上次遗留的 .bak。
   if [[ -x "$CORE_BIN" ]]; then
-    cp -f "$CORE_BIN" "$CORE_BIN.bak" || { cleanup; die "旧 sbx-core 备份创建失败，已中止安装（现有安装未被改动）"; }
+    cp -p -- "$CORE_BIN" "$tmp/backup" || die "旧 sbx-core 备份创建失败，已中止安装（现有安装未被改动）"
   fi
-  mv -f "$dl" "$CORE_BIN" || { cleanup; die "无法替换 sbx-core"; }
-  rm -rf "$tmp"
-  if ! "$CORE_BIN" version >/dev/null 2>&1; then
-    [[ -f "$CORE_BIN.bak" ]] && { mv -f "$CORE_BIN.bak" "$CORE_BIN"; warn "新二进制异常，已回滚"; }
+  mv -fT -- "$dl" "$CORE_BIN" || die "无法替换 sbx-core"
+  if ! output=$("$CORE_BIN" version 2>/dev/null); then
+    if [[ -f "$tmp/backup" ]]; then
+      if mv -fT -- "$tmp/backup" "$CORE_BIN"; then
+        warn "新二进制异常，已回滚"
+      else
+        trap - EXIT
+        err "无法恢复旧 sbx-core；保留备份：$tmp/backup"
+      fi
+    fi
     die "sbx-core 安装后自检失败"
   fi
-  rm -f "$CORE_BIN.bak"
-  ok "sbx-core 安装完成: $("$CORE_BIN" version | head -1)"
-}
+  ok "sbx-core 安装完成: ${output%%$'\n'*}"
+)
 
 # ---------------------------------------------------------------- 目录与基础配置
 prepare_dirs() {
@@ -755,6 +877,7 @@ EOF
 }
 
 ensure_panel_conf() {
+  [[ ! -L "$PANEL_CONF" ]] || { err "拒绝使用符号链接作为面板配置"; return 1; }
   if [[ -f "$PANEL_CONF" ]]; then
     # 保留/补齐面板查看令牌（由 sbx-core 原子写回）。
     # 配置存在但损坏时 config-ensure-token 会 fail-closed——
@@ -770,31 +893,42 @@ ensure_panel_conf() {
     # 用户自定义键一律原样保留；失败只告警——废弃键存在不影响新版运行。
     "$CORE_BIN" config-migrate >/dev/null 2>&1 \
       || warn "清理废弃配置键失败（不影响运行，可稍后手工执行 sbx-core config-migrate）"
-    chmod 600 "$PANEL_CONF"
+    chmod 600 "$PANEL_CONF" || { err "无法限制面板配置权限"; return 1; }
     return 0
   fi
-  local token port
-  token=$(rand_hex 16)
-  port=$(pick_port)
-  # 先以 0600 预创建（不受 umask 影响），避免含 token 的内容出现短暂暴露窗口
-  install -m 0600 /dev/null "$PANEL_CONF"
-  # listen 默认 0.0.0.0（与 internal/config 的 defaultConf() 一致）：面板自带
-  # 随机强令牌认证。明文 HTTP 下 Cookie 携带令牌，公网部署建议在「面板设置」
-  # 切回 127.0.0.1 并配置 HTTPS 反代，或启用 secure_cookie。
-  cat > "$PANEL_CONF" <<EOF
-{
-  "db": "$APP_DIR/traffic.db",
-  "nodes_file": "$NODES_JSON",
-  "nft_conf": "$APP_DIR/nft.conf",
-  "web_root": "$WEB_DIR",
-  "listen": "0.0.0.0",
-  "port": $port,
-  "token": "$token",
-  "interval": 2,
-  "tz": "Asia/Shanghai"
-}
-EOF
-  chmod 600 "$PANEL_CONF"
+  local port
+  [[ ! -e "$PANEL_CONF" && ! -L "$PANEL_CONF" ]] || { err "面板配置路径不是普通文件"; return 1; }
+  port=$(pick_port) || { err "无法分配面板端口"; return 1; }
+  if [[ ! "$port" =~ ^[0-9]{1,5}$ ]] || ((10#$port < 1 || 10#$port > 65535)); then
+    err "面板端口必须为 1–65535 的整数"
+    return 1
+  fi
+  port=$((10#$port))
+  # jq is optional: without it, the existing backend marshals its defaults.
+  # Generate the token via the backend in either case, never in process argv.
+  (
+    umask 077
+    local stage conf
+    stage=$(mktemp -d "${PANEL_CONF%/*}/.panel-config.XXXXXXXX") || exit 1
+    trap 'rm -rf -- "$stage"' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    conf="$stage/panel.json"
+    export SBX_CONF="$conf"
+    if command -v jq >/dev/null 2>&1; then
+      jq -n --arg db "$APP_DIR/traffic.db" --arg nodes "$NODES_JSON" \
+        --arg nft "$APP_DIR/nft.conf" --arg web "${WEB_DIR:-$APP_DIR/web}" --argjson port "$port" \
+        '{db:$db,nodes_file:$nodes,nft_conf:$nft,web_root:$web,listen:"0.0.0.0",port:$port,interval:2,tz:"Asia/Shanghai"}' > "$conf" || exit 1
+      [[ -s "$conf" ]] || exit 1
+    else
+      "$CORE_BIN" config-set port "$port" >/dev/null || exit 1
+    fi
+    "$CORE_BIN" config-ensure-token >/dev/null || exit 1
+    chmod 600 "$conf" || exit 1
+    # Publish the finished file without overwriting anything created concurrently.
+    ln -T -- "$conf" "$PANEL_CONF" || exit 1
+  ) || { err "无法安全创建面板配置；未覆盖原文件"; return 1; }
   ok "面板配置已生成（端口 $port）"
 }
 
@@ -802,9 +936,15 @@ panel_get() { "$CORE_BIN" config-get "$1"; }
 panel_set() { "$CORE_BIN" config-set "$1" "$2"; }
 
 # ---------------------------------------------------------------- 服务管理
+sbx_host_runtime() { [[ -z "${ROOT:-}" && -z "${SBX_NO_SERVICE:-}" ]]; }
+
 svc_do() {  # svc_do <start|stop|restart|enable|status> <name>
   local action="$1" name="$2"
-  [[ -n "${SBX_NO_SERVICE:-}" ]] && return 0
+  if ! sbx_host_runtime; then
+    # 沙箱中没有运行的服务；变更服务状态的操作是空操作。
+    [[ -z "${ROOT:-}" || "$action" != status ]]
+    return $?
+  fi
   case "$INIT_SYS" in
     systemd)
       case "$action" in
@@ -835,25 +975,62 @@ sb_restart() {
 # ---------------------------------------------------------------- 证书
 ensure_certs() {
   local sni="${1:-www.bing.com}"
-  [[ -s "$CERT_DIR/cert.pem" && -s "$CERT_DIR/key.pem" ]] && return 0
-  info "生成自签证书 (CN=$sni)"
-  local out
-  out=$("$SB_BIN" generate tls-keypair "$sni" -m 1200 2>/dev/null) || die "生成证书失败"
-  # awk 拆分 PEM 块
-  printf '%s\n' "$out" | awk '
-    /-----BEGIN CERTIFICATE-----/ {inc=1}
-    inc {print > "'"$CERT_DIR"'/cert.pem.part"}
-    /-----END CERTIFICATE-----/ {inc=0}
-    /-----BEGIN PRIVATE KEY-----/ {ink=1}
-    ink {print > "'"$CERT_DIR"'/key.pem.part"}
-    /-----END PRIVATE KEY-----/ {ink=0}
-  '
-  [[ -s "$CERT_DIR/cert.pem.part" && -s "$CERT_DIR/key.pem.part" ]] \
-    || die "证书解析失败"
-  mv -f "$CERT_DIR/cert.pem.part" "$CERT_DIR/cert.pem"
-  mv -f "$CERT_DIR/key.pem.part" "$CERT_DIR/key.pem"
-  chmod 600 "$CERT_DIR/key.pem"; chmod 644 "$CERT_DIR/cert.pem"
-  ok "证书就绪"
+  local cert="$CERT_DIR/cert.pem" key="$CERT_DIR/key.pem" mode tmp first second
+  # 已有密钥也要校验，且不能 chmod 符号链接指向的文件。
+  [[ -d "$CERT_DIR" && ! -L "$CERT_DIR" && -O "$CERT_DIR" ]] \
+    || die "证书目录无效：$CERT_DIR"
+  mode=$(stat -c %a -- "$CERT_DIR") || die "无法检查证书目录权限"
+  if ! [[ "$mode" =~ ^[0-7]{3,4}$ ]] || (( 8#$mode & 022 )); then
+    die "证书目录不能由组或其他用户写入：$CERT_DIR"
+  fi
+  (
+    umask 077 || die "无法设置证书生成权限掩码"
+    # 用目录本身加锁，不创建可被替换的锁文件；两个 PEM 需成对生成。
+    exec 8<"$CERT_DIR" || die "无法打开证书目录"
+    flock -x 8 || die "无法锁定证书目录"
+    local item
+    for item in "$cert" "$key"; do
+      [[ ! -L "$item" && ( ! -e "$item" || -f "$item" ) ]] \
+        || die "证书文件路径无效：$item"
+    done
+    if [[ -f "$key" ]]; then
+      chmod 600 -- "$key" && [[ $(stat -c %a -- "$key") == 600 ]] \
+        || die "无法将现有私钥权限设为 600：$key"
+    fi
+    [[ -s "$cert" && -s "$key" ]] && exit 0
+
+    info "生成自签证书 (CN=$sni)"
+    tmp=$(mktemp -d -- "$CERT_DIR/.sbx-certs.XXXXXXXX") || die "无法创建证书暂存目录"
+    trap 'rm -rf -- "$tmp" || warn "无法清理证书暂存目录：$tmp"' EXIT
+    trap 'exit 1' HUP INT TERM
+    # 先验证空文件的权限，再写入 PEM。私钥也不经过 shell 变量。
+    touch -- "$tmp/cert.pem" "$tmp/key.pem" \
+      && chmod 600 -- "$tmp/key.pem" && [[ $(stat -c %a -- "$tmp/key.pem") == 600 ]] \
+      || die "无法安全暂存私钥（需要权限 600）"
+    set -o pipefail
+    if ! "$SB_BIN" generate tls-keypair "$sni" -m 1200 2>/dev/null | (
+      cd -- "$tmp" || exit 1
+      awk '
+        /-----BEGIN CERTIFICATE-----/ {inc=1}
+        inc {print > "cert.pem"}
+        /-----END CERTIFICATE-----/ && inc {inc=0; cert=1}
+        /-----BEGIN PRIVATE KEY-----/ {ink=1}
+        ink {print > "key.pem"}
+        /-----END PRIVATE KEY-----/ && ink {ink=0; key=1}
+        END {if (!cert || !key || inc || ink) exit 1}
+      '
+    ); then
+      die "证书生成或 PEM 解析失败"
+    fi
+    [[ -s "$tmp/cert.pem" && -s "$tmp/key.pem" ]] || die "证书或私钥为空"
+    chmod 644 -- "$tmp/cert.pem" || die "无法设置公开证书权限"
+    # 最后替换原先缺失/为空的文件，第二次移动失败时不会误认成一对可用证书。
+    first=cert.pem second=key.pem
+    if [[ -s "$key" ]]; then first=key.pem second=cert.pem; fi
+    mv -fT -- "$tmp/$first" "$CERT_DIR/$first" \
+      && mv -fT -- "$tmp/$second" "$CERT_DIR/$second" || die "无法安装证书或私钥"
+    ok "证书就绪"
+  ) || exit 1
 }
 
 # ---------------------------------------------------------------- 旧版残留清理
@@ -873,11 +1050,15 @@ ensure_certs() {
 cleanup_legacy_backend() {
   # 1) 旧版生成的 iptables 规则脚本（只删 SBX 自己的路径，不扫描其它目录）
   if [[ -f "$APP_DIR/iptables.sh" ]]; then
-    rm -f "$APP_DIR/iptables.sh" \
-      && info "已删除旧版残留文件 $APP_DIR/iptables.sh" \
-      || warn "删除 $APP_DIR/iptables.sh 失败（可手工删除）"
+    if rm -f "$APP_DIR/iptables.sh"; then
+      info "已删除旧版残留文件 $APP_DIR/iptables.sh"
+    else
+      warn "删除 $APP_DIR/iptables.sh 失败（可手工删除）"
+    fi
   fi
 
+  # 前缀不隔离网络命名空间，不能清理当前内核里的链。
+  [[ -z "${ROOT:-}" && -z "${SBX_NO_SERVICE:-}" ]] || return 0
   # 2) 旧版创建的自定义计数链（v4/v6 各一套）
   local bin found=0
   for bin in iptables ip6tables; do
@@ -905,6 +1086,7 @@ cleanup_legacy_backend() {
 
 # ---------------------------------------------------------------- 流量规则
 fw_apply() {
+  sbx_host_runtime || return 0
   # apply 失败必须向上传递：不能 warn（rc=0）把失败伪装成成功
   if "$CORE_BIN" apply; then
     return 0
@@ -919,15 +1101,23 @@ fw_clear() {
 
 # ---------------------------------------------------------------- 添加节点
 prompt_port() {
-  local label="$1" def="$2" p
+  local label="$1" def="$2" p rc
   while :; do
     printf '%s端口 (%s，回车用 %s，q 取消): %s' "$C_DIM" "$label" "$def" "$C_RESET" >&2
     read -r p || { echo; return 1; }
     [[ "$p" == "q" || "$p" == "Q" ]] && { echo; return 1; }
     p="${p:-$def}"
     if ! valid_port "$p"; then warn "端口需在 1-65535"; continue; fi
-    if core_node port-used "$p" >/dev/null 2>&1; then warn "端口 $p 已被其它节点使用"; continue; fi
-    if port_busy "$p"; then
+    rc=0
+    node_port_busy "$p" || rc=$?
+    case "$rc" in
+      0) warn "端口 $p 已被其它节点使用"; continue ;;
+      2) warn "无法检查端口：sbx-core 不存在或执行失败"; return 1 ;;
+    esac
+    rc=0
+    port_busy "$p" || rc=$?
+    if [[ "$rc" == 2 ]]; then warn "无法检查端口 $p"; return 1; fi
+    if [[ "$rc" == 0 ]]; then
       printf '%s端口 %s 已被系统其它进程监听，仍要使用? [y/N] %s' "$C_YEL" "$p" "$C_RESET" >&2
       read -r yn || true
       [[ "${yn,,}" == "y" ]] || continue
@@ -944,13 +1134,18 @@ prompt_name() {
   echo "${n:-$def}"
 }
 
+sbx_valid_sni() {
+  local LC_ALL=C label='[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
+  [[ ${#1} -le 253 && "$1" =~ ^$label(\.$label)*\.[A-Za-z]{2,63}$ ]]
+}
+
 prompt_sni() {
   local def="${1:-www.microsoft.com}" s
   printf '%s伪装域名 SNI (回车用 %s，q 取消): %s' "$C_DIM" "$def" "$C_RESET" >&2
   read -r s || { echo; return 1; }
   [[ "$s" == "q" || "$s" == "Q" ]] && { echo; return 1; }
   s="${s:-$def}"
-  [[ "$s" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || { warn "域名格式无效，使用 $def"; s="$def"; }
+  sbx_valid_sni "$s" || { warn "域名格式无效，使用 $def"; s="$def"; }
   echo "$s"
 }
 
@@ -976,14 +1171,14 @@ prompt_ss2022_method() {
 # 覆盖「生成 candidate → 校验 → 备份 → 提交 → 重启 → fw_apply」整个事务，
 # 防止两个 SSH 同时 node add/edit/remove/sync 产生 lost update / 重复 ID /
 # candidate 串写。锁文件默认 /run/lock（tmpfs，重启清空），测试可经 SBX_LOCK 覆盖。
-SBX_LOCK="${SBX_LOCK:-/run/lock/sbx.lock}"
+export SBX_LOCK="${SBX_LOCK:-$ROOT/run/lock/sbx.lock}"
 
 # sbx_lock <func> [args...]：在排他锁内执行函数；获取失败报错并返回非 0。
 sbx_lock() {
   mkdir -p "$(dirname "$SBX_LOCK")" 2>/dev/null || true
   (
     command -v flock >/dev/null || die "缺少 flock；请先安装提供 flock 的软件包"
-    flock 9 || { err "检测到另一个 sbx 节点操作正在进行，请稍后重试"; exit 75; }
+    flock -n 9 || { err "检测到另一个 sbx 节点操作正在进行，请稍后重试"; exit 75; }
     # 告知 sbx-core 本进程已持锁，Go 侧跳过自锁（否则会对自己死锁等待）
     export SBX_LOCK SBX_LOCK_HELD=1
     "$@"
@@ -1001,11 +1196,13 @@ sbx_lock() {
 #   暴露 —— 表现为"配置校验通过但 sing-box 启动失败"并触发整体回滚，节点永远加不上。
 #   这里在提交前把 final 校正为真实存在的 direct 出站 tag（没有可用 direct 出站时
 #   删除 final，交回 sing-box 自身默认行为）。
-# 约束：纯读改候选文件，绝不触碰正式配置；jq 缺失或任何异常都只告警并放行，
-#       让后续 check/restart/回滚链路照原样兜底（fail-open：不比修复前更糟）。
+# jq 不可用时交由后端的强制校验；已执行的检查或安全写入失败则中止提交。
 sanitize_candidate_route() {
-  local cand="$1" verb tag tmp
-  [[ -f "$cand" ]] || return 0
+  local cand="$1" verb tag parent mode tmp
+  if [[ -L "$cand" || ! -f "$cand" ]]; then
+    warn "候选配置不是普通文件，已拒绝提交"
+    return 1
+  fi
   command -v jq >/dev/null 2>&1 || {
     warn "未找到 jq，跳过候选配置 route.final 引用自检"
     return 0
@@ -1019,30 +1216,48 @@ sanitize_candidate_route() {
       elif (($obs | map(select(.type? == "direct")) | first | .tag?) // null) != null then "set"
       else "del" end
   ' "$cand" 2>/dev/null) || {
-    warn "候选配置 route.final 自检失败（JSON 解析异常），已跳过自检"
-    return 0
+    warn "候选配置 route.final 自检失败（JSON 解析异常），已拒绝提交"
+    return 1
   }
   case "$verb" in
     ok) return 0 ;;
     set|del) ;;
-    *) warn "候选配置 route.final 自检结果异常，已跳过自检"; return 0 ;;
+    *) warn "候选配置 route.final 自检结果异常，已拒绝提交"; return 1 ;;
   esac
-  # 阶段二：确实存在悬空引用才改写候选文件（正式配置始终不受影响）
-  tmp="$cand.route-fix"
-  if ! jq '
-      (.outbounds // []) as $obs
-    | (($obs | map(select(.type? == "direct")) | first | .tag?) // null) as $d
-    | if $d != null then .route.final = $d else del(.route.final) end
-  ' "$cand" > "$tmp" 2>/dev/null; then
-    rm -f "$tmp"
-    warn "候选配置 route.final 改写失败，已跳过自检"
-    return 0
+  # 同目录暂存以便用已验证权限的文件原子替换；任何失败都保留原候选配置。
+  if ! (
+    umask 077 || { warn "无法设置候选配置权限掩码"; exit 1; }
+    if ! parent=$(dirname -- "$cand") || [[ ! -O "$parent" || -L "$parent" ]] \
+      || ! mode=$(stat -c %a -- "$parent") || [[ ! "$mode" =~ ^[0-7]{3,4}$ ]] \
+      || (( 8#$mode & 022 )); then
+      warn "候选配置目录权限不安全，已跳过自检"
+      exit 1
+    fi
+    tmp=$(mktemp -d -- "$parent/.sbx-route.XXXXXXXX") \
+      || { warn "无法创建候选配置暂存目录，已跳过自检"; exit 1; }
+    trap 'rm -rf -- "$tmp" || warn "无法清理候选配置暂存目录：$tmp"' EXIT
+    trap 'exit 1' HUP INT TERM
+    if ! touch -- "$tmp/config" || ! chmod 600 -- "$tmp/config" \
+      || [[ $(stat -c %a -- "$tmp/config") != 600 ]]; then
+      warn "无法安全暂存候选配置（需要权限 600），已跳过自检"
+      exit 1
+    fi
+    if ! jq '
+        (.outbounds // []) as $obs
+      | (($obs | map(select(.type? == "direct")) | first | .tag?) // null) as $d
+      | if $d != null then .route.final = $d else del(.route.final) end
+    ' "$cand" > "$tmp/config" 2>/dev/null; then
+      warn "候选配置 route.final 改写失败，已跳过自检"
+      exit 1
+    fi
+    [[ -s "$tmp/config" ]] || { warn "候选配置 route.final 改写结果为空，已跳过自检"; exit 1; }
+    mv -fT -- "$tmp/config" "$cand" \
+      || { warn "候选配置 route.final 写回失败，已跳过自检"; exit 1; }
+  ); then
+    return 1
   fi
-  [[ -s "$tmp" ]] || { rm -f "$tmp"; warn "候选配置 route.final 改写结果为空，已跳过自检"; return 0; }
-  chmod 600 "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$cand" || { rm -f "$tmp"; warn "候选配置 route.final 写回失败，已跳过自检"; return 0; }
   if [[ "$verb" == "set" ]]; then
-    tag=$(jq -r '.route.final // "?"' "$cand" 2>/dev/null)
+    tag=$(jq -r '.route.final // "?"' "$cand" 2>/dev/null) || tag="?"
     info "已校正候选配置 route.final → ${tag}（原值指向不存在的出站 tag）"
   else
     info "已移除候选配置悬空的 route.final（无可用 direct 出站）"
@@ -1051,32 +1266,42 @@ sanitize_candidate_route() {
 }
 
 commit_node() {
+  if ! sbx_host_runtime; then
+    warn "沙箱或仅配置模式不提交会触及宿主机的节点事务"
+    return 1
+  fi
   # Preparation and commit share FD 9. The backend owns validation, access
   # isolation, transactional backups, sing-box restart and recovery.
-  if [[ -f "$SB_CONF.candidate" ]]; then
-    sanitize_candidate_route "$SB_CONF.candidate"
+  if [[ -e "$SB_CONF.candidate" || -L "$SB_CONF.candidate" ]]; then
+    sanitize_candidate_route "$SB_CONF.candidate" || return 1
   fi
   core_node commit
 }
 # <<< commit-node-flow
+
+sbx_add_node_commit() {
+  local label="$1" rc=0
+  shift
+  sbx_lock "$@" || rc=$?
+  case "$rc" in
+    0) ok "$label 节点已添加"; show_links_for_last ;;
+    2) warn "节点已创建，但流量统计规则应用失败"; show_links_for_last ;;
+    *) warn "节点添加失败" ;;
+  esac
+}
 
 add_vless() {
   local port name sni uuid kp priv pub sid
   port=$(prompt_port "VLESS Reality" 443) || return 0
   name=$(prompt_name "vless-$port") || return 0
   sni=$(prompt_sni www.microsoft.com) || return 0
-  uuid=$(rand_uuid)
-  kp=$("$SB_BIN" generate reality-keypair)
+  uuid=$(rand_uuid) || { warn "生成 UUID 失败"; return 1; }
+  kp=$("$SB_BIN" generate reality-keypair) || { warn "生成 Reality 密钥失败"; return 1; }
   priv=$(echo "$kp" | awk '/PrivateKey/{print $2}')
   pub=$(echo "$kp" | awk '/PublicKey/{print $2}')
-  sid=$(rand_hex 8)
-  sbx_lock do_add_vless "$port" "$name" "$sni" "$uuid" "$priv" "$pub" "$sid"
-  local rc=$?
-  case $rc in
-    0) ok "VLESS Reality 节点已添加"; show_links_for_last ;;
-    2) warn "节点已创建，但流量统计规则应用失败"; show_links_for_last ;;
-    *) warn "节点添加失败" ;;
-  esac
+  [[ -n "$priv" && -n "$pub" ]] || { warn "Reality 密钥输出无效"; return 1; }
+  sid=$(rand_hex 8) || { warn "生成 Short ID 失败"; return 1; }
+  sbx_add_node_commit "VLESS Reality" do_add_vless "$port" "$name" "$sni" "$uuid" "$priv" "$pub" "$sid"
 }
 do_add_vless() {
   core_node add vless --port="$1" --name="$2" --uuid="$4" --sni="$3" \
@@ -1087,16 +1312,12 @@ do_add_vless() {
 add_ss() {
   local port name method pw
   method=$(prompt_ss2022_method) || return 0
-  port=$(prompt_port "Shadowsocks 2022" "$(pick_port)") || return 0
+  local default_port
+  default_port=$(pick_port) || return 1
+  port=$(prompt_port "Shadowsocks 2022" "$default_port") || return 0
   name=$(prompt_name "ss-$port") || return 0
   pw=$(core_node ss2022-key --method="$method") || { warn "生成 Shadowsocks 2022 密钥失败"; return 1; }
-  sbx_lock do_add_ss "$port" "$name" "$method" "$pw"
-  local rc=$?
-  case $rc in
-    0) ok "Shadowsocks 2022 节点已添加"; show_links_for_last ;;
-    2) warn "节点已创建，但流量统计规则应用失败"; show_links_for_last ;;
-    *) warn "节点添加失败" ;;
-  esac
+  sbx_add_node_commit "Shadowsocks 2022" do_add_ss "$port" "$name" "$method" "$pw"
 }
 do_add_ss() {
   core_node add shadowsocks --port="$1" --name="$2" --method="$3" --password="$4" >/dev/null || return 1
@@ -1110,13 +1331,7 @@ add_trojan() {
   sni=$(prompt_sni www.bing.com) || return 0
   ensure_certs "$sni"
   pw=$(rand_hex 12)
-  sbx_lock do_add_trojan "$port" "$name" "$sni" "$pw"
-  local rc=$?
-  case $rc in
-    0) ok "Trojan 节点已添加"; show_links_for_last ;;
-    2) warn "节点已创建，但流量统计规则应用失败"; show_links_for_last ;;
-    *) warn "节点添加失败" ;;
-  esac
+  sbx_add_node_commit "Trojan" do_add_trojan "$port" "$name" "$sni" "$pw"
 }
 do_add_trojan() {
   core_node add trojan --port="$1" --name="$2" --password="$4" --sni="$3" >/dev/null || return 1
@@ -1125,18 +1340,14 @@ do_add_trojan() {
 
 add_anytls() {
   local port name sni pw
-  port=$(prompt_port "AnyTLS" "$(pick_port)") || return 0
+  local default_port
+  default_port=$(pick_port) || return 1
+  port=$(prompt_port "AnyTLS" "$default_port") || return 0
   name=$(prompt_name "anytls-$port") || return 0
   sni=$(prompt_sni www.bing.com) || return 0
   ensure_certs "$sni"
   pw=$(rand_hex 12)
-  sbx_lock do_add_anytls "$port" "$name" "$sni" "$pw"
-  local rc=$?
-  case $rc in
-    0) ok "AnyTLS 节点已添加"; show_links_for_last ;;
-    2) warn "节点已创建，但流量统计规则应用失败"; show_links_for_last ;;
-    *) warn "节点添加失败" ;;
-  esac
+  sbx_add_node_commit "AnyTLS" do_add_anytls "$port" "$name" "$sni" "$pw"
 }
 do_add_anytls() {
   core_node add anytls --port="$1" --name="$2" --password="$4" --sni="$3" >/dev/null || return 1
@@ -1150,23 +1361,16 @@ add_snell() {
   if ! sb_supports_snell; then
     warn "当前 sing-box 版本不支持 Snell，Snell 需要 sing-box >= 1.14.0"
     info "正在按现有机制升级 sing-box 内核……"
-    if ! install_sing_box force; then
+    if ! sbx_lock install_sing_box force snell; then
       err "sing-box 内核升级失败，已中止创建 Snell"
       return 1
     fi
-    # 升级后校验：配置通过 + 服务真实运行
-    "$SB_BIN" check -c "$SB_CONF" >/dev/null 2>&1 \
-      || { err "升级后配置校验失败，已中止创建 Snell（原配置未动）"; return 1; }
-    if ! svc_do restart sing-box; then
-      err "升级后 sing-box 服务启动失败，已中止创建 Snell"
-      return 1
-    fi
-    sb_supports_snell || { err "升级后 sing-box 仍不支持 Snell，已中止创建"; return 1; }
-    ok "sing-box 已升级到 $("$SB_BIN" version | head -1)"
   fi
 
   local port name psk extra
-  port=$(prompt_port "Snell v$ver" "$(pick_port)") || return 0
+  local default_port
+  default_port=$(pick_port) || return 1
+  port=$(prompt_port "Snell v$ver" "$default_port") || return 0
   name=$(prompt_name "snell-v$ver-$port") || return 0
   psk=$("$CORE_BIN" secret hex 32) || { warn "生成 PSK 失败"; return 1; }
   extra=()
@@ -1176,13 +1380,7 @@ add_snell() {
     extra=(--mode="default")
   fi
 
-  sbx_lock do_add_snell "$ver" "$port" "$name" "$psk" "${extra[@]}"
-  local rc=$?
-  case $rc in
-    0) ok "Snell v$ver 节点已添加"; show_links_for_last ;;
-    2) warn "节点已创建，但流量统计规则应用失败"; show_links_for_last ;;
-    *) warn "节点添加失败" ;;
-  esac
+  sbx_add_node_commit "Snell v$ver" do_add_snell "$ver" "$port" "$name" "$psk" "${extra[@]}"
 }
 do_add_snell() {
   local ver="$1" port="$2" name="$3" psk="$4"; shift 4
@@ -1225,24 +1423,36 @@ show_links_for_last() {
 #     绝不删真正的 nameserver 行（那会直接断网）；
 #   · 只改符号链接指向的真实文件（sed -i 直接作用在 /etc/resolv.conf 这个
 #     符号链接上会把链接替换成普通文件，破坏 resolvconf 的托管）。
+# 在沙箱中，不跟随指向前缀以外的 resolver 链接，也不修改前缀外的覆盖路径。
+sbx_sandbox_resolver_path() {
+  local base real
+  base=$(readlink -f -- "$ROOT") && [[ "$base" != / ]] || return 1
+  real=$(readlink -f -- "$1") && [[ "$real" == "$base/"* && -f "$real" ]] || return 1
+  printf '%s\n' "$real"
+}
+
 fix_resolv_conf_misdetection() {
-  # systemd-resolved 正在运行 → 不做任何改动
-  if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+  # 正常安装时，systemd-resolved 正在运行 → 不做任何改动。
+  if [[ -z "${ROOT:-}" && -z "${SBX_NO_SERVICE:-}" ]] \
+    && command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
     return 0
   fi
 
-  # 路径可用环境变量覆盖：测试需要在临时目录上验证，且 CI 不能碰真实 /etc。
-  # 生产默认值即真实路径，不设这些变量时行为完全一致。
-  local fixed=0 head="${SBX_RESOLVCONF_HEAD:-/etc/resolvconf/resolv.conf.d/head}"
-  local resolv="${SBX_RESOLV_CONF:-/etc/resolv.conf}"
+  local fixed=0 head="${SBX_RESOLVCONF_HEAD:-${ROOT:-}/etc/resolvconf/resolv.conf.d/head}"
+  local resolv="${SBX_RESOLV_CONF:-${ROOT:-}/etc/resolv.conf}" real
+  if [[ -n "${ROOT:-}" ]]; then
+    head=$(sbx_sandbox_resolver_path "$head" 2>/dev/null) || head=""
+    real=$(sbx_sandbox_resolver_path "$resolv" 2>/dev/null) || real=""
+  else
+    # 当前生效的文件：跟随符号链接改真实文件。
+    real="$(readlink -f "$resolv" 2>/dev/null || true)"
+    [[ -n "$real" && -f "$real" ]] || real="$resolv"
+  fi
   # 1) 源头：resolvconf 的 head 模板（改了它，重启/网络变化后也不会再生成回来）
   if [[ -f "$head" ]] && grep -q '127\.0\.0\.53' "$head"; then
     sed -i '/127\.0\.0\.53/d' "$head" && fixed=1
   fi
-  # 2) 当前生效的文件：跟随符号链接改真实文件
-  local real
-  real="$(readlink -f "$resolv" 2>/dev/null || true)"
-  [[ -n "$real" && -f "$real" ]] || real="$resolv"
+  # 2) 当前生效的文件：只移除误导注释，保留真正的 stub nameserver。
   if [[ -f "$real" ]] && grep -q '127\.0\.0\.53' "$real"; then
     # 仅当它**不是**真正的 nameserver 行时才删
     if ! grep -qE '^[[:space:]]*nameserver[[:space:]]+127\.0\.0\.53([[:space:]]|$)' "$real"; then
@@ -1252,7 +1462,7 @@ fix_resolv_conf_misdetection() {
 
   if [[ "$fixed" == 1 ]]; then
     # 让 resolvconf 用新模板重新生成（失败也不影响：文件本身已经改好了）
-    if command -v resolvconf >/dev/null 2>&1; then
+    if [[ -z "${ROOT:-}" && -z "${SBX_NO_SERVICE:-}" ]] && command -v resolvconf >/dev/null 2>&1; then
       resolvconf -u >/dev/null 2>&1 || true
     fi
     warn "已修掉 /etc/resolv.conf 里会误导 Go 解析器的 systemd-resolved 注释"
@@ -1270,6 +1480,7 @@ setup_services() {
 
   case "$INIT_SYS" in
     systemd)
+      if [[ -n "$ROOT" ]]; then mkdir -p -- "$UNIT_DIR" || return 1; fi
       cat > "$UNIT_DIR"/sing-box.service <<EOF
 [Unit]
 Description=sing-box service
@@ -1287,7 +1498,6 @@ ExecStart=$SB_BIN run -C $SB_DIR
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=infinity
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
 
 [Install]
@@ -1362,11 +1572,14 @@ AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 WantedBy=multi-user.target
 EOF
 # <<< panel-unit
-      systemctl daemon-reload
-      if [[ "$mode" != update ]]; then systemctl enable sing-box sbx-firewall sbx-panel >/dev/null 2>&1; fi
+      if sbx_host_runtime; then
+        systemctl daemon-reload
+        if [[ "$mode" != update ]]; then systemctl enable sing-box sbx-firewall sbx-panel >/dev/null 2>&1; fi
+      fi
       ;;
 
     openrc)
+      if [[ -n "$ROOT" ]]; then mkdir -p -- "$INIT_DIR" || return 1; fi
       cat > "$INIT_DIR"/sing-box <<EOF
 #!/sbin/openrc-run
 name="sing-box"
@@ -1374,9 +1587,10 @@ description="sing-box service"
 command="$SB_BIN"
 command_args="run -C $SB_DIR"
 command_background=true
-pidfile="/run/\${RC_SVCNAME}.pid"
-output_log="/var/log/sing-box.log"
-error_log="/var/log/sing-box.log"
+pidfile="$ROOT/run/\${RC_SVCNAME}.pid"
+# Logs are appended; configure rotation as described in docs/openrc-logs.md.
+output_log="$ROOT/var/log/sing-box.log"
+error_log="$ROOT/var/log/sing-box.log"
 export SBX_DIR="$APP_DIR" SBX_CONF="$PANEL_CONF" SBX_SB_CONF="$SB_CONF"
 start_pre() { "$CORE_BIN" enforce-access; }
 depend() { need net; after sbx-firewall; }
@@ -1396,21 +1610,24 @@ description="SBX traffic panel"
 command="$CORE_BIN"
 command_args="serve"
 command_background=true
-pidfile="/run/\${RC_SVCNAME}.pid"
+pidfile="$ROOT/run/\${RC_SVCNAME}.pid"
 export SBX_CONF="$PANEL_CONF"
-output_log="/var/log/sbx-panel.log"
-error_log="/var/log/sbx-panel.log"
+# Logs are appended; configure rotation as described in docs/openrc-logs.md.
+output_log="$ROOT/var/log/sbx-panel.log"
+error_log="$ROOT/var/log/sbx-panel.log"
 depend() { need net; after sbx-firewall; }
 EOF
       chmod +x "$INIT_DIR/sing-box" "$INIT_DIR/sbx-firewall" "$INIT_DIR/sbx-panel"
-      if [[ "$mode" != update ]]; then
+      if [[ "$mode" != update ]] && sbx_host_runtime; then
         rc-update add sbx-firewall default >/dev/null 2>&1
         rc-update add sing-box default >/dev/null 2>&1
         rc-update add sbx-panel default >/dev/null 2>&1
       fi
       ;;
+    *) return 0 ;;
   esac
-  if [[ "$mode" == update ]]; then ok "服务定义已刷新（保留开机自启设置）";
+  if ! sbx_host_runtime; then ok "已生成沙箱服务定义（未注册到宿主机）"
+  elif [[ "$mode" == update ]]; then ok "服务定义已刷新（保留开机自启设置）"
   else ok "服务已注册（开机自启）"; fi
 }
 
@@ -1429,6 +1646,7 @@ wait_service_active() { # wait_service_active <unit> [最多等几秒]
 }
 
 start_all() {
+  sbx_host_runtime || return 0
   # fw_apply 失败在此处仅告警（启动流程属尽力而为，不能因 -e 中断整个菜单）
   svc_do start sbx-firewall || fw_apply || warn "计数规则应用失败，流量统计可能不准"
   svc_do restart sing-box || svc_do start sing-box
@@ -1441,13 +1659,12 @@ panel_url() {
   local host port listen
   port=$(panel_get port)
   listen=$(panel_get listen)
-  # 默认只监听回环：此时用公网 IP 拼地址是错的（用户点开必然连不上），
-  # 必须显示 127.0.0.1，并让用户知道外网访问需要在「面板设置」里显式切换。
+  # 新装默认 0.0.0.0。用户改为仅监听回环后，只显示实际回环地址。
   if [[ "$listen" == "127.0.0.1" || "$listen" == "localhost" || "$listen" == "::1" ]]; then
-    echo "http://127.0.0.1:$port/"
+    echo "http://$(host_for_uri "$listen"):$port/"
     return 0
   fi
-  host=$(core_node get-host); [[ -z "$host" ]] && host="$(public_ip)"
+  host=$(core_node get-host); [[ -n "$host" ]] || host="$(public_ip)"
   echo "http://$(host_for_uri "$host"):$port/"
 }
 
@@ -1456,10 +1673,20 @@ show_panel_info() {
   printf '%s流量面板%s\n' "$C_B" "$C_RESET"
   printf '  地址: %s%s%s\n' "$C_CYAN" "$(panel_url)" "$C_RESET"
   printf '  令牌: %s%s%s\n' "$C_CYAN" "$(panel_get token)" "$C_RESET"
+  local listen
+  listen=$(panel_get listen) || listen='未知'
+  case "$listen" in
+    127.*|localhost|::1) ;;
+    *) warn "面板监听 $listen：HTTP 不加密，令牌和会话可能被窃听。不要直接开放公网；请用 SSH 隧道，或仅监听本机并配置 HTTPS 反代。" ;;
+  esac
   printf '  状态: %s\n' "$(panel_running && echo "${C_GREEN}运行中${C_RESET}" || echo "${C_RED}未运行${C_RESET}")"
   # 后端恒为 nftables（nftables-only）；这里只报告它当前是否真的可用。
-  printf '  后端: %s\n' "$(nft list tables >/dev/null 2>&1 \
-    && echo "nftables" || echo "${C_RED}nftables 不可用${C_RESET}")"
+  if sbx_host_runtime; then
+    printf '  后端: %s\n' "$(nft list tables >/dev/null 2>&1 \
+      && echo "nftables" || echo "${C_RED}nftables 不可用${C_RESET}")"
+  else
+    printf '  后端: nftables（未探测宿主机）\n'
+  fi
   hr
 }
 
@@ -1476,11 +1703,13 @@ menu_add_node() {
   echo
   printf '请选择: '
   read -r c || true
+  local rc=0
   case "$c" in
-    1) add_vless ;; 2) add_ss ;; 3) add_trojan ;; 4) add_anytls ;; 5) menu_snell ;;
+    1) add_vless || rc=$? ;; 2) add_ss || rc=$? ;; 3) add_trojan || rc=$? ;; 4) add_anytls || rc=$? ;; 5) menu_snell || rc=$? ;;
     0|"") return 0 ;;
     *) warn "无效选择" ;;
   esac
+  [[ "$rc" == 0 ]] || warn "添加操作未完成"
   pause
 }
 
@@ -1511,17 +1740,19 @@ menu_remove_node() {
   printf '输入要删除的节点 ID (回车取消): '
   read -r id || true
   [[ -z "$id" ]] && return 0
-  sbx_lock do_remove_node "$id"
-  local rc=$?
+  local rc=0
+  sbx_lock do_remove_node "$id" || rc=$?
   case $rc in
     0) ok "节点 $id 已删除" ;;
     2) warn "节点已删除，但流量统计规则应用失败" ;;
     *) warn "删除失败" ;;
   esac
-  if [[ $rc -ne 1 ]]; then
+  if [[ "$rc" == 0 || "$rc" == 2 ]]; then
     printf '%s该节点的历史流量数据保留在数据库中。要一并清除吗? [y/N] %s' "$C_DIM" "$C_RESET"
     read -r yn || true
-    [[ "${yn,,}" == "y" ]] && { "$CORE_BIN" reset "node:$id"; }
+    if [[ "${yn,,}" == "y" ]]; then
+      "$CORE_BIN" reset "node:$id" || warn "清除该节点的历史流量失败"
+    fi
   fi
   pause
 }
@@ -1540,8 +1771,9 @@ menu_edit_node() {
   [[ -z "$id" ]] && return 0
   # 取该节点信息
   local info type sni port
-  info=$(core_node info "$id")
-  [[ -z "$info" ]] && { warn "未找到节点 $id"; pause; return 1; }
+  if ! info=$(core_node info "$id") || [[ -z "$info" ]]; then
+    warn "未找到节点 $id，或节点信息读取失败"; pause; return 0
+  fi
   type=$(echo "$info" | cut -f1); sni=$(echo "$info" | cut -f2)
   port=$(echo "$info" | cut -f3)
 
@@ -1553,21 +1785,28 @@ menu_edit_node() {
   [[ -n "$sni" ]] && printf '当前 SNI: %s\n' "$sni"
   echo
 
-  local args=("$id")
+  local args=("$id") changes=()
 
   printf '新端口 (回车不改): '
   read -r np || true
   if [[ -n "$np" ]]; then
     valid_port "$np" || { warn "端口无效"; pause; return 1; }
-    if core_node port-used "$np" >/dev/null 2>&1; then
-      # 允许改成自己当前端口（等于没改）
-      [[ "$np" != "$port" ]] && { warn "端口 $np 已被其它节点占用"; pause; return 1; }
+    if [[ "$np" != "$port" ]]; then
+      local busy=0
+      node_port_busy "$np" || busy=$?
+      case "$busy" in
+        0) warn "端口 $np 已被其它节点占用"; pause; return 1 ;;
+        2) warn "无法检查端口：sbx-core 不存在或执行失败"; pause; return 1 ;;
+      esac
+      busy=0
+      port_busy "$np" || busy=$?
+      if [[ "$busy" == 2 ]]; then warn "无法检查端口 $np"; pause; return 1; fi
+      if [[ "$busy" == 0 ]]; then
+        printf '%s端口 %s 已被系统其它进程监听，仍要使用? [y/N] %s' "$C_YEL" "$np" "$C_RESET"
+        read -r yn || true; [[ "${yn,,}" == "y" ]] || { pause; return 1; }
+      fi
     fi
-    port_busy "$np" && [[ "$np" != "$port" ]] && {
-      printf '%s端口 %s 已被系统其它进程监听，仍要使用? [y/N] %s' "$C_YEL" "$np" "$C_RESET"
-      read -r yn || true; [[ "${yn,,}" == "y" ]] || { pause; return 1; }
-    }
-    args+=("--port=$np")
+    args+=("--port=$np"); changes+=("端口→$np")
   fi
 
   # 仅对支持 SNI 的类型询问
@@ -1576,8 +1815,8 @@ menu_edit_node() {
       printf '新 SNI 伪装域名 (回车不改): '
       read -r ns || true
       if [[ -n "$ns" ]]; then
-        [[ "$ns" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || { warn "域名格式无效"; pause; return 1; }
-        args+=("--sni=$ns")
+        sbx_valid_sni "$ns" || { warn "域名格式无效"; pause; return 1; }
+        args+=("--sni=$ns"); changes+=("SNI→$ns")
       fi ;;
     shadowsocks)
       # 显示当前加密算法，允许切换（切换会由 Go 侧重新生成对应长度 key）
@@ -1590,7 +1829,7 @@ menu_edit_node() {
         1|2)
           new_method="2022-blake3-aes-$([[ "$mc" == 1 ]] && echo 128 || echo 256)-gcm"
           if [[ "$new_method" != "$cur_method" ]]; then
-            args+=("--method=$new_method")
+            args+=("--method=$new_method"); changes+=("加密算法已更新")
           fi ;;
         "") : ;;
         *) warn "无效选择，跳过算法修改"; ;;
@@ -1605,17 +1844,16 @@ menu_edit_node() {
       if [[ "${rp,,}" == "y" ]]; then
         local new_psk
         new_psk=$("$CORE_BIN" secret hex 32) || { warn "生成 PSK 失败"; pause; return 1; }
-        args+=("--psk=$new_psk")
+        args+=("--psk=$new_psk"); changes+=("PSK 已更新")
       fi ;;
   esac
 
   if [[ ${#args[@]} -le 1 ]]; then echo "未做任何修改"; pause; return 0; fi
 
-  local out rc
-  out=$(sbx_lock do_edit_node "${args[@]}" 2>/dev/null)
-  rc=$?
+  local rc=0
+  sbx_lock do_edit_node "${args[@]}" || rc=$?
   if [[ $rc -eq 0 ]]; then
-    ok "节点 $id 已更新：$(printf '%s' "$out" | tr ',' '\n' | grep -o '端口→[0-9]*\|SNI→[^"]*\|PSK 已更新' | paste -sd' ' - || echo '完成')"
+    ok "节点 $id 已更新：${changes[*]}"
     printf '%s提示：修改后分享链接已变化，请重新导出发给客户端。%s\n' "$C_DIM" "$C_RESET"
     hr
     local h6; h6=$(core_node get-host6)
@@ -1627,17 +1865,13 @@ menu_edit_node() {
   elif [[ $rc -eq 2 ]]; then
     warn "节点已更新，但流量统计规则应用失败"
   else
-    warn "$out"
+    warn "节点修改失败"
   fi
   pause
 }
 do_edit_node() {
-  local out
-  out=$("$CORE_BIN" node edit "$@" 2>&1) || { echo "$out" >&2; return 1; }
+  "$CORE_BIN" node edit "$@" >/dev/null || return 1
   commit_node
-  local rc=$?
-  echo "$out"
-  return $rc
 }
 
 menu_show_links() {
@@ -1659,6 +1893,41 @@ menu_show_links() {
   pause
 }
 
+sbx_change_panel_port() {
+  local raw="$1" port old busy=0
+  if ! [[ "$raw" =~ ^0*([0-9]{1,5})$ ]]; then
+    warn "无效端口"
+    return 1
+  fi
+  port=$((10#${BASH_REMATCH[1]}))
+  valid_port "$port" || { warn "无效端口"; return 1; }
+  old=$(panel_get port) || { warn "无法读取面板当前端口"; return 1; }
+  if [[ "$port" == "$old" ]]; then
+    ok "面板已使用端口 $port"
+    return 0
+  fi
+  port_busy "$port" || busy=$?
+  case "$busy" in
+    0) warn "端口 $port 已被占用，未修改配置"; return 1 ;;
+    1) ;;
+    *) warn "无法确认端口 $port 是否空闲，未修改配置"; return 1 ;;
+  esac
+  if ! panel_set port "$port"; then
+    warn "设置端口失败"
+    return 1
+  fi
+  if ! sbx_host_runtime || { svc_do restart sbx-panel && wait_service_active sbx-panel 3; }; then
+    ok "已改为 $port"
+    return 0
+  fi
+  if panel_set port "$old" && svc_do restart sbx-panel && wait_service_active sbx-panel 3; then
+    warn "新端口启动失败，已恢复原端口 $old"
+  else
+    err "新端口启动失败，且无法确认恢复原端口 $old"
+  fi
+  return 1
+}
+
 menu_panel_settings() {
   banner
   printf '%s面板设置与统计维护%s\n\n' "$C_B" "$C_RESET"
@@ -1674,9 +1943,11 @@ menu_panel_settings() {
   read -r c || true
   case "$c" in
     1) printf '新端口: '; read -r p || true
-       valid_port "$p" && { panel_set port "$p"; svc_do restart sbx-panel; ok "已改为 $p"; } || warn "无效端口" ;;
+       sbx_change_panel_port "$p" || : ;;
     2) printf '采集间隔秒数 (1-60): '; read -r n || true
-       [[ "$n" =~ ^[0-9]+$ ]] && ((n>=1 && n<=60)) && { panel_set interval "$n"; svc_do restart sbx-panel; ok "已改为 ${n}s"; } || warn "无效数值" ;;
+       if ! [[ "$n" =~ ^([1-9]|[1-5][0-9]|60)$ ]]; then warn "无效数值"
+       elif panel_set interval "$n" && svc_do restart sbx-panel; then ok "已改为 ${n}s"
+       else warn "设置采集间隔或重启面板失败"; fi ;;
     3) if [[ "$(panel_get listen)" == "127.0.0.1" ]]; then
          panel_set listen "0.0.0.0"; ok "已允许公网访问"
        else
@@ -1709,14 +1980,20 @@ menu_service() {
   printf '请选择: '
   read -r c || true
   case "$c" in
-    1) start_all; ok "已重启" ;;
-    2) svc_do stop sing-box; svc_do stop sbx-panel; ok "已停止" ;;
-    3) start_all; ok "已启动" ;;
-    4) if fw_apply; then ok "计数规则已重建"; else err "计数规则重建失败，请检查系统防火墙工具"; fi ;;
-    5) if [[ "$INIT_SYS" == "systemd" ]]; then journalctl -u sing-box -n 60 --no-pager
-       else tail -n 60 /var/log/sing-box.log 2>/dev/null || echo "(暂无日志)"; fi ;;
-    6) if [[ "$INIT_SYS" == "systemd" ]]; then journalctl -u sbx-panel -n 60 --no-pager
-       else tail -n 60 /var/log/sbx-panel.log 2>/dev/null || echo "(暂无日志)"; fi ;;
+    1|2|3|4) if ! sbx_host_runtime; then warn "沙箱或仅配置模式不操作宿主机服务或防火墙"
+       else
+         case "$c" in
+           1) start_all; ok "已重启" ;;
+           2) svc_do stop sing-box; svc_do stop sbx-panel; ok "已停止" ;;
+           3) start_all; ok "已启动" ;;
+           4) if fw_apply; then ok "计数规则已重建"; else err "计数规则重建失败，请检查系统防火墙工具"; fi ;;
+         esac
+       fi ;;
+    5|6) local name=sing-box
+       [[ "$c" != 6 ]] || name=sbx-panel
+       if [[ "$INIT_SYS" == systemd ]]; then
+         if sbx_host_runtime; then journalctl -u "$name" -n 60 --no-pager; else echo "(未读取宿主机日志)"; fi
+       else tail -n 60 "$ROOT/var/log/$name.log" 2>/dev/null || echo "(暂无日志)"; fi ;;
     0|"") return 0 ;;
     *) warn "无效选择" ;;
   esac
@@ -1770,14 +2047,40 @@ SB_BACKUP_PATH=""
 #
 # 备份失败时返回 1，调用方必须保留目录——宁可留残留，也不静默毁数据。
 backup_sb_dir() {
-  local bkdir="$ROOT/var/backups" dest
-  dest="$bkdir/sbx-sing-box-$(date +%Y%m%d-%H%M%S).tar.gz"
-  mkdir -p "$bkdir" 2>/dev/null || return 1
-  if ! tar -czf "$dest" -C "$(dirname "$SB_DIR")" "$(basename "$SB_DIR")" 2>/dev/null; then
-    rm -f "$dest" 2>/dev/null || true
-    return 1
-  fi
-  chmod 600 "$dest" 2>/dev/null || true
+  local bkdir="$ROOT/var/backups" dest mode stamp tmp archive parent name
+  SB_BACKUP_PATH=""
+  dest=$(
+    umask 077 || { printf '%s\n' '无法设置备份权限掩码' >&2; exit 1; }
+    if [[ -L "$bkdir" ]] || ! mkdir -p -- "$bkdir" 2>/dev/null || [[ ! -O "$bkdir" ]] \
+      || ! mode=$(stat -c %a -- "$bkdir") || [[ ! "$mode" =~ ^[0-7]{3,4}$ ]] \
+      || (( 8#$mode & 022 )); then
+      printf '无法使用不安全或不可访问的备份目录：%s\n' "$bkdir" >&2
+      exit 1
+    fi
+    if ! parent=$(dirname -- "$SB_DIR") || ! name=$(basename -- "$SB_DIR") \
+      || ! stamp=$(date +%Y%m%d-%H%M%S); then
+      printf '%s\n' '无法确定备份路径' >&2
+      exit 1
+    fi
+    tmp=$(mktemp -d -- "$bkdir/.sbx-backup.XXXXXXXX") \
+      || { printf '%s\n' '无法创建备份暂存目录' >&2; exit 1; }
+    trap 'rm -rf -- "$tmp" || printf "无法清理备份暂存目录：%s\n" "$tmp" >&2' EXIT
+    trap 'exit 1' HUP INT TERM
+    archive="$tmp/archive.tar.gz"
+    if ! touch -- "$archive" || ! chmod 600 -- "$archive" \
+      || [[ $(stat -c %a -- "$archive") != 600 ]]; then
+      printf '%s\n' '无法安全暂存备份（需要权限 600）' >&2
+      exit 1
+    fi
+    if ! tar -czf - -C "$parent" -- "$name" > "$archive" || [[ ! -s "$archive" ]]; then
+      printf '打包 sing-box 目录失败：%s\n' "$SB_DIR" >&2
+      exit 1
+    fi
+    # 只发布完整归档；硬链接若遇到既有同名项（包括符号链接）会失败，不会覆盖。
+    dest="$bkdir/sbx-sing-box-$stamp-${tmp##*.}.tar.gz"
+    ln -T -- "$archive" "$dest" || { printf '无法发布备份文件：%s\n' "$dest" >&2; exit 1; }
+    printf '%s\n' "$dest"
+  ) || return 1
   SB_BACKUP_PATH="$dest"
   return 0
 }
@@ -1794,23 +2097,29 @@ uninstall_all() {
   read -r yn || true
   [[ "${yn,,}" == "y" ]] || { echo "已取消"; pause; return 0; }
 
-  upgrade_stop_consumers || die "无法停止 sing-box 或面板，拒绝清除访问规则"
-  svc_do stop sbx-firewall || die "无法停止计数服务，已中止卸载"
-  fw_clear || die "无法清除 SBX 防火墙规则，已中止卸载"
-  # 若这台机器曾装过旧版（≤ v3.0.8），把它当年创建的 iptables 链一并清掉，
-  # 否则卸载后 SBX_IN/SBX_OUT 会残留在内核里直到重启。
-  cleanup_legacy_backend
-  case "$INIT_SYS" in
-    systemd)
-      systemctl disable sing-box sbx-panel sbx-firewall >/dev/null 2>&1 || true
-      rm -f "$UNIT_DIR"/{sing-box,sbx-panel,sbx-firewall}.service
-      systemctl daemon-reload ;;
-    openrc)
-      for s in sbx-panel sing-box sbx-firewall; do
-        rc-update del "$s" default >/dev/null 2>&1 || true
-        rm -f "$INIT_DIR/$s"
-      done ;;
-  esac
+  if sbx_host_runtime; then
+    upgrade_stop_consumers || die "无法停止 sing-box 或面板，拒绝清除访问规则"
+    svc_do stop sbx-firewall || die "无法停止计数服务，已中止卸载"
+    fw_clear || die "无法清除 SBX 防火墙规则，已中止卸载"
+    # 旧版（≤ v3.0.8）留下的 SBX_IN/SBX_OUT 链也要清理。
+    cleanup_legacy_backend
+    case "$INIT_SYS" in
+      systemd)
+        systemctl disable sing-box sbx-panel sbx-firewall >/dev/null 2>&1 || true
+        rm -f "$UNIT_DIR"/{sing-box,sbx-panel,sbx-firewall}.service
+        systemctl daemon-reload ;;
+      openrc)
+        local s
+        for s in sbx-panel sing-box sbx-firewall; do
+          rc-update del "$s" default >/dev/null 2>&1 || true
+          rm -f "$INIT_DIR/$s"
+        done ;;
+    esac
+  else
+    # 沙箱可能没有 init 管理器，也可能包含两种生成的定义。
+    rm -f "$UNIT_DIR"/{sing-box,sbx-panel,sbx-firewall}.service \
+      "$INIT_DIR"/{sing-box,sbx-panel,sbx-firewall}
+  fi
   rm -rf "$APP_DIR" "$SB_BIN" "$CMD_PATH" "$CORE_BIN" "$BIN_DIR/libcronet.so"
   # sing-box 目录单独处理：可能含用户自有配置（见 backup_sb_dir 注释）。
   # 空目录（安装未完成）直接删；非空先备份，备份失败则保留。
@@ -1827,7 +2136,7 @@ uninstall_all() {
     rm -rf "$SB_DIR"
   fi
   # 清理安装期写入的 sysctl 持久化文件（conntrack 字节计费）
-  rm -f /etc/sysctl.d/99-sbx-conntrack.conf 2>/dev/null || true
+  rm -f -- "$CONNTRACK_SYSCTL_CONF" 2>/dev/null || true
   ok "已卸载"
   exit 0
 }
@@ -1855,7 +2164,7 @@ main_menu() {
     read -r c || true
     case "$c" in
       1) menu_settings ;;
-      2) do_update; pause ;;
+      2) do_update || warn "在线升级未完成"; pause ;;
       3) uninstall_all ;;
       0|"") clear 2>/dev/null || true; exit 0 ;;
       *) warn "无效选择"; sleep 1 ;;
@@ -1874,32 +2183,55 @@ notify_safe_value() {
 
 # menu_notify_setup 收集 webhook / 密钥 / 时刻并写入配置。
 #
-# 刻意把"拼配置"交给 sbx-core 的 notify-config enable（按位置收参数），
-# 而不是在 shell 里拼 JSON：shell 拼 JSON 极易写出坏结构，而且报错极难查。
+# notify-config set already accepts a config file. Encode through stdin so
+# neither the webhook nor the signing key appears in jq or sbx-core argv.
 menu_notify_setup() {
   banner
   printf '%s配置飞书日报%s\n\n' "$C_B" "$C_RESET"
   echo "在飞书群里添加「自定义机器人」后会得到一条 webhook 地址，形如:"
   printf '  %shttps://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx%s\n\n' "$C_DIM" "$C_RESET"
 
+  command -v jq >/dev/null || { warn "请先安装 jq 才能安全写入飞书凭据；未修改配置"; return 0; }
   local hook secret at
   printf 'Webhook 地址: '
-  read -r hook || true
+  IFS= read -rs hook || return 0
+  echo
   hook="${hook//[[:space:]]/}"
   [[ -n "$hook" ]] || { warn "不能为空"; return 0; }
   notify_safe_value "$hook" || { warn "输入含控制字符，已取消"; return 0; }
 
   printf '签名密钥 secret（可选，直接回车表示不用签名）: '
-  read -r secret || true
+  IFS= read -rs secret || return 0
+  echo
   notify_safe_value "$secret" || { warn "输入含控制字符，已取消"; return 0; }
 
   printf '每天几点发送日报 [00:05]: '
   read -r at || true
   [[ -n "$at" ]] || at="00:05"
+  notify_safe_value "$at" || { warn "输入含控制字符，已取消"; return 0; }
 
-  local rc=0
-  "$CORE_BIN" notify-config enable "$hook" "$secret" "$at" || rc=$?
-  [[ $rc -eq 0 ]] || return 0
+  if ! (
+    # Do not echo the printf arguments in a traced shell.
+    { set +x; } 2>/dev/null
+    set -o pipefail
+    umask 077
+    local stage
+    stage=$(mktemp -d "$APP_DIR/.notify-config.XXXXXXXX") || exit 1
+    trap 'rm -rf -- "$stage"' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    if ! printf '%s\n' "$hook" "$secret" "$at" | jq -Rn '[inputs] | if length == 3 then
+      {enabled:true,type:"feishu",webhook:.[0],secret:.[1],daily_at:.[2]}
+      else error("invalid notify input") end' > "$stage/notify.json"; then
+      exit 1
+    fi
+    chmod 600 "$stage/notify.json" || exit 1
+    "$CORE_BIN" notify-config set "$stage/notify.json"
+  ); then
+    warn "飞书配置未保存"
+    return 0
+  fi
   echo
   echo "接着选「发送测试推送」，确认飞书群里能收到卡片。"
 }
@@ -1999,17 +2331,23 @@ menu_settings() {
 
 # ---------------------------------------------------------------- 安装
 install_self() {
-  local source="${BASH_SOURCE[0]}" wrapper
+  local source="${BASH_SOURCE[0]}"
   install -d -m 0755 "$BIN_DIR"
   # Fresh install and update execute from a verified regular staging file.
   [[ -f "$source" ]] || die "无法持久化已验证安装器"
   if [[ ! "$source" -ef "$SELF_PATH" ]]; then
-    upgrade_replace "$source" "$SELF_PATH" 0755
+    upgrade_replace "$source" "$SELF_PATH" 0755 || die "无法原子替换管理脚本"
   fi
-  wrapper=$(mktemp "$BIN_DIR/.sbx-wrapper.XXXXXXXX")
-  printf '#!/usr/bin/env bash\nexec bash %q "$@"\n' "$SELF_PATH" > "$wrapper"
-  chmod 0755 "$wrapper"
-  mv -fT -- "$wrapper" "$CMD_PATH"
+  (
+    local wrapper
+    wrapper=$(mktemp "$BIN_DIR/.sbx-wrapper.XXXXXXXX") || exit 1
+    trap 'rm -f -- "$wrapper"' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    printf '#!/usr/bin/env bash\nexec bash %q "$@"\n' "$SELF_PATH" > "$wrapper" &&
+      chmod 0755 "$wrapper" && mv -fT -- "$wrapper" "$CMD_PATH"
+  ) || die "无法原子替换 sbx 命令"
 }
 
 # ---------------------------------------------------------------- 在线安装/升级
@@ -2022,7 +2360,7 @@ resolve_dist_sha() {
     rev=$(awk '$2=="refs/heads/dist" {print $1}' <<< "$refs")
   fi
   if [[ -z "$rev" ]]; then
-    refs=$(curl -fsSL -m 15 "https://api.github.com/repos/$DIST_REPO/git/ref/heads/dist") || return 1
+    refs=$(curl -q --globoff -fsS --proto =https -m 15 "https://api.github.com/repos/$DIST_REPO/git/ref/heads/dist") || return 1
     rev=$(sed -nE 's/.*"sha"[[:space:]]*:[[:space:]]*"([0-9a-f]{40})".*/\1/p' <<< "$refs")
   fi
   [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || return 1
@@ -2038,17 +2376,19 @@ set_dist_pin() {
 fetch_dist_script() { # <private staging directory> [independent candidate anchor]
   local dir="$1" anchor="${2:-}" want count
   info "从官方 GitHub 分发提交 $DIST_SHA 拉取安装器..."
-  curl -fsSL -m 60 -o "$dir/sbx.sh" "$DIST_BASE/sbx.sh" || die "无法下载固定提交的安装器"
-  curl -fsSL -m 60 -o "$dir/sbx.sh.sha256" "$DIST_BASE/sbx.sh.sha256" || die "无法下载固定提交的脚本校验和"
+  curl -q --globoff -fsS --proto =https -m 60 -o "$dir/sbx.sh" "$DIST_BASE/sbx.sh" || die "无法下载固定提交的安装器"
+  curl -q --globoff -fsS --proto =https -m 60 -o "$dir/sbx.sh.sha256" "$DIST_BASE/sbx.sh.sha256" || die "无法下载固定提交的脚本校验和"
   count=$(awk '$2=="sbx.sh" {c++} END {print c+0}' "$dir/sbx.sh.sha256")
   want=$(awk '$2=="sbx.sh" {print $1}' "$dir/sbx.sh.sha256")
-  [[ "$count" == 1 ]] && verify_remote_script "$dir/sbx.sh" "$want" "官方 sbx.sh.sha256" \
-    || die "分发脚本校验失败，未改动现有安装"
+  if [[ "$count" != 1 ]] || ! verify_remote_script "$dir/sbx.sh" "$want" "官方 sbx.sh.sha256"; then
+    die "分发脚本校验失败，未改动现有安装"
+  fi
   if [[ -n "$anchor" ]]; then
     verify_remote_script "$dir/sbx.sh" "$anchor" "候选脚本显式哈希" || die "候选脚本不匹配显式哈希，未改动现有安装"
   fi
-  bash -n "$dir/sbx.sh" && [[ "$(remote_version "$dir/sbx.sh")" =~ ^[0-9]+(\.[0-9]+)+$ ]] \
-    || die "分发脚本语法或版本标记无效，未改动现有安装"
+  if ! bash -n "$dir/sbx.sh" || ! [[ "$(remote_version "$dir/sbx.sh")" =~ ^[0-9]+(\.[0-9]+)+$ ]]; then
+    die "分发脚本语法或版本标记无效，未改动现有安装"
+  fi
   grep -Fxq "DIST_PROTOCOL=\"$DIST_PROTOCOL\"" "$dir/sbx.sh" \
     || die "分发脚本不支持事务升级协议；请选择新发布提交"
   DIST_SCRIPT_SHA="${want,,}"
@@ -2061,20 +2401,23 @@ remote_version() {  # 从下载的脚本里提取 APP_VERSION
 # Compare upstream sing-box versions using their numeric release base and
 # final-vs-prerelease ordering (the published baseline is a final release).
 sb_version_key() {  # <ver> → 输出四段数字
-  local base="$1" rel=0
-  if [[ "$base" == *-* ]]; then base="${base%%-*}"; else rel=1; fi
-  local a b c
-  IFS=. read -r a b c <<< "$base"
-  echo "$((10#$a)) $((10#$b)) $((10#${c:-0})) $rel"
+  local version="$1" rel=0 a b c
+  local pattern='^v?([0-9]{1,9})\.([0-9]{1,9})(\.([0-9]{1,9}))?(-[[:alnum:]-]+(\.[[:alnum:]-]+)*)?(\+[[:alnum:]-]+(\.[[:alnum:]-]+)*)?$'
+  [[ "$version" =~ $pattern ]] || return 1
+  a=${BASH_REMATCH[1]} b=${BASH_REMATCH[2]} c=${BASH_REMATCH[4]:-0}
+  if [[ -z "${BASH_REMATCH[5]}" ]]; then rel=1; fi
+  printf '%s %s %s %s\n' "$((10#$a))" "$((10#$b))" "$((10#$c))" "$rel"
 }
 sb_version_ge() {
-  local ka kb
-  read -ra ka <<< "$(sb_version_key "$1")"
-  read -ra kb <<< "$(sb_version_key "$2")"
-  local i
+  local key i
+  local -a ka kb
+  key=$(sb_version_key "$1") || return 1
+  read -r -a ka <<< "$key"
+  key=$(sb_version_key "$2") || return 1
+  read -r -a kb <<< "$key"
   for i in 0 1 2 3; do
-    (( ${ka[i]} > ${kb[i]} )) && return 0
-    (( ${ka[i]} < ${kb[i]} )) && return 1
+    (( ka[i] > kb[i] )) && return 0
+    (( ka[i] < kb[i] )) && return 1
   done
   return 0
 }
@@ -2088,8 +2431,12 @@ do_update() (
   [[ -z "$force" || "$force" == --force ]] || die "用法: sbx --update [--force]"
   rev=$(resolve_dist_sha) || die "无法解析官方 dist 提交，未改动现有安装"
   set_dist_pin "$rev"
-  staging=$(mktemp -d)
+  umask 077
+  staging=$(mktemp -d) || die "无法创建升级暂存目录，未改动现有安装"
   trap 'rm -rf -- "$staging"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   fetch_dist_script "$staging" "${SBX_UPDATE_SHA256:-}"
   SBX_SCRIPT_SHA256="$DIST_SCRIPT_SHA" bash "$staging/sbx.sh" --apply-update "$rev" "$force"
 )
@@ -2099,9 +2446,13 @@ bootstrap_install() (
   require_root
   rev=$(resolve_dist_sha) || die "无法解析官方 dist 提交，未开始安装"
   set_dist_pin "$rev"
-  staging=$(mktemp -d)
+  umask 077
+  staging=$(mktemp -d) || die "无法创建安装暂存目录"
   trap 'rm -rf -- "$staging"' EXIT
-  fetch_dist_script "$staging" "${SBX_SCRIPT_SHA256:-}"
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  fetch_dist_script "$staging"
   SBX_SCRIPT_SHA256="$DIST_SCRIPT_SHA" bash "$staging/sbx.sh" --install-dist "$rev"
 )
 
@@ -2109,7 +2460,7 @@ bootstrap_install() (
 # probe the actual HTTP listener (not an external reverse proxy).
 upgrade_health() {
   local want_sb="$1" want_panel="$2" addr="" listen port sample good=0 valid
-  [[ -n "${SBX_NO_SERVICE:-}" ]] && return 0
+  sbx_host_runtime || return 0
   if [[ "$want_panel" == 1 ]]; then
     listen=$(panel_get listen) || return 1
     port=$(panel_get port) || return 1
@@ -2166,35 +2517,43 @@ upgrade_snapshot() {
   for i in "${!UPGRADE_PATHS[@]}"; do
     item="${UPGRADE_PATHS[i]}"
     # NUL-separated paths, in backup slot order; absent files have no slot.
-    printf '%s\0' "$item" >> "$UPGRADE_DIR/paths"
+    printf '%s\0' "$item" >> "$UPGRADE_DIR/paths" || return 1
     if [[ -e "$item" || -L "$item" ]]; then
-      cp -a -- "$item" "$UPGRADE_DIR/snapshot/$i"
+      cp -a -- "$item" "$UPGRADE_DIR/snapshot/$i" || return 1
     fi
   done
   printf 'sing-box=%s\nsbx-panel=%s\n' "$UPGRADE_SB_ACTIVE" "$UPGRADE_PANEL_ACTIVE" > "$UPGRADE_DIR/services"
 }
 
+upgrade_restore_path() {
+  local backup="$1" item="$2" tmp
+  if [[ ! -e "$backup" && ! -L "$backup" ]]; then
+    # No slot means the path did not exist at snapshot time.
+    rm -rf -- "$item"
+    return $?
+  fi
+  # Stage on the destination filesystem without consuming the saved backup.
+  # A rule cache directory needs removal before rename; binaries do not.
+  tmp=$(mktemp -d "${item%/*}/.sbx-restore.XXXXXXXX") || return 1
+  if ! cp -a -- "$backup" "$tmp/item" \
+     || { [[ -d "$item" && ! -L "$item" ]] && ! rm -rf -- "$item"; } \
+     || ! mv -fT -- "$tmp/item" "$item"; then
+    rm -rf -- "$tmp" || true
+    return 1
+  fi
+  rmdir -- "$tmp" || warn "无法清除回滚临时目录：$tmp"
+}
+
 upgrade_restore_files() {
-  local item backup i tmp
+  local item i rc=0
   for i in "${!UPGRADE_PATHS[@]}"; do
     item="${UPGRADE_PATHS[i]}"
-    backup="$UPGRADE_DIR/snapshot/$i"
-    if [[ -e "$backup" || -L "$backup" ]]; then
-      # Stage the replacement on the destination filesystem. Rule caches can
-      # be directories; unlike binaries they need a remove before rename.
-      tmp=$(mktemp -d "${item%/*}/.sbx-restore.XXXXXXXX") || return 1
-      if ! cp -a -- "$backup" "$tmp/item" \
-         || { [[ -d "$item" && ! -L "$item" ]] && ! rm -rf -- "$item"; } \
-         || ! mv -fT -- "$tmp/item" "$item"; then
-        rm -rf -- "$tmp" || true
-        err "未能恢复: $item"
-        return 1
-      fi
-      rmdir -- "$tmp" || return 1
-    else
-      rm -rf -- "$item" || return 1
+    if ! upgrade_restore_path "$UPGRADE_DIR/snapshot/$i" "$item"; then
+      err "未能恢复: $item"
+      rc=1
     fi
   done
+  return "$rc"
 }
 
 upgrade_restore() {
@@ -2206,7 +2565,7 @@ upgrade_restore() {
   fi
   upgrade_stop_consumers || return 1
   upgrade_restore_files || return 1
-  if [[ "$INIT_SYS" == systemd && -z "${SBX_NO_SERVICE:-}" ]]; then
+  if [[ "$INIT_SYS" == systemd ]] && sbx_host_runtime; then
     systemctl daemon-reload || return 1
   fi
   "$CORE_BIN" version >/dev/null && "$SB_BIN" version >/dev/null || return 1
@@ -2221,47 +2580,72 @@ upgrade_exit() {
   local rc="$1"
   trap - EXIT
   trap '' HUP INT TERM
-  if [[ "$rc" == 0 || "$UPGRADE_DIRTY" == 0 ]]; then
+  if [[ "$UPGRADE_COMMITTED" == 1 || "$UPGRADE_DIRTY" == 0 ]]; then
     if ! rm -rf -- "$UPGRADE_DIR"; then warn "无法清除升级工作目录：$UPGRADE_DIR"; fi
-    if [[ "$UPGRADE_COMMITTED" == 1 ]]; then ok "升级完成 → v$APP_VERSION ($DIST_SHA)"; fi
-  elif upgrade_restore; then
-    err "升级失败；已恢复原文件并验证升级前的服务状态"
-    rm -rf -- "$UPGRADE_DIR" || warn "无法清除升级备份：$UPGRADE_DIR"
+    if [[ "$rc" == 0 && "$UPGRADE_COMMITTED" == 1 ]]; then ok "升级完成 → v$APP_VERSION ($DIST_SHA)"; fi
   else
-    err "升级失败，且无法确认回滚完成；保留备份：$UPGRADE_DIR"
-    rc=1
+    [[ "$rc" != 0 ]] || rc=1
+    if upgrade_restore; then
+      err "升级失败；已恢复原文件并验证升级前的服务状态"
+      rm -rf -- "$UPGRADE_DIR" || warn "无法清除升级备份：$UPGRADE_DIR"
+    else
+      err "升级失败，且无法确认回滚完成；保留备份：$UPGRADE_DIR"
+    fi
   fi
   exit "$rc"
 }
 
-stage_upgrade_binaries() (
+stage_upgrade_binaries() {
   local old_core="$CORE_BIN" old_sb="$SB_BIN" cur_sb
-  BIN_DIR="$UPGRADE_DIR/stage"
-  CORE_BIN="$BIN_DIR/sbx-core"
-  SB_BIN="$BIN_DIR/sing-box"
+  local BIN_DIR="$UPGRADE_DIR/stage"
+  local CORE_BIN="$BIN_DIR/sbx-core" SB_BIN="$BIN_DIR/sing-box"
   if [[ -f "$old_core" ]]; then cp -p -- "$old_core" "$CORE_BIN"; fi
   install_sbx_core
-  cur_sb=$("$old_sb" version | awk 'NR==1 {sub(/^v/, "", $3); print $3}')
-  [[ "$cur_sb" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]] || die "无法识别已安装 sing-box 的版本"
+  cur_sb=$("$old_sb" version) || die "无法运行已安装的 sing-box"
+  read -r _ _ cur_sb _ <<< "$cur_sb"
+  sb_version_key "$cur_sb" >/dev/null || die "无法识别已安装 sing-box 的版本"
   if [[ -z "$SB_VERSION_PIN" ]] && ! sb_version_ge "$cur_sb" "$SB_VERSION_DEFAULT"; then
     info "sing-box 内核 $cur_sb 低于发布基线 $SB_VERSION_DEFAULT，随升级更新内核..."
-    install_sing_box force
-  fi
-)
-
-upgrade_replace() { # same-filesystem rename without truncating the running file
-  local src="$1" dest="$2" mode="$3" tmp
-  tmp=$(mktemp "${dest%/*}/.sbx-upgrade.XXXXXXXX") || return 1
-  if ! install -m "$mode" -- "$src" "$tmp" || ! mv -fT -- "$tmp" "$dest"; then
-    rm -f -- "$tmp"
-    return 1
+    install_sing_box force stage
   fi
 }
+
+upgrade_preflight() {
+  sbx_host_runtime || return 0
+  # Host packages are outside the rollback boundary. Check APT state and only
+  # refresh/install when an upgrade actually needs the missing dependency.
+  if [[ "$PKG" == apt ]]; then
+    apt-get --simulate check >/dev/null || die "APT 依赖预检失败；请先修复软件包状态，现有安装未改动"
+  fi
+  if ! command -v nft >/dev/null 2>&1; then
+    [[ -z "${SBX_NO_SERVICE:-}" ]] || die "仅配置模式不会安装依赖；请先安装：$(pkg_install_hint nftables)"
+    if [[ "$PKG" == apt ]]; then
+      apt-get update -qq || die "刷新 APT 索引失败；未替换 SBX 文件"
+    fi
+    if ! pkg_install nftables || ! command -v nft >/dev/null 2>&1; then
+      die "安装 nftables 失败；未替换 SBX 文件。请手动安装：$(pkg_install_hint nftables)"
+    fi
+  fi
+  nft list tables >/dev/null || die "nftables 不可用；未改动现有安装"
+}
+
+upgrade_replace() ( # same-filesystem rename without truncating the running file
+  local src="$1" dest="$2" mode="$3" tmp
+  umask 077
+  tmp=$(mktemp "${dest%/*}/.sbx-upgrade.XXXXXXXX") || exit 1
+  trap 'rm -f -- "$tmp"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  install -m "$mode" -- "$src" "$tmp" && mv -fT -- "$tmp" "$dest"
+)
 
 apply_update() {
   local force="$1" nodes nft_conf
   [[ -f "$PANEL_CONF" && -x "$CORE_BIN" && -x "$SB_BIN" ]] || die "未检测到完整 SBX 安装，无法升级"
   upgrade_access_pending && die "存在未完成的访问控制事务，拒绝升级"
+  [[ ! -e "$BIN_DIR/.sing-box-transaction" && ! -L "$BIN_DIR/.sing-box-transaction" ]] \
+    || die "存在未完成的内核升级，请先检查 $BIN_DIR/.sing-box-transaction"
   UPGRADE_DIR="$APP_DIR/.upgrade-transaction"
   mkdir -m 0700 -- "$UPGRADE_DIR" || die "无法创建升级目录（如有上次保留的备份，请先检查 $UPGRADE_DIR）"
   UPGRADE_DIRTY=0 UPGRADE_COMMITTED=0
@@ -2276,8 +2660,7 @@ apply_update() {
     ok "安装器和后端已是固定分发提交 $DIST_SHA 的版本，无需升级"
     return 0
   fi
-  command -v nft >/dev/null 2>&1 || die "升级需要 nftables；请先安装 nftables"
-  nft list tables >/dev/null 2>&1 || die "nftables 不可用；未改动现有安装"
+  upgrade_preflight
   nodes=$(panel_get nodes_file)
   nft_conf=$(panel_get nft_conf)
   [[ "$nodes" == /* && "$nft_conf" == /* ]] || die "无法确定节点或计数配置路径，拒绝升级"
@@ -2305,30 +2688,40 @@ apply_update() {
   for item in "${UPGRADE_PATHS[@]}"; do
     [[ ! -L "$item" ]] || die "不支持以符号链接保存升级文件：$item"
   done
-  upgrade_snapshot
-  printf '%s\n' "$DIST_SHA" > "$UPGRADE_DIR/generation"
+  upgrade_snapshot || die "无法完整保存升级前的文件，取消升级"
+  printf '%s\n' "$DIST_SHA" > "$UPGRADE_DIR/generation" || die "无法记录升级目标，取消升级"
   UPGRADE_DIRTY=1
   upgrade_stop_consumers || die "无法停止现有服务，取消升级"
-  upgrade_replace "$UPGRADE_DIR/stage/sbx-core" "$CORE_BIN" 0755
+  upgrade_replace "$UPGRADE_DIR/stage/sbx-core" "$CORE_BIN" 0755 || die "无法替换 sbx-core"
   if [[ -f "$UPGRADE_DIR/stage/sing-box" ]]; then
-    upgrade_replace "$UPGRADE_DIR/stage/sing-box" "$SB_BIN" 0755
+    upgrade_replace "$UPGRADE_DIR/stage/sing-box" "$SB_BIN" 0755 || die "无法替换 sing-box"
   fi
   if [[ -f "$UPGRADE_DIR/stage/libcronet.so" ]]; then
-    upgrade_replace "$UPGRADE_DIR/stage/libcronet.so" "$BIN_DIR/libcronet.so" 0644
+    upgrade_replace "$UPGRADE_DIR/stage/libcronet.so" "$BIN_DIR/libcronet.so" 0644 || die "无法替换 libcronet.so"
+  fi
+  if [[ -f "$UPGRADE_DIR/stage/sing-box" ]]; then
+    local kernel_version
+    kernel_version=$("$SB_BIN" version) || die "升级后 sing-box 版本检查失败"
+    read -r _ _ kernel_version _ <<< "$kernel_version"
+    sb_version_key "$kernel_version" >/dev/null || die "升级后 sing-box 版本输出无效"
+    "$SB_BIN" check -c "$SB_CONF" || die "升级后 sing-box 配置校验失败"
   fi
   "$CORE_BIN" config-migrate >/dev/null
   setup_services update
-  core_node rulesets >/dev/null
-  core_node sync >/dev/null
-  # Commit is the managed node transaction (includes checking/access/restart).
-  # Explicit start is only needed if a no-op commit didn't start sing-box.
-  commit_node >/dev/null
-  if [[ -z "${SBX_NO_SERVICE:-}" ]] && ! svc_do status sing-box; then
-    svc_do start sing-box || die "无法启动 sing-box"
+  # Managed ruleset/commit calls may access configured paths or touch nftables.
+  if sbx_host_runtime; then
+    core_node rulesets >/dev/null
+    core_node sync >/dev/null
+    commit_node >/dev/null
   fi
-  fw_apply || die "无法应用计数规则"
-  svc_do start sbx-panel || die "无法启动面板"
-  upgrade_health 1 1 || die "升级后服务健康检查失败"
+  if sbx_host_runtime; then
+    if ! svc_do status sing-box; then
+      svc_do start sing-box || die "无法启动 sing-box"
+    fi
+    fw_apply || die "无法应用计数规则"
+    svc_do start sbx-panel || die "无法启动面板"
+    upgrade_health 1 1 || die "升级后服务健康检查失败"
+  fi
   install_self
   # The EXIT handler owns backup cleanup and emits the success message.
   UPGRADE_COMMITTED=1
@@ -2373,7 +2766,7 @@ do_install() {
   # 面板必须真的进入 active 才算安装成功。systemd 沙箱配置错误（例如
   # ReadWritePaths 指向不存在的路径）在老 systemd 上会让服务无限重启，
   # 而 `systemctl restart` 仍返回 0——不显式校验就会"安装完成"但面板是红的。
-  if ! wait_service_active sbx-panel 10; then
+  if sbx_host_runtime && ! wait_service_active sbx-panel 10; then
     err "面板服务未能进入运行状态（当前: $(svc_do status sbx-panel 2>&1 || echo 未运行)）"
     err "  排查：journalctl -u sbx-panel -n 50 --no-pager"
     err "  若看到 status=226/NAMESPACE：说明服务沙箱路径与实际不符（多为路径不存在）"
@@ -2399,15 +2792,7 @@ do_install() {
   if [[ -n "$host6" ]]; then
     printf '  · 本机支持 IPv6，添加节点后会同时给出 IPv4 与 IPv6 两条分享链接\n'
   fi
-  # 默认回环，因此这里不能暗示"公网是默认"。外网访问必须由用户显式切换监听地址，
-  # 切换时应同时配置 HTTPS 反代或 secure_cookie——否则 Cookie 会以明文跨网络传输。
-  if [[ "$(panel_get listen)" == "127.0.0.1" || "$(panel_get listen)" == "localhost" || "$(panel_get listen)" == "::1" ]]; then
-    printf '  · 面板默认仅本机可访问（127.0.0.1）；如需外网访问，请在「面板设置」中切换监听地址，并配置 HTTPS 反代或 secure_cookie\n'
-    printf '  · 若服务器有云防火墙/安全组，只需放行节点端口；面板端口 %s 无需对公网放行\n' "$(panel_get port)"
-  else
-    printf '  · 面板已配置为对外监听（%s）；请确保已设置强令牌，并建议置于 HTTPS 反代之后或启用 secure_cookie\n' "$(panel_get listen)"
-    printf '  · 若服务器有云防火墙/安全组，请放行节点端口与面板端口 %s\n' "$(panel_get port)"
-  fi
+  printf '  · 只向需要的来源开放节点端口；不要在云防火墙或安全组中公开明文面板端口。\n'
   echo
   if [[ ! -t 0 ]]; then
     printf '%s管道运行模式下不进入交互菜单，安装已完成。运行 sbx 打开菜单设置运维，添加节点请打开面板「配置」页。%s\n' "$C_DIM" "$C_RESET"
@@ -2424,8 +2809,8 @@ main() {
   validate_env || exit 1
   verify_script_integrity || exit 1
   case "${1:-}" in
-    --apply-firewall) require_root; "$CORE_BIN" apply; exit $? ;;
-    --clear-firewall) require_root; "$CORE_BIN" clear; exit $? ;;
+    --apply-firewall) require_root; if sbx_host_runtime; then "$CORE_BIN" apply; fi; exit $? ;;
+    --clear-firewall) require_root; if sbx_host_runtime; then "$CORE_BIN" clear; fi; exit $? ;;
     --panel-url) panel_url; exit 0 ;;
     --show) "$CORE_BIN" show; exit 0 ;;
     --update|update|upgrade) do_update "${2:-}"; exit $? ;;
@@ -2447,7 +2832,9 @@ main() {
       cat <<EOF
 $APP_NAME v$APP_VERSION — sing-box 节点 + 流量面板（Go 后端，单二进制）
 
-安装:   bash <(curl -fsSL $RAW_URL)
+安装:   按项目 README 从固定提交下载并校验，再运行本地脚本
+分发仓: https://github.com/$DIST_REPO/tree/dist
+SBX_RAW_URL 仅为旧版保留，安装及升级不会从它下载。
 菜单:   sbx
 用法:   sbx [选项]
 
